@@ -7,8 +7,8 @@ use tauri::{AppHandle, State};
 use crate::models::{
     sanitize_color, sanitize_font_family, sanitize_font_size, AppData, ConnectionEntry,
     ConnectionGroup, Driver, PreferencesPatch, DEFAULT_EDITOR_FONT_SIZE, DEFAULT_GRID_FONT_SIZE,
-    PAGE_SIZE_MAX, PAGE_SIZE_MIN, QUERY_ROW_LIMIT_MAX, QUERY_ROW_LIMIT_MIN, SIDEBAR_WIDTH_MAX,
-    SIDEBAR_WIDTH_MIN,
+    MAX_AUTO_COLUMN_WIDTH_MAX, MAX_AUTO_COLUMN_WIDTH_MIN, PAGE_SIZE_MAX, PAGE_SIZE_MIN,
+    QUERY_ROW_LIMIT_MAX, QUERY_ROW_LIMIT_MIN, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
 };
 use crate::{persist, query_log, secrets};
 
@@ -135,6 +135,9 @@ fn sanitize_app_data(mut data: AppData) -> Result<AppData, String> {
         .query_row_limit
         .clamp(QUERY_ROW_LIMIT_MIN, QUERY_ROW_LIMIT_MAX);
     data.sidebar_width = data.sidebar_width.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
+    data.max_auto_column_width = data
+        .max_auto_column_width
+        .clamp(MAX_AUTO_COLUMN_WIDTH_MIN, MAX_AUTO_COLUMN_WIDTH_MAX);
     if let Some(window) = &mut data.window {
         window.width = window.width.max(crate::models::MIN_WINDOW_WIDTH);
         window.height = window.height.max(crate::models::MIN_WINDOW_HEIGHT);
@@ -400,6 +403,10 @@ pub fn update_preferences(
     }
     if let Some(value) = patch.sidebar_width {
         data.sidebar_width = value.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
+    }
+    if let Some(value) = patch.max_auto_column_width {
+        data.max_auto_column_width =
+            value.clamp(MAX_AUTO_COLUMN_WIDTH_MIN, MAX_AUTO_COLUMN_WIDTH_MAX);
     }
     persist::save(&app, &data)?;
     Ok(data.clone())

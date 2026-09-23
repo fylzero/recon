@@ -24,10 +24,13 @@ const emit = defineEmits<{
   needRows: [start: number, end: number];
 }>();
 
-const { gridFontSize, showToast } = useApp();
+const { gridFontSize, maxAutoColumnWidth, showToast } = useApp();
+
+const AUTO_FIT_SAMPLE = 200;
 
 const scroller = ref<HTMLDivElement | null>(null);
 const widths = ref<number[]>([]);
+let autoFitPending = false;
 const anchor = ref<CellPosition | null>(null);
 const focus = ref<CellPosition | null>(null);
 
@@ -52,9 +55,46 @@ watch(
     widths.value = props.columns.map((column) => initialColumnWidth(column, charWidth.value));
     anchor.value = null;
     focus.value = null;
+    autoFitPending = true;
+    autoFitColumns();
   },
   { immediate: true },
 );
+
+watch(() => props.rows, autoFitColumns);
+
+watch(maxAutoColumnWidth, () => {
+  autoFitPending = true;
+  autoFitColumns();
+});
+
+function autoFitColumns() {
+  if (!autoFitPending || !props.columns.length) {
+    return;
+  }
+  const sample: RowValues[] = [];
+  for (let index = 0; index < props.rows.length && sample.length < AUTO_FIT_SAMPLE; index += 1) {
+    const row = props.rows[index];
+    if (row) {
+      sample.push(row);
+    }
+  }
+  if (!sample.length) {
+    return;
+  }
+  autoFitPending = false;
+  widths.value = props.columns.map((column, index) => {
+    let chars = column.name.length + 2;
+    for (const row of sample) {
+      const value = row[index];
+      if (value !== undefined) {
+        chars = Math.max(chars, cellDisplay(value).length);
+      }
+    }
+    const width = Math.round(Math.max(chars * charWidth.value + 24, 48));
+    return Math.min(width, Math.max(maxAutoColumnWidth.value, 48));
+  });
+}
 
 const virtualizer = useVirtualizer(
   computed(() => ({

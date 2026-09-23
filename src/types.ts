@@ -56,6 +56,7 @@ export interface AppData {
   pageSize?: number;
   queryRowLimit?: number;
   sidebarWidth?: number;
+  maxAutoColumnWidth?: number;
   window?: WindowState;
 }
 
@@ -67,6 +68,7 @@ export interface PreferencesPatch {
   pageSize?: number;
   queryRowLimit?: number;
   sidebarWidth?: number;
+  maxAutoColumnWidth?: number;
 }
 
 export interface BytesCell {

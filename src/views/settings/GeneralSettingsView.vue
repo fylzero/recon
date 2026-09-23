@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { ref, watch, type Ref } from "vue";
-import { DEFAULT_PAGE_SIZE, DEFAULT_QUERY_ROW_LIMIT, useApp } from "../../composables/useApp";
+import {
+  DEFAULT_MAX_AUTO_COLUMN_WIDTH,
+  DEFAULT_PAGE_SIZE,
+  DEFAULT_QUERY_ROW_LIMIT,
+  useApp,
+} from "../../composables/useApp";
 import {
   CUSTOM_FONT_ID,
   DEFAULT_EDITOR_FONT_SIZE,
@@ -15,6 +20,7 @@ import type { PreferencesPatch } from "../../types";
 
 const PAGE_SIZE_OPTIONS = [100, 200, 300, 500, 1000, 2000];
 const ROW_LIMIT_OPTIONS = [1000, 5000, 10_000, 50_000, 100_000];
+const COLUMN_WIDTH_OPTIONS = [240, 320, 400, 480, 640, 800];
 
 const {
   editorFontFamily,
@@ -23,6 +29,7 @@ const {
   gridFontSize,
   pageSize,
   queryRowLimit,
+  maxAutoColumnWidth,
   savePreferences,
   previewPreferences,
   showToast,
@@ -133,6 +140,29 @@ function selectValue(event: Event) {
               </option>
               <option v-if="!ROW_LIMIT_OPTIONS.includes(queryRowLimit)" :value="queryRowLimit">
                 {{ queryRowLimit.toLocaleString() }}
+              </option>
+            </select>
+          </label>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <h3>Max column width</h3>
+            <p class="muted tiny">
+              Columns size themselves to fit their data when results load, up to this width. You
+              can still drag a column wider.
+            </p>
+          </div>
+          <label class="settings-control">
+            <span class="visually-hidden">Max column width</span>
+            <select
+              :value="maxAutoColumnWidth"
+              @change="save({ maxAutoColumnWidth: selectValue($event) })"
+            >
+              <option v-for="width in COLUMN_WIDTH_OPTIONS" :key="width" :value="width">
+                {{ width }} px{{ width === DEFAULT_MAX_AUTO_COLUMN_WIDTH ? " (default)" : "" }}
+              </option>
+              <option v-if="!COLUMN_WIDTH_OPTIONS.includes(maxAutoColumnWidth)" :value="maxAutoColumnWidth">
+                {{ maxAutoColumnWidth }} px
               </option>
             </select>
           </label>

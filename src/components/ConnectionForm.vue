@@ -31,9 +31,9 @@ const savePassword = ref(initial?.savePassword ?? true);
 const database = ref(initial?.database ?? "");
 const filePath = ref(initial?.filePath ?? "");
 const sslMode = ref<SslMode>(initial?.sslMode ?? "prefer");
-const useColor = ref(Boolean(initial?.headerColor));
-const headerColor = ref(initial?.headerColor || DEFAULT_HEADER_COLOR);
 const groupId = ref<string>(formState.value?.groupId ?? "");
+const colorPicked = ref(Boolean(initial?.headerColor));
+const headerColor = ref(initial?.headerColor || groupColor());
 const hasSavedPassword = ref(false);
 
 const testing = ref(false);
@@ -54,6 +54,16 @@ const passwordPlaceholder = computed(() => {
     return "Asked for each time you connect";
   }
   return hasSavedPassword.value ? "Saved in Keychain" : "Password";
+});
+
+function groupColor() {
+  return groups.value.find((group) => group.id === groupId.value)?.headerColor || DEFAULT_HEADER_COLOR;
+}
+
+watch(groupId, () => {
+  if (!colorPicked.value) {
+    headerColor.value = groupColor();
+  }
 });
 
 watch(driver, (next, previous) => {
@@ -96,7 +106,7 @@ function buildEntry(): ConnectionEntry {
     database: isSqlite.value ? "" : database.value.trim(),
     filePath: isSqlite.value ? filePath.value.trim() : "",
     sslMode: sslMode.value,
-    headerColor: useColor.value ? headerColor.value : "",
+    headerColor: colorPicked.value ? headerColor.value : "",
     savePassword: isSqlite.value ? false : savePassword.value,
   };
 }
@@ -288,15 +298,11 @@ async function submit(connectAfter: boolean) {
           </select>
         </label>
         <div class="modal-label">
-          <span class="muted tiny">Tab color</span>
+          <span class="muted tiny">Color</span>
           <div class="color-choice">
-            <label class="checkbox-row">
-              <input v-model="useColor" type="checkbox" />
-              <span>{{ useColor ? "Custom" : "Use group color" }}</span>
-            </label>
-            <label v-if="useColor" class="color-picker">
+            <label class="color-picker">
               <span class="color-picker-swatch" aria-hidden="true">
-                <input v-model="headerColor" type="color" />
+                <input v-model="headerColor" type="color" @input="colorPicked = true" />
               </span>
             </label>
           </div>

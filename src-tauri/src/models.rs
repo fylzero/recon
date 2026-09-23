@@ -24,6 +24,10 @@ fn default_sidebar_width() -> u32 {
     260
 }
 
+fn default_max_auto_column_width() -> u32 {
+    480
+}
+
 fn default_header_color() -> String {
     "#16323c".into()
 }
@@ -44,6 +48,8 @@ pub const QUERY_ROW_LIMIT_MIN: u32 = 100;
 pub const QUERY_ROW_LIMIT_MAX: u32 = 200_000;
 pub const SIDEBAR_WIDTH_MIN: u32 = 180;
 pub const SIDEBAR_WIDTH_MAX: u32 = 560;
+pub const MAX_AUTO_COLUMN_WIDTH_MIN: u32 = 120;
+pub const MAX_AUTO_COLUMN_WIDTH_MAX: u32 = 1_600;
 
 pub fn sanitize_font_family(value: &str) -> String {
     let value = value.trim();
@@ -183,6 +189,8 @@ pub struct AppData {
     pub query_row_limit: u32,
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: u32,
+    #[serde(default = "default_max_auto_column_width")]
+    pub max_auto_column_width: u32,
     #[serde(default)]
     pub window: Option<WindowState>,
 }
@@ -199,6 +207,7 @@ impl Default for AppData {
             page_size: default_page_size(),
             query_row_limit: default_query_row_limit(),
             sidebar_width: default_sidebar_width(),
+            max_auto_column_width: default_max_auto_column_width(),
             window: None,
         }
     }
@@ -223,6 +232,7 @@ pub struct PreferencesPatch {
     pub page_size: Option<u32>,
     pub query_row_limit: Option<u32>,
     pub sidebar_width: Option<u32>,
+    pub max_auto_column_width: Option<u32>,
 }
 
 #[cfg(test)]

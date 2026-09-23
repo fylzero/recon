@@ -21,6 +21,7 @@ const {
   pageSize,
   queryRowLimit,
   sidebarWidth,
+  maxAutoColumnWidth,
   windowState,
   replaceSettings,
   showToast,
@@ -200,6 +201,7 @@ watch(
     pageSize,
     queryRowLimit,
     sidebarWidth,
+    maxAutoColumnWidth,
     windowState,
   ],
   () => {

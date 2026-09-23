@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import type { SQLNamespace } from "@codemirror/lang-sql";
-import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
 import * as api from "../api";
 import { SIDEBAR_MAX, SIDEBAR_MIN, useApp } from "../composables/useApp";
 import { useConnectionForm } from "../composables/useConnectionForm";
+import { registerInnerTabCloser, setLiveTitle } from "../composables/useTabs";
 import { driverLabel, type SessionInfo, type TableInfo } from "../types";
+import DatabaseSwitcher from "./DatabaseSwitcher.vue";
 import DriverIcon from "./DriverIcon.vue";
 import QueryEditor from "./QueryEditor.vue";
 import TableView from "./TableView.vue";
@@ -35,6 +37,7 @@ const filter = ref("");
 const schema = shallowRef<SQLNamespace>({});
 const tabs = ref<PaneTab[]>([]);
 const activeTabId = ref("");
+const tabsRestored = ref(false);
 const editors = new Map<string, InstanceType<typeof QueryEditor>>();
 
 const match = computed(() => findConnection(props.connectionId));
@@ -44,6 +47,27 @@ const namespaceLabel = computed(() => session.value?.namespaceLabel ?? "Database
 const needsPassword = computed(
   () => Boolean(entry.value && entry.value.driver !== "sqlite" && !entry.value.savePassword),
 );
+
+const databaseTitle = computed(() => {
+  const connection = entry.value;
+  if (!connection) {
+    return "";
+  }
+  if (connection.driver === "sqlite") {
+    return connection.filePath.split("/").pop() || connection.name;
+  }
+  if (connection.driver === "postgres") {
+    return connection.database || connection.name;
+  }
+  return namespace.value || connection.name;
+});
+
+watch(
+  () => (status.value === "connected" ? databaseTitle.value : ""),
+  (title) => setLiveTitle(props.connectionId, title),
+  { immediate: true },
+);
+
 const queryTabsKey = computed(() => `recon.queryTabs.${props.connectionId}`);
 
 const filteredTables = computed(() => {
@@ -98,9 +122,12 @@ function restoreQueryTabs() {
   } catch {
     saved = [];
   }
-  if (!saved.length) {
-    saved = [{ key: nextQueryKey(), title: "Query 1" }];
+  const singleKey = `recon.queryKey.${props.connectionId}`;
+  const single = localStorage.getItem(singleKey);
+  if (single && !saved.some((item) => item.key === single)) {
+    saved = [{ key: single, title: "Query 1" }, ...saved];
   }
+  localStorage.removeItem(singleKey);
   tabs.value = saved.map((item) => ({
     id: `query:${item.key}`,
     kind: "query",
@@ -108,6 +135,7 @@ function restoreQueryTabs() {
     title: item.title,
   }));
   activeTabId.value = tabs.value[0]?.id ?? "";
+  tabsRestored.value = true;
   saveQueryTabs();
 }
 
@@ -148,6 +176,14 @@ function closeTab(id: string) {
   if (activeTabId.value === id) {
     activeTabId.value = tabs.value[Math.min(index, tabs.value.length - 1)]?.id ?? "";
   }
+}
+
+function closeActivePaneTab() {
+  if (!tabs.value.some((tab) => tab.id === activeTabId.value)) {
+    return false;
+  }
+  closeTab(activeTabId.value);
+  return true;
 }
 
 function tabTitle(tab: PaneTab) {
@@ -209,7 +245,7 @@ async function connect(withPassword: string | null = null) {
     namespace.value = info.namespaces.current;
     password.value = "";
     status.value = "connected";
-    if (!tabs.value.length) {
+    if (!tabsRestored.value) {
       restoreQueryTabs();
     }
     await loadTables();
@@ -349,7 +385,11 @@ onMounted(() => {
   void connect(null);
 });
 
+const unregisterCloser = registerInnerTabCloser(props.connectionId, closeActivePaneTab);
+
 onUnmounted(() => {
+  unregisterCloser();
+  setLiveTitle(props.connectionId, "");
   void api.disconnect(props.connectionId).catch(() => undefined);
 });
 </script>
@@ -402,121 +442,132 @@ onUnmounted(() => {
     </div>
 
     <template v-else>
-      <aside class="db-sidebar" :style="{ width: `${sidebarWidth}px` }">
-        <div class="db-sidebar-header">
-          <div class="db-sidebar-title" :title="session?.serverVersion">
-            <DriverIcon v-if="entry" :driver="entry.driver" />
-            <span class="db-sidebar-name">{{ entry?.name }}</span>
-          </div>
-          <p class="muted tiny db-sidebar-version" :title="session?.serverVersion">
+      <header class="pane-header db-toolbar">
+        <div class="db-toolbar-meta">
+          <DriverIcon v-if="entry" :driver="entry.driver" />
+          <strong v-if="driver !== 'mysql'" class="db-toolbar-name" :title="entry?.name">
+            {{ databaseTitle }}
+          </strong>
+          <DatabaseSwitcher
+            v-if="namespaces.length > 1 || driver !== 'sqlite'"
+            :menu-id="connectionId"
+            :current="namespace"
+            :items="namespaces"
+            :label="namespaceLabel"
+            @open="refreshNamespaces"
+            @select="changeNamespace"
+          />
+          <span class="muted tiny db-toolbar-version" :title="session?.serverVersion">
             {{ session?.serverVersion }}
-          </p>
+          </span>
+          <span class="muted tiny db-toolbar-driver">{{ driverLabel(driver) }}</span>
         </div>
-        <label v-if="namespaces.length > 1 || driver !== 'sqlite'" class="db-namespace">
-          <span class="muted tiny">{{ namespaceLabel }}</span>
-          <select :value="namespace" @change="changeNamespace(($event.target as HTMLSelectElement).value)">
-            <option v-if="!namespace" value="" disabled>Choose…</option>
-            <option v-for="item in namespaces" :key="item" :value="item">{{ item }}</option>
-          </select>
-        </label>
-        <div class="db-filter">
-          <input v-model="filter" type="search" placeholder="Filter tables" spellcheck="false" />
-        </div>
-        <div class="db-table-list" role="listbox" :aria-label="`Tables in ${namespace}`">
-          <p v-if="tablesLoading && !tables.length" class="muted tiny db-list-hint">
-            <span class="spinner" aria-hidden="true" /> Loading tables…
-          </p>
-          <p v-else-if="tablesError" class="settings-error db-list-hint">{{ tablesError }}</p>
-          <p v-else-if="!tables.length" class="muted tiny db-list-hint">
-            {{ namespace || driver === "sqlite" ? "No tables." : `Choose a ${namespaceLabel.toLowerCase()}.` }}
-          </p>
-          <p v-else-if="!filteredTables.length" class="muted tiny db-list-hint">No matches.</p>
+        <div class="db-toolbar-bar">
           <button
-            v-for="table in filteredTables"
-            :key="table.name"
-            class="db-table"
+            class="ghost tiny"
             type="button"
-            role="option"
-            :aria-selected="activeTabId === `table:${namespace}.${table.name}`"
-            :class="{ active: activeTabId === `table:${namespace}.${table.name}`, view: table.kind === 'view' }"
-            :title="table.kind === 'view' ? `${table.name} (view)` : table.name"
-            @click="openTable(table)"
-            @dblclick="queryTable(table)"
+            title="Open a new query tab"
+            @click="openQueryTab()"
           >
-            <svg v-if="table.kind === 'view'" viewBox="0 0 16 16" aria-hidden="true">
-              <path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8 12.1 12.5 8 12.5 1.5 8 1.5 8Z" />
-              <circle cx="8" cy="8" r="1.8" />
-            </svg>
-            <svg v-else viewBox="0 0 16 16" aria-hidden="true">
-              <rect x="2" y="3" width="12" height="10" rx="1.5" />
-              <path d="M2 6.5h12M6.5 6.5V13" />
-            </svg>
-            <span class="db-table-name">{{ table.name }}</span>
-          </button>
-        </div>
-        <div class="db-sidebar-footer">
-          <span class="muted tiny">{{ tables.length.toLocaleString() }} {{ tables.length === 1 ? "table" : "tables" }}</span>
-          <button class="ghost tiny" type="button" title="Reload tables" @click="refreshAll">
             <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99"
-              />
+              <path d="M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5" />
             </svg>
-          </button>
-          <button class="ghost tiny" type="button" title="Reconnect" @click="reconnect">
-            Reconnect
+            SQL
           </button>
         </div>
-      </aside>
-      <div class="db-sidebar-resize" role="separator" aria-orientation="vertical" @pointerdown="startSidebarResize" />
-
-      <section class="db-main">
-        <div class="subtab-bar" role="tablist">
-          <div
-            v-for="tab in tabs"
-            :key="tab.id"
-            class="subtab"
-            :class="{ active: activeTabId === tab.id, query: tab.kind === 'query' }"
-            role="tab"
-            :aria-selected="activeTabId === tab.id"
-            :title="tab.kind === 'table' ? `${tab.namespace}.${tab.table}` : tab.title"
-            @click="activeTabId = tab.id"
-            @auxclick.middle="closeTab(tab.id)"
-          >
-            <svg v-if="tab.kind === 'query'" class="subtab-icon" viewBox="0 0 16 16" aria-hidden="true">
-              <path d="M5 4 1.5 8 5 12M11 4l3.5 4L11 12" />
-            </svg>
-            <svg v-else class="subtab-icon" viewBox="0 0 16 16" aria-hidden="true">
-              <rect x="2" y="3" width="12" height="10" rx="1.5" />
-              <path d="M2 6.5h12M6.5 6.5V13" />
-            </svg>
-            <span class="subtab-title">{{ tabTitle(tab) }}</span>
+      </header>
+      <div class="db-body">
+        <aside class="db-sidebar" :style="{ width: `${sidebarWidth}px` }">
+          <div class="db-filter">
+            <input v-model="filter" type="search" placeholder="Filter tables" spellcheck="false" />
+          </div>
+          <div class="db-table-list" role="listbox" :aria-label="`Tables in ${namespace}`">
+            <p v-if="tablesLoading && !tables.length" class="muted tiny db-list-hint">
+              <span class="spinner" aria-hidden="true" /> Loading tables…
+            </p>
+            <p v-else-if="tablesError" class="settings-error db-list-hint">{{ tablesError }}</p>
+            <p v-else-if="!tables.length" class="muted tiny db-list-hint">
+              {{ namespace || driver === "sqlite" ? "No tables." : `Choose a ${namespaceLabel.toLowerCase()}.` }}
+            </p>
+            <p v-else-if="!filteredTables.length" class="muted tiny db-list-hint">No matches.</p>
             <button
-              class="subtab-close"
+              v-for="table in filteredTables"
+              :key="table.name"
+              class="db-table"
               type="button"
-              :aria-label="`Close ${tabTitle(tab)}`"
-              @click.stop="closeTab(tab.id)"
+              role="option"
+              :aria-selected="activeTabId === `table:${namespace}.${table.name}`"
+              :class="{ active: activeTabId === `table:${namespace}.${table.name}`, view: table.kind === 'view' }"
+              :title="table.kind === 'view' ? `${table.name} (view)` : table.name"
+              @click="openTable(table)"
+              @dblclick="queryTable(table)"
             >
-              ×
+              <svg v-if="table.kind === 'view'" viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8 12.1 12.5 8 12.5 1.5 8 1.5 8Z" />
+                <circle cx="8" cy="8" r="1.8" />
+              </svg>
+              <svg v-else viewBox="0 0 16 16" aria-hidden="true">
+                <rect x="2" y="3" width="12" height="10" rx="1.5" />
+                <path d="M2 6.5h12M6.5 6.5V13" />
+              </svg>
+              <span class="db-table-name">{{ table.name }}</span>
             </button>
           </div>
-          <button class="subtab-add ghost tiny" type="button" title="New query" @click="openQueryTab()">
-            <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M12 5v14M5 12h14" />
-            </svg>
-            Query
-          </button>
-        </div>
-        <div class="subtab-panes">
+          <div class="db-sidebar-footer">
+            <span class="muted tiny">{{ tables.length.toLocaleString() }} {{ tables.length === 1 ? "table" : "tables" }}</span>
+            <button class="ghost tiny" type="button" title="Reload tables" @click="refreshAll">
+              <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99"
+                />
+              </svg>
+            </button>
+            <button class="ghost tiny" type="button" title="Reconnect" @click="reconnect">
+              Reconnect
+            </button>
+          </div>
+        </aside>
+        <div class="db-sidebar-resize" role="separator" aria-orientation="vertical" @pointerdown="startSidebarResize" />
+
+        <section class="db-main">
+          <div v-if="tabs.length" class="subtab-bar" role="tablist">
+            <div
+              v-for="tab in tabs"
+              :key="tab.id"
+              class="subtab"
+              :class="{ active: activeTabId === tab.id, query: tab.kind === 'query' }"
+              role="tab"
+              :aria-selected="activeTabId === tab.id"
+              :title="tab.kind === 'table' ? `${tab.namespace}.${tab.table}` : tab.title"
+              @click="activeTabId = tab.id"
+              @auxclick.middle="closeTab(tab.id)"
+            >
+              <svg v-if="tab.kind === 'query'" class="subtab-icon" viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M5 4 1.5 8 5 12M11 4l3.5 4L11 12" />
+              </svg>
+              <svg v-else class="subtab-icon" viewBox="0 0 16 16" aria-hidden="true">
+                <rect x="2" y="3" width="12" height="10" rx="1.5" />
+                <path d="M2 6.5h12M6.5 6.5V13" />
+              </svg>
+              <span class="subtab-title">{{ tabTitle(tab) }}</span>
+              <button
+                class="subtab-close"
+                type="button"
+                :aria-label="`Close ${tabTitle(tab)}`"
+                @click.stop="closeTab(tab.id)"
+              >
+                ×
+              </button>
+            </div>
+          </div>
           <div v-if="!tabs.length" class="db-empty muted">
-            <p>Pick a table on the left, or start a new query.</p>
-            <button class="primary" type="button" @click="openQueryTab()">New query</button>
+            <p>Pick a table on the left, or open a query with the SQL button.</p>
           </div>
           <div
             v-for="tab in tabs"
             v-show="activeTabId === tab.id"
             :key="tab.id"
-            class="subtab-pane"
+            class="db-main-pane"
           >
             <TableView
               v-if="tab.kind === 'table'"
@@ -536,8 +587,8 @@ onUnmounted(() => {
               @executed="onExecuted"
             />
           </div>
-        </div>
-      </section>
+        </section>
+      </div>
     </template>
   </div>
 </template>

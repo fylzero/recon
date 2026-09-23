@@ -103,8 +103,7 @@ input[type="search"]:focus,
 input[type="number"]:focus,
 input[type="time"]:focus,
 textarea:focus,
-.modal-label select:focus,
-.db-namespace select:focus {
+.modal-label select:focus {
   outline: 1px solid var(--accent);
 }
 
@@ -350,8 +349,7 @@ button.toast.error:hover:not(:disabled) {
   gap: 0.35rem;
 }
 
-.modal-label select,
-.db-namespace select {
+.modal-label select {
   box-sizing: border-box;
   width: 100%;
   height: calc(1.45em + 0.7rem + 2px);
@@ -1959,6 +1957,7 @@ button.link-button:hover:not(:disabled) {
 
 .connection-pane {
   display: flex;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
   height: 100%;
@@ -2019,52 +2018,217 @@ button.link-button:hover:not(:disabled) {
   margin-top: 1rem;
 }
 
-.db-sidebar {
+.db-toolbar {
   display: flex;
   flex-direction: column;
+  gap: 0.4rem;
   flex: 0 0 auto;
-  min-height: 0;
-  background: var(--bg-sidebar);
+  padding: 0.5rem 0.85rem 0.45rem;
+  border-bottom: 1px solid var(--border);
 }
 
-.db-sidebar-header {
-  padding: 0.7rem 0.75rem 0.45rem;
-}
-
-.db-sidebar-title {
+.db-toolbar-meta {
   display: flex;
   align-items: center;
-  gap: 0.45rem;
+  gap: 0.55rem;
   min-width: 0;
 }
 
-.db-sidebar-name {
+.db-toolbar-name {
+  flex-shrink: 0;
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.db-toolbar-version {
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.db-toolbar-driver {
+  flex-shrink: 0;
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.database-menu .database-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  max-width: 16rem;
+  padding: 0.15rem 0.45rem;
+  border-radius: 6px;
+}
+
+.database-switch-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 650;
 }
 
-.db-sidebar-version {
-  margin: 0.2rem 0 0;
+.database-switch svg {
+  flex-shrink: 0;
+  width: 0.85rem;
+  height: 0.85rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.database-menu-dropdown {
+  right: auto;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  width: max-content;
+  min-width: max(16rem, 100%);
+  max-width: 28rem;
+  max-height: 22rem;
+  overflow: hidden;
+}
+
+.database-menu-search {
+  position: relative;
+  display: block;
+  flex-shrink: 0;
+  margin: 0.1rem 0.15rem 0.35rem;
+}
+
+.database-menu-search input {
+  width: 100%;
+  min-width: 14rem;
+  padding: 0.28rem 1.6rem 0.28rem 1.7rem;
+  font-size: 12px;
+}
+
+.database-menu-search input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.database-menu-search-icon {
+  position: absolute;
+  top: 50%;
+  left: 0.45rem;
+  width: 0.85rem;
+  height: 0.85rem;
+  transform: translateY(-50%);
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+.database-menu-search-clear {
+  position: absolute;
+  top: 50%;
+  right: 0.35rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.15rem;
+  height: 1.15rem;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  transform: translateY(-50%);
+}
+
+.database-menu-search-clear:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.database-menu-search-clear svg {
+  display: block;
+  width: 0.75rem;
+  height: 0.75rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.database-menu-list {
+  overflow: auto;
+  min-height: 0;
+}
+
+.database-menu-item {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
 }
 
-.db-namespace {
+.database-menu-item.active {
+  background: var(--bg-active);
+}
+
+.database-menu-item.highlighted {
+  background: var(--bg-hover);
+}
+
+.database-menu-empty {
+  margin: 0;
+  padding: 0.45rem 0.55rem;
+}
+
+.db-toolbar-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.db-toolbar-bar .ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.db-toolbar-bar .ghost.active {
+  background: var(--bg-active);
+}
+
+.db-body {
+  flex: 1;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+.db-sidebar {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
-  padding: 0.25rem 0.75rem 0.45rem;
-}
-
-.db-namespace select {
-  border-radius: 6px;
-  padding: 0 1.8rem 0 0.55rem;
-  appearance: none;
+  flex: 0 0 auto;
+  min-height: 0;
+  padding-top: 0.5rem;
+  background: var(--bg-sidebar);
 }
 
 .db-filter {
@@ -2224,10 +2388,6 @@ button.link-button:hover:not(:disabled) {
   stroke-linejoin: round;
 }
 
-.subtab.query .subtab-icon {
-  color: var(--accent);
-}
-
 .subtab-title {
   min-width: 0;
   overflow: hidden;
@@ -2261,41 +2421,23 @@ button.link-button:hover:not(:disabled) {
   color: var(--text);
 }
 
-.subtab-add {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  flex: 0 0 auto;
-  margin: 0 0 0.2rem 0.2rem;
-  border-color: transparent;
+.subtab.query .subtab-icon {
+  color: var(--accent);
 }
 
-.subtab-add .button-icon {
-  width: 0.85rem;
-  height: 0.85rem;
-}
-
-.subtab-panes {
-  position: relative;
+.db-main-pane {
   flex: 1;
-  min-height: 0;
-}
-
-.subtab-pane {
-  position: absolute;
-  inset: 0;
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
 }
 
 .db-empty {
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 0.75rem;
-  height: 100%;
+  flex: 1;
 }
 
 .table-view,

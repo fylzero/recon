@@ -19,6 +19,7 @@ export const DEFAULT_PAGE_SIZE = 300;
 export const DEFAULT_QUERY_ROW_LIMIT = 10_000;
 export const SIDEBAR_MIN = 180;
 export const SIDEBAR_MAX = 560;
+export const DEFAULT_MAX_AUTO_COLUMN_WIDTH = 480;
 
 const groups = ref<ConnectionGroup[]>([]);
 const standaloneConnections = ref<ConnectionEntry[]>([]);
@@ -31,6 +32,7 @@ const gridFontSize = ref(DEFAULT_GRID_FONT_SIZE);
 const pageSize = ref(DEFAULT_PAGE_SIZE);
 const queryRowLimit = ref(DEFAULT_QUERY_ROW_LIMIT);
 const sidebarWidth = ref(260);
+const maxAutoColumnWidth = ref(DEFAULT_MAX_AUTO_COLUMN_WIDTH);
 const windowState = ref<WindowState | null>(null);
 const toastMessage = ref("");
 const toastKind = ref<"success" | "error">("success");
@@ -67,6 +69,7 @@ export function useApp() {
     pageSize.value = data.pageSize ?? DEFAULT_PAGE_SIZE;
     queryRowLimit.value = data.queryRowLimit ?? DEFAULT_QUERY_ROW_LIMIT;
     sidebarWidth.value = clampSidebar(data.sidebarWidth ?? 260);
+    maxAutoColumnWidth.value = data.maxAutoColumnWidth ?? DEFAULT_MAX_AUTO_COLUMN_WIDTH;
     windowState.value = data.window ?? null;
   }
 
@@ -287,6 +290,7 @@ export function useApp() {
     pageSize,
     queryRowLimit,
     sidebarWidth,
+    maxAutoColumnWidth,
     windowState,
     toastMessage,
     toastKind,

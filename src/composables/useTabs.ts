@@ -30,6 +30,26 @@ const settingsTabOpen = ref(false);
 const changelogTabOpen = ref(false);
 const settingsSection = ref<SettingsSection>("general");
 const activeId = ref(CONNECTIONS_TAB_ID);
+const innerTabClosers = new Map<string, () => boolean>();
+const liveTitles = ref<Record<string, string>>({});
+
+export function setLiveTitle(id: string, title: string) {
+  if (title) {
+    liveTitles.value = { ...liveTitles.value, [id]: title };
+  } else if (id in liveTitles.value) {
+    const { [id]: _removed, ...rest } = liveTitles.value;
+    liveTitles.value = rest;
+  }
+}
+
+export function registerInnerTabCloser(id: string, close: () => boolean) {
+  innerTabClosers.set(id, close);
+  return () => {
+    if (innerTabClosers.get(id) === close) {
+      innerTabClosers.delete(id);
+    }
+  };
+}
 
 export function isSettingsSection(value: unknown): value is SettingsSection {
   return SETTINGS_SECTIONS.includes(value as SettingsSection);
@@ -49,6 +69,7 @@ export function useTabs() {
       const match = findConnection(tab.id);
       return {
         ...tab,
+        title: liveTitles.value[tab.id] || tab.title,
         closable: true,
         accentColor: match?.connection.headerColor || match?.group?.headerColor,
       };
@@ -154,6 +175,9 @@ export function useTabs() {
   }
 
   function closeActiveTab() {
+    if (innerTabClosers.get(activeId.value)?.()) {
+      return true;
+    }
     const tab = tabs.value.find((item) => item.id === activeId.value);
     if (!tab?.closable) {
       return false;
