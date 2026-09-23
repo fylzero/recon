@@ -1,5 +1,5 @@
 [package]
-name = "recon"
+name = "Recon"
 version = "0.1.0"
 description = "A local-first database client"
 authors = ["you"]
