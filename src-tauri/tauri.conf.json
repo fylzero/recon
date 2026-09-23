@@ -40,7 +40,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU5MkYwOEUzRTJBNzM1OEUKUldTT05hZmk0d2d2NlhxZkRJVHZXOERmdEk2ZmpSekJ2TVNsbm15Wm9RRFczV2VnQlIxazJzM3gK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg3MDAxMTc5MkYzOEYwRDcKUldUWDhEZ3ZlUkVBaDUvcDh5K2xlTmx3MlhFMnJsbmNjd1BpRTUyeUFwRUpJYWZkOURjYWFOckQK",
       "endpoints": [
         "https://github.com/fylzero/recon/releases/latest/download/latest.json"
       ]
