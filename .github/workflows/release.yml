@@ -12,6 +12,20 @@ jobs:
       contents: write
     runs-on: macos-latest
     steps:
+      - name: Check updater signing secret
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::The TAURI_SIGNING_PRIVATE_KEY repository secret is missing or empty."
+            exit 1
+          fi
+          if ! printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" | base64 --decode 2>/dev/null | grep -q "^untrusted comment:"; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is set (${#TAURI_SIGNING_PRIVATE_KEY} characters) but is not a Tauri private key. Paste the single base64 line from the .key file."
+            exit 1
+          fi
+          echo "Updater signing key looks valid (${#TAURI_SIGNING_PRIVATE_KEY} characters)."
+
       - uses: actions/checkout@v5
 
       - name: Setup Node
