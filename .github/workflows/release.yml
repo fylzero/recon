@@ -11,6 +11,13 @@ jobs:
     permissions:
       contents: write
     runs-on: macos-latest
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
       - name: Check updater signing secret
         env:
@@ -25,6 +32,22 @@ jobs:
             exit 1
           fi
           echo "Updater signing key looks valid (${#TAURI_SIGNING_PRIVATE_KEY} characters)."
+
+      - name: Require Apple release credentials
+        shell: bash
+        run: |
+          missing=0
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing repository secret: $name. See docs/macos-releases.md."
+              missing=1
+            fi
+          done
+          if [[ "$missing" == 1 ]]; then exit 1; fi
+          if [[ "$APPLE_SIGNING_IDENTITY" != "Developer ID Application: "* ]]; then
+            echo "::error::APPLE_SIGNING_IDENTITY must be a Developer ID Application identity."
+            exit 1
+          fi
 
       - uses: actions/checkout@v5
 
@@ -47,46 +70,14 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Configure Apple signing
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          if [ -z "$APPLE_CERTIFICATE" ]; then
-            echo "No Apple certificate secret; using ad-hoc signing."
-            exit 0
-          fi
-          {
-            echo "APPLE_CERTIFICATE<<EOF"
-            echo "$APPLE_CERTIFICATE"
-            echo "EOF"
-            echo "APPLE_CERTIFICATE_PASSWORD<<EOF"
-            echo "$APPLE_CERTIFICATE_PASSWORD"
-            echo "EOF"
-            echo "APPLE_SIGNING_IDENTITY<<EOF"
-            echo "$APPLE_SIGNING_IDENTITY"
-            echo "EOF"
-            echo "APPLE_ID<<EOF"
-            echo "$APPLE_ID"
-            echo "EOF"
-            echo "APPLE_PASSWORD<<EOF"
-            echo "$APPLE_PASSWORD"
-            echo "EOF"
-            echo "APPLE_TEAM_ID<<EOF"
-            echo "$APPLE_TEAM_ID"
-            echo "EOF"
-          } >> "$GITHUB_ENV"
-
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
+          # This wrapper verifies packaged apps before the action uploads anything.
+          tauriScript: bash scripts/build-macos-release.sh
           tagName: v__VERSION__
           releaseName: Recon v__VERSION__
           releaseBody: "Download Recon-macos-arm64.dmg for Apple Silicon Macs."

@@ -6,6 +6,15 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "0.1.5",
+    date: "September 24, 2026",
+    notes: [
+      "Recon is now signed with a Developer ID and notarized by Apple, so macOS opens it without an unidentified developer warning.",
+      "Connection toolbar with a database switcher.",
+      "Result columns size themselves to fit their data, up to a Max column width you can set in Settings.",
+    ],
+  },
+  {
     version: "0.1.0",
     date: "September 23, 2026",
     notes: [

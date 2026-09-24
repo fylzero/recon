@@ -1,6 +1,6 @@
 [package]
 name = "Recon"
-version = "0.1.0"
+version = "0.1.5"
 description = "A local-first database client"
 authors = ["you"]
 edition = "2021"
