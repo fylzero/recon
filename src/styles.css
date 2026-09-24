@@ -1798,6 +1798,11 @@ body.reordering-repos .repo-row,
   flex: 0 0 auto;
 }
 
+.repo-row .driver-icon {
+  width: 1.15rem;
+  height: 1.15rem;
+}
+
 .driver-icon.driver-mysql {
   color: #f0a36b;
 }
