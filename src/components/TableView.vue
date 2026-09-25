@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import * as api from "../api";
 import { isNumericColumn } from "../cells";
 import { useApp } from "../composables/useApp";
@@ -7,6 +7,7 @@ import type {
   BrowseResult,
   Cell,
   ColumnMeta,
+  Driver,
   EditValue,
   RowValues,
   SaveRequest,
@@ -27,11 +28,18 @@ interface CellChange extends PendingCell {
   before: Cell;
 }
 
+interface UndoEntry {
+  changes: CellChange[];
+  created?: number[];
+  removed?: number[];
+}
+
 const props = defineProps<{
   connectionId: string;
   namespace: string;
   table: string;
   kind: "table" | "view";
+  driver: Driver;
   active: boolean;
 }>();
 
@@ -41,7 +49,7 @@ const emit = defineEmits<{
 
 const { pageSize, showToast } = useApp();
 
-const mode = ref<"data" | "structure">("data");
+const mode = ref<"data" | "structure" | "indexes">("data");
 const page = ref(0);
 const sortColumn = ref<string | null>(null);
 const sortDir = ref<SortDirection>("asc");
@@ -53,10 +61,21 @@ const loadingStructure = ref(false);
 const error = ref("");
 const structureError = ref("");
 const grid = ref<InstanceType<typeof DataGrid> | null>(null);
+const structureView = ref<InstanceType<typeof TableStructure> | null>(null);
+const structureChanges = ref(0);
 const pending = shallowRef(new Map<string, PendingCell>());
-const undoStack: CellChange[][] = [];
-const redoStack: CellChange[][] = [];
+const undoStack: UndoEntry[] = [];
+const redoStack: UndoEntry[] = [];
+const newRowIds = ref<number[]>([]);
+let nextNewRowId = 0;
 let requestId = 0;
+
+// First element of a new row's key, which no primary key value can equal.
+const NEW_ROW = "\u0000new";
+
+function isNewKey(key: Cell[]) {
+  return key[0] === NEW_ROW;
+}
 
 const rows = computed(() => result.value?.rows ?? []);
 const columns = computed<ColumnMeta[]>(() => result.value?.columns ?? []);
@@ -74,16 +93,6 @@ const nullable = computed(
   () => new Map((structure.value?.columns ?? []).map((column) => [column.name, column.nullable])),
 );
 const editable = computed(() => props.kind === "table" && keyIndexes.value.length > 0);
-const readOnlyReason = computed(() => {
-  if (props.kind === "view") {
-    return "Views are read-only";
-  }
-  if (structure.value && result.value && !keyIndexes.value.length) {
-    return "Read-only: this table has no primary key";
-  }
-  return "";
-});
-
 function rowKey(row: RowValues | undefined): Cell[] | null {
   if (!row || !keyIndexes.value.length) {
     return null;
@@ -96,7 +105,14 @@ function cellId(key: Cell[], column: string) {
   return JSON.stringify([key, column]);
 }
 
-const pageKeys = computed(() => rows.value.map((row) => rowKey(row)));
+const allRows = computed(() => [
+  ...rows.value,
+  ...newRowIds.value.map(() => columns.value.map(() => null)),
+]);
+const pageKeys = computed(() => [
+  ...rows.value.map((row) => rowKey(row)),
+  ...newRowIds.value.map((id): Cell[] => [NEW_ROW, id]),
+]);
 const pendingByRow = computed(() => {
   const byRow = new Map<string, PendingCell[]>();
   for (const cell of pending.value.values()) {
@@ -114,7 +130,7 @@ const pageEdits = computed(() =>
   pageKeys.value.map((key) => (key ? pendingByRow.value.get(JSON.stringify(key)) : undefined)),
 );
 const displayRows = computed(() =>
-  rows.value.map((row, index) => {
+  allRows.value.map((row, index) => {
     const edits = pageEdits.value[index];
     if (!edits) {
       return row;
@@ -141,7 +157,14 @@ const modified = computed(() => {
   });
   return cells;
 });
-const dirty = computed(() => pending.value.size > 0);
+const dirty = computed(
+  () => pending.value.size > 0 || newRowIds.value.length > 0 || structureChanges.value > 0,
+);
+const canInsert = computed(() => props.kind === "table" && Boolean(result.value));
+
+function cellEditable(row: number) {
+  return row >= rows.value.length ? canInsert.value : editable.value;
+}
 const offset = computed(() => page.value * pageSize.value);
 const pageCount = computed(() =>
   total.value === null ? null : Math.max(Math.ceil(total.value / pageSize.value), 1),
@@ -212,7 +235,7 @@ async function loadStructure() {
 }
 
 function refresh() {
-  if (mode.value === "structure") {
+  if (mode.value !== "data") {
     void loadStructure();
   } else {
     void loadData(true);
@@ -276,13 +299,33 @@ function applyChanges(changes: CellChange[], side: "before" | "value") {
   pending.value = next;
 }
 
-function recordChanges(changes: CellChange[]) {
-  if (!changes.length) {
+function updateNewRows(add: number[], remove: number[]) {
+  const removed = new Set(remove);
+  newRowIds.value = [...newRowIds.value.filter((id) => !removed.has(id)), ...add].sort((a, b) => a - b);
+}
+
+function applyEntry(entry: UndoEntry, side: "before" | "value") {
+  applyChanges(entry.changes, side);
+  const created = entry.created ?? [];
+  const removed = entry.removed ?? [];
+  if (side === "value") {
+    updateNewRows(created, removed);
+  } else {
+    updateNewRows(removed, created);
+  }
+}
+
+function recordEntry(entry: UndoEntry) {
+  if (!entry.changes.length && !entry.created?.length && !entry.removed?.length) {
     return;
   }
-  applyChanges(changes, "value");
-  undoStack.push(changes);
+  applyEntry(entry, "value");
+  undoStack.push(entry);
   redoStack.length = 0;
+}
+
+function recordChanges(changes: CellChange[]) {
+  recordEntry({ changes });
 }
 
 function changeAt(row: number, col: number, value: Cell): CellChange | null {
@@ -318,46 +361,118 @@ function onSetNull(cells: CellPosition[]) {
 }
 
 function undo() {
-  const changes = undoStack.pop();
-  if (changes) {
-    applyChanges(changes, "before");
-    redoStack.push(changes);
+  const entry = undoStack.pop();
+  if (entry) {
+    applyEntry(entry, "before");
+    redoStack.push(entry);
   }
 }
 
 function redo() {
-  const changes = redoStack.pop();
-  if (changes) {
-    applyChanges(changes, "value");
-    undoStack.push(changes);
+  const entry = redoStack.pop();
+  if (entry) {
+    applyEntry(entry, "value");
+    undoStack.push(entry);
   }
 }
 
 function discard() {
   grid.value?.commitEdit();
-  recordChanges(
-    [...pending.value.values()].map((cell) => ({ ...cell, before: cell.value, value: cell.original })),
-  );
+  recordEntry({
+    changes: [...pending.value.values()].map((cell) => ({
+      ...cell,
+      before: cell.value,
+      value: cell.original,
+    })),
+    removed: [...newRowIds.value],
+  });
+  structureView.value?.discard();
+}
+
+async function createRecord() {
+  if (!canInsert.value) {
+    return;
+  }
+  mode.value = "data";
+  recordEntry({ changes: [], created: [nextNewRowId++] });
+  await nextTick();
+  grid.value?.editCell(allRows.value.length - 1, 0);
+}
+
+function create() {
+  if (mode.value === "data") {
+    void createRecord();
+  } else {
+    structureView.value?.create();
+  }
 }
 
 function pendingChanges() {
   grid.value?.commitEdit();
-  const snapshot = pending.value;
+  const structurePending = structureView.value?.pendingChanges();
+  const rowEdits = [...pendingByRow.value.values()];
+  const cellEdits = (cells: PendingCell[]) =>
+    cells.map((cell) => ({ column: cell.column, value: cell.value as EditValue }));
   const request: SaveRequest = {
     namespace: props.namespace,
     table: props.table,
-    updates: [...pendingByRow.value.values()].map((cells) => ({
-      key: keyColumns.value.map((column, index) => ({
-        column,
-        value: cells[0].key[index] as EditValue,
+    updates: rowEdits
+      .filter((cells) => !isNewKey(cells[0].key))
+      .map((cells) => ({
+        key: keyColumns.value.map((column, index) => ({
+          column,
+          value: cells[0].key[index] as EditValue,
+        })),
+        changes: cellEdits(cells),
       })),
-      changes: cells.map((cell) => ({ column: cell.column, value: cell.value as EditValue })),
+    inserts: newRowIds.value.map((id) => ({
+      values: cellEdits(pendingByRow.value.get(JSON.stringify([NEW_ROW, id])) ?? []),
     })),
+    columns: structurePending?.columns ?? [],
+    newColumns: structurePending?.newColumns ?? [],
+    indexes: structurePending?.indexes ?? [],
+    newIndexes: structurePending?.newIndexes ?? [],
   };
-  return { request, snapshot };
+  return {
+    request,
+    snapshot: {
+      rows: pending.value,
+      insertedIds: [...newRowIds.value],
+      columns: structurePending?.snapshot,
+    },
+  };
 }
 
-function markSaved(sent: Map<string, PendingCell>) {
+type SavedSnapshot = ReturnType<typeof pendingChanges>["snapshot"];
+
+function markSaved(sent: SavedSnapshot) {
+  const inserted = new Set<Cell>(sent.insertedIds);
+  markRowsSaved(sent.rows);
+  if (inserted.size) {
+    newRowIds.value = newRowIds.value.filter((id) => !inserted.has(id));
+    pending.value = new Map(
+      [...pending.value].filter(([, cell]) => !(isNewKey(cell.key) && inserted.has(cell.key[1]))),
+    );
+  }
+  if (!sent.columns || (!sent.columns.fields.size && !sent.columns.created.length)) {
+    void loadData(inserted.size > 0, false);
+    return;
+  }
+  structureView.value?.markSaved(sent.columns);
+  const renamed = new Map(
+    [...sent.columns.fields.values()]
+      .filter((edit) => edit.section === "columns" && edit.field === "name")
+      .filter((edit) => structure.value?.columns.some((column) => column.name === edit.key))
+      .map((edit) => [edit.key, String(edit.value)]),
+  );
+  if (sortColumn.value && renamed.has(sortColumn.value)) {
+    sortColumn.value = renamed.get(sortColumn.value) ?? null;
+  }
+  void loadStructure();
+  void loadData(inserted.size > 0, false);
+}
+
+function markRowsSaved(sent: Map<string, PendingCell>) {
   if (result.value) {
     const saved = rows.value.map((row, index) => {
       const key = pageKeys.value[index];
@@ -382,7 +497,6 @@ function markSaved(sent: Map<string, PendingCell>) {
   pending.value = remaining;
   undoStack.length = 0;
   redoStack.length = 0;
-  void loadData(false, false);
 }
 
 function onWindowKeydown(event: KeyboardEvent) {
@@ -395,15 +509,25 @@ function onWindowKeydown(event: KeyboardEvent) {
     refresh();
     return;
   }
-  if (key !== "z" || mode.value !== "data" || !editable.value) {
+  if (key !== "z" || props.kind !== "table") {
     return;
   }
   const target = event.target;
   if (target instanceof Element && target.closest("input, textarea, select, [contenteditable]")) {
-    return;
+    // An untouched grid editor has nothing to undo, so the undo goes to the grid.
+    if (!(target instanceof HTMLTextAreaElement && target.dataset.pristine === "true")) {
+      return;
+    }
+    target.blur();
   }
   event.preventDefault();
-  if (event.shiftKey) {
+  if (mode.value !== "data") {
+    if (event.shiftKey) {
+      structureView.value?.redo();
+    } else {
+      structureView.value?.undo();
+    }
+  } else if (event.shiftKey) {
     redo();
   } else {
     undo();
@@ -411,7 +535,7 @@ function onWindowKeydown(event: KeyboardEvent) {
 }
 
 watch(mode, (next) => {
-  if (next === "structure" && !structure.value && !loadingStructure.value) {
+  if (next !== "data" && !structure.value && !loadingStructure.value) {
     void loadStructure();
   }
 });
@@ -422,7 +546,10 @@ watch(pageSize, () => {
 });
 
 watch(
-  () => pendingByRow.value.size,
+  () =>
+    [...pendingByRow.value.values()].filter((cells) => !isNewKey(cells[0].key)).length +
+    newRowIds.value.length +
+    structureChanges.value,
   (count) => emit("changes", count),
 );
 
@@ -455,6 +582,7 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
           @click="mode = 'data'"
         >
           Data
+          <span v-if="total !== null" class="group-count">{{ total.toLocaleString() }}</span>
         </button>
         <button
           type="button"
@@ -463,8 +591,30 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
           @click="mode = 'structure'"
         >
           Structure
+          <span v-if="structure" class="group-count">{{ structure.columns.length }}</span>
+        </button>
+        <button
+          type="button"
+          :class="{ active: mode === 'indexes' }"
+          :aria-pressed="mode === 'indexes'"
+          @click="mode = 'indexes'"
+        >
+          Indexes
+          <span v-if="structure" class="group-count">{{ structure.indexes.length }}</span>
         </button>
       </div>
+      <button
+        v-if="kind === 'table'"
+        class="ghost tiny"
+        type="button"
+        :disabled="mode === 'data' ? !canInsert : !structure"
+        @click="create"
+      >
+        <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 4.5v15m7.5-7.5h-15" />
+        </svg>
+        {{ mode === "data" ? "New record" : mode === "structure" ? "New column" : "New index" }}
+      </button>
       <button class="ghost tiny" type="button" title="Reload (⌘R)" @click="refresh">
         <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
           <path
@@ -476,6 +626,7 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
       <div class="pane-toolbar-end">
         <span v-if="loading || loadingStructure" class="spinner" aria-label="Loading" />
         <template v-if="mode === 'data'">
+          <span v-if="result" class="muted tiny">Loaded in {{ result.durationMs }}ms</span>
           <span class="muted tiny pager-label">{{ rangeLabel }}</span>
           <div class="pager">
             <button
@@ -533,27 +684,27 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         sortable
         :sort-column="sortColumn"
         :sort-dir="sortDir"
-        :editable="editable"
+        :cell-editable="cellEditable"
+        :new-row-start="rows.length"
+        :creatable="canInsert"
         :modified="modified"
         @sort="onSort"
         @edit="onEdit"
         @set-null="onSetNull"
+        @create="createRecord"
       />
     </div>
-    <div v-if="mode === 'structure'" class="table-view-body scroll">
+    <div v-show="mode !== 'data'" class="table-view-body">
       <p v-if="structureError" class="pane-error">{{ structureError }}</p>
-      <TableStructure v-else-if="structure" :structure="structure" />
-    </div>
-    <div class="pane-status muted tiny">
-      <template v-if="mode === 'data' && result">
-        {{ result.columns.length }} columns · loaded in {{ result.durationMs }}ms
-        <template v-if="sortColumn"> · sorted by {{ sortColumn }} {{ sortDir }}</template>
-        <template v-if="readOnlyReason"> · {{ readOnlyReason }}</template>
-        <template v-else-if="editable"> · double-click a cell to edit</template>
-      </template>
-      <template v-else-if="mode === 'structure' && structure">
-        {{ structure.columns.length }} columns · {{ structure.indexes.length }} indexes
-      </template>
+      <TableStructure
+        v-else-if="structure"
+        ref="structureView"
+        :structure="structure"
+        :section="mode === 'indexes' ? 'indexes' : 'columns'"
+        :driver="driver"
+        :editable="kind === 'table'"
+        @changes="structureChanges = $event"
+      />
     </div>
   </div>
 </template>

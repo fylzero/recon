@@ -53,12 +53,12 @@ const saving = ref(false);
 const editors = new Map<string, InstanceType<typeof QueryEditor>>();
 const tableViews = new Map<string, InstanceType<typeof TableView>>();
 
-const unsavedRows = computed(() => [...dirtyTabs.value.values()].reduce((sum, count) => sum + count, 0));
+const unsavedChanges = computed(() => [...dirtyTabs.value.values()].reduce((sum, count) => sum + count, 0));
 const unsavedLabel = computed(() => {
-  const rows = unsavedRows.value;
+  const changes = unsavedChanges.value;
   const tableCount = dirtyTabs.value.size;
-  const rowText = `${rows.toLocaleString()} unsaved ${rows === 1 ? "row" : "rows"}`;
-  return tableCount > 1 ? `${rowText} in ${tableCount} tables` : rowText;
+  const changeText = `${changes.toLocaleString()} unsaved ${changes === 1 ? "change" : "changes"}`;
+  return tableCount > 1 ? `${changeText} in ${tableCount} tables` : changeText;
 });
 
 const match = computed(() => findConnection(props.connectionId));
@@ -236,7 +236,15 @@ async function saveAll() {
     return;
   }
   const pending = [...tableViews.values()].map((view) => ({ view, ...view.pendingChanges() }));
-  const changed = pending.filter((item) => item.request.updates.length);
+  const changed = pending.filter(
+    ({ request }) =>
+      request.updates.length ||
+      request.inserts.length ||
+      request.columns.length ||
+      request.newColumns.length ||
+      request.indexes.length ||
+      request.newIndexes.length,
+  );
   if (!changed.length) {
     return;
   }
@@ -249,8 +257,11 @@ async function saveAll() {
     for (const item of changed) {
       item.view.markSaved(item.snapshot);
     }
+    if (changed.some((item) => item.request.columns.length)) {
+      void loadSchema();
+    }
     const tableText = changed.length > 1 ? ` in ${changed.length} tables` : "";
-    showToast(`Saved ${count.toLocaleString()} ${count === 1 ? "row" : "rows"}${tableText}`);
+    showToast(`Saved ${count.toLocaleString()} ${count === 1 ? "change" : "changes"}${tableText}`);
   } catch (err) {
     showToast(String(err), "error");
   } finally {
@@ -850,6 +861,7 @@ onUnmounted(() => {
               :namespace="tab.namespace"
               :table="tab.table"
               :kind="tab.tableKind"
+              :driver="driver"
               :ref="(instance) => setTableViewRef(tab.id, instance)"
               :active="active && view === 'tables' && activeTableTabId === tab.id"
               @changes="setTabChanges(tab.id, $event)"

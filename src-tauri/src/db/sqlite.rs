@@ -143,6 +143,19 @@ impl Dialect for SqliteDialect {
         )
     }
 
+    fn index_definitions_sql(&self, namespace: &str, table: &str) -> String {
+        let schema = quote_literal(namespace);
+        format!(
+            "SELECT il.name, \
+             (SELECT group_concat(ii.name, ', ') FROM pragma_index_info(il.name, {schema}) AS ii), \
+             il.\"unique\", il.origin = 'pk', m.sql, '', '', il.origin <> 'c' \
+             FROM pragma_index_list({}, {schema}) AS il \
+             LEFT JOIN {}.sqlite_master AS m ON m.type = 'index' AND m.name = il.name",
+            quote_literal(table),
+            quote_double(namespace)
+        )
+    }
+
     fn schema_columns_sql(&self, namespace: &str) -> String {
         format!(
             "SELECT m.name, p.name FROM {}.sqlite_master AS m \

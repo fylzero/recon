@@ -28,6 +28,11 @@ const props = defineProps<{
   sortDir?: SortDirection | null;
   editable?: boolean;
   editableColumns?: boolean[];
+  /** Overrides `editable` and `editableColumns` when set. */
+  cellEditable?: (row: number, col: number) => boolean;
+  /** Rows from this index on are new and numbered with a +. */
+  newRowStart?: number;
+  creatable?: boolean;
   modified?: Map<number, Set<number>>;
 }>();
 
@@ -36,6 +41,7 @@ const emit = defineEmits<{
   needRows: [start: number, end: number];
   edit: [row: number, col: number, text: string];
   setNull: [cells: CellPosition[]];
+  create: [];
 }>();
 
 const { gridFontSize, maxAutoColumnWidth, showToast } = useApp();
@@ -49,7 +55,7 @@ const anchor = ref<CellPosition | null>(null);
 const focus = ref<CellPosition | null>(null);
 const editing = ref<CellPosition | null>(null);
 const draft = ref("");
-let initialDraft = "";
+const initialDraft = ref("");
 
 const rowHeight = computed(() => Math.round(gridFontSize.value * 1.85 + 2));
 const headerHeight = computed(() => rowHeight.value + 4);
@@ -215,12 +221,34 @@ function isModified(row: number, col: number) {
 
 function canEdit(row: number, col: number) {
   const values = props.rows[row];
-  return Boolean(
-    props.editable &&
-      props.editableColumns?.[col] !== false &&
-      values &&
-      !isBytes(values[col] ?? null),
-  );
+  const allowed = props.cellEditable
+    ? props.cellEditable(row, col)
+    : props.editable && props.editableColumns?.[col] !== false;
+  return Boolean(allowed && values && !isBytes(values[col] ?? null));
+}
+
+function nextEditable(from: CellPosition, step: 1 | -1): CellPosition | null {
+  const width = props.columns.length;
+  const last = props.rows.length * width - 1;
+  for (let index = from.row * width + from.col + step; index >= 0 && index <= last; index += step) {
+    const position = { row: Math.floor(index / width), col: index % width };
+    if (canEdit(position.row, position.col)) {
+      return position;
+    }
+  }
+  return null;
+}
+
+function editCell(row: number, col: number) {
+  virtualizer.value.scrollToIndex(row, { align: "auto" });
+  startEdit(row, col);
+}
+
+function onBlankDblclick(event: MouseEvent) {
+  const target = event.target as Element;
+  if (props.creatable && (target.closest(".grid-filler, .grid-empty") || !target.closest(".grid-row, .grid-header"))) {
+    emit("create");
+  }
 }
 
 function startEdit(row: number, col: number, initial?: string) {
@@ -228,8 +256,8 @@ function startEdit(row: number, col: number, initial?: string) {
     return;
   }
   const value = props.rows[row]?.[col] ?? null;
-  initialDraft = value === null ? "" : String(value);
-  draft.value = initial ?? initialDraft;
+  initialDraft.value = value === null ? "" : String(value);
+  draft.value = initial ?? initialDraft.value;
   editing.value = { row, col };
   anchor.value = { row, col };
   focus.value = { row, col };
@@ -242,7 +270,7 @@ function commitEdit() {
     return;
   }
   editing.value = null;
-  if (draft.value !== initialDraft) {
+  if (draft.value !== initialDraft.value) {
     emit("edit", position.row, position.col, draft.value);
   }
 }
@@ -270,9 +298,15 @@ function onEditorKeydown(event: KeyboardEvent) {
     scroller.value?.focus({ preventScroll: true });
   } else if (event.key === "Tab") {
     event.preventDefault();
+    const from = editing.value;
     commitEdit();
     scroller.value?.focus({ preventScroll: true });
-    moveFocus(0, event.shiftKey ? -1 : 1, false);
+    const next = from && nextEditable(from, event.shiftKey ? -1 : 1);
+    if (next) {
+      editCell(next.row, next.col);
+    } else {
+      moveFocus(0, event.shiftKey ? -1 : 1, false);
+    }
   }
 }
 
@@ -439,7 +473,7 @@ function onKeydown(event: KeyboardEvent) {
     focus.value = null;
     return;
   }
-  if (!props.editable || !focus.value || event.altKey || meta) {
+  if (!focus.value || event.altKey || meta) {
     return;
   }
   if (event.key === "Enter" || event.key === "F2") {
@@ -448,7 +482,7 @@ function onKeydown(event: KeyboardEvent) {
   } else if (event.key === "Backspace" || event.key === "Delete") {
     event.preventDefault();
     setSelectionNull();
-  } else if (event.key.length === 1) {
+  } else if (event.key.length === 1 && canEdit(focus.value.row, focus.value.col)) {
     event.preventDefault();
     startEdit(focus.value.row, focus.value.col, event.key);
   }
@@ -511,7 +545,7 @@ function scrollToTop() {
   });
 }
 
-defineExpose({ scrollToTop, commitEdit });
+defineExpose({ scrollToTop, commitEdit, editCell });
 </script>
 
 <template>
@@ -527,6 +561,7 @@ defineExpose({ scrollToTop, commitEdit });
       '--grid-width': `${totalWidth}px`,
     }"
     @keydown="onKeydown"
+    @dblclick="onBlankDblclick"
   >
     <div class="grid-header" role="row">
       <div class="grid-gutter grid-corner" />
@@ -569,7 +604,7 @@ defineExpose({ scrollToTop, commitEdit });
         :style="{ transform: `translateY(${item.start - headerHeight}px)` }"
       >
         <div class="grid-gutter" @mousedown.prevent="selectRow($event, item.index)">
-          {{ (rowNumberOffset ?? 0) + item.index + 1 }}
+          {{ newRowStart !== undefined && item.index >= newRowStart ? "+" : (rowNumberOffset ?? 0) + item.index + 1 }}
         </div>
         <template v-if="rows[item.index]">
           <div
@@ -593,6 +628,7 @@ defineExpose({ scrollToTop, commitEdit });
               :ref="focusEditor"
               v-model="draft"
               class="grid-editor"
+              :data-pristine="draft === initialDraft"
               rows="1"
               spellcheck="false"
               autocomplete="off"

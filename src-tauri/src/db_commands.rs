@@ -583,27 +583,114 @@ pub async fn save_table_changes(
     requests: Vec<SaveRequest>,
 ) -> Result<usize, String> {
     let requests = requests.as_slice();
-    with_session(&app, &connection_id, move |session| save(session, requests)).await
+    let repeatable = requests.iter().all(|request| {
+        request.inserts.is_empty()
+            && request.columns.is_empty()
+            && request.new_columns.is_empty()
+            && request.indexes.is_empty()
+            && request.new_indexes.is_empty()
+    });
+    if repeatable {
+        return with_session(&app, &connection_id, move |session| save(session, requests)).await;
+    }
+    let session = app.state::<SessionStore>().get(&connection_id).await?;
+    match save(session.clone(), requests).await {
+        Err(err) if db::is_connection_lost(&err) => {
+            let _ = recover(&app, &connection_id, &session).await;
+            Err(format!(
+                "{err} Recon reconnected but didn't retry, because new rows or structure changes may already be saved. Reload to check before saving again."
+            ))
+        }
+        outcome => outcome,
+    }
 }
 
 /**
- * Edits are primary-key updates to absolute values inside one transaction,
- * so repeating them after a dropped connection cannot apply anything twice.
+ * Row edits are primary-key updates to absolute values inside one
+ * transaction, so repeating them after a dropped connection cannot apply
+ * anything twice. Structure changes run after every row update and insert
+ * because those still use the old column names, and new indexes run last so
+ * they can use new columns.
  */
 async fn save(session: Arc<Session>, requests: &[SaveRequest]) -> Result<usize, String> {
     let dialect = dialect(session.driver);
     let mut statements = Vec::new();
+    let mut schema_statements = Vec::new();
     for request in requests {
         let table = dialect.qualified(&request.namespace, &request.table);
         for update in &request.updates {
             statements.push(db::update_statement(session.driver, &table, update)?);
         }
+        for insert in &request.inserts {
+            statements.push(db::insert_statement(session.driver, &table, insert));
+        }
+        if !request.columns.is_empty() {
+            let current = if session.driver == Driver::Mysql {
+                let sql = db::mysql::column_definitions_sql(&request.namespace, &request.table);
+                let output = pool_run(&session, &sql, usize::MAX, QueryOrigin::Schema).await?;
+                db::mysql::column_definitions(&output)
+            } else {
+                Vec::new()
+            };
+            for change in &request.columns {
+                let existing = current.iter().find(|column| column.name == change.column);
+                schema_statements.extend(db::alter_statements(session.driver, &table, change, existing)?);
+            }
+        }
+        for column in &request.new_columns {
+            schema_statements.push(db::add_column_statement(session.driver, &table, column)?);
+        }
+        if !request.indexes.is_empty() {
+            let sql = dialect.index_definitions_sql(&request.namespace, &request.table);
+            let output = pool_run(&session, &sql, usize::MAX, QueryOrigin::Schema).await?;
+            let current = db::index_definitions(session.driver, &output);
+            for change in &request.indexes {
+                let existing = current.iter().find(|index| index.name == change.index);
+                schema_statements.extend(db::index_statements(
+                    session.driver,
+                    &request.namespace,
+                    &table,
+                    change,
+                    existing,
+                )?);
+            }
+        }
+        for index in &request.new_indexes {
+            schema_statements.push(db::create_index_statement(
+                session.driver,
+                &request.namespace,
+                &table,
+                &request.table,
+                index,
+            )?);
+        }
     }
+    let changed = requests
+        .iter()
+        .map(|request| {
+            request.updates.len()
+                + request.inserts.len()
+                + request.columns.len()
+                + request.new_columns.len()
+                + request.indexes.len()
+                + request.new_indexes.len()
+        })
+        .sum();
+    let alters_schema = !schema_statements.is_empty();
+    statements.extend(schema_statements);
     if statements.is_empty() {
         return Ok(0);
     }
     let started = Instant::now();
-    let outcome = session.pool.apply(&statements).await;
+    let outcome = session.pool.apply(&statements).await.map_err(|err| {
+        if alters_schema && session.driver == Driver::Mysql && !db::is_connection_lost(&err) {
+            format!(
+                "{err} MySQL commits each structure change as it runs, so changes before this one may already be saved. Reload to check."
+            )
+        } else {
+            err
+        }
+    });
     let sql = statements
         .iter()
         .map(|statement| statement.display.as_str())
@@ -622,7 +709,7 @@ async fn save(session: Arc<Session>, requests: &[SaveRequest]) -> Result<usize, 
             Err(err) => Err(err.as_str()),
         },
     });
-    outcome.map(|()| statements.len())
+    outcome.map(|()| changed)
 }
 
 #[tauri::command]

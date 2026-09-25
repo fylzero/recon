@@ -187,6 +187,21 @@ impl Dialect for PostgresDialect {
         )
     }
 
+    fn index_definitions_sql(&self, namespace: &str, table: &str) -> String {
+        format!(
+            "SELECT i.relname, pg_get_indexdef(ix.indexrelid), ix.indisunique, ix.indisprimary, \
+             pg_get_indexdef(ix.indexrelid), '', '', \
+             EXISTS (SELECT 1 FROM pg_catalog.pg_constraint con WHERE con.conindid = ix.indexrelid) \
+             FROM pg_catalog.pg_index ix \
+             JOIN pg_catalog.pg_class t ON t.oid = ix.indrelid \
+             JOIN pg_catalog.pg_class i ON i.oid = ix.indexrelid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace \
+             WHERE n.nspname = {} AND t.relname = {}",
+            quote_literal(namespace),
+            quote_literal(table)
+        )
+    }
+
     fn index_columns(&self, raw: String) -> String {
         index_columns_from_definition(&raw)
     }

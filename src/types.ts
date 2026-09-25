@@ -180,10 +180,49 @@ export interface RowUpdate {
   changes: CellEdit[];
 }
 
+/* Only changed fields are set. A `defaultValue` of null drops the default. */
+export interface ColumnChange {
+  column: string;
+  name?: string;
+  dataType?: string;
+  nullable?: boolean;
+  defaultValue?: string | null;
+}
+
+/* Only changed fields are set. `columns` is the SQL column list. */
+export interface IndexChange {
+  index: string;
+  name?: string;
+  columns?: string;
+  unique?: boolean;
+}
+
+export interface RowInsert {
+  values: CellEdit[];
+}
+
+export interface NewColumn {
+  name: string;
+  dataType: string;
+  nullable: boolean;
+  defaultValue: string | null;
+}
+
+export interface NewIndex {
+  name: string;
+  columns: string;
+  unique: boolean;
+}
+
 export interface SaveRequest {
   namespace: string;
   table: string;
   updates: RowUpdate[];
+  inserts: RowInsert[];
+  columns: ColumnChange[];
+  newColumns: NewColumn[];
+  indexes: IndexChange[];
+  newIndexes: NewIndex[];
 }
 
 export interface StatementResult {
