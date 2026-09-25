@@ -1676,6 +1676,12 @@ body.reordering-repos .repo-row,
   color: var(--bad);
 }
 
+.overflow-menu-divider {
+  height: 1px;
+  margin: 0.25rem 0.3rem;
+  background: var(--border);
+}
+
 .results {
   margin: 0.35rem 0.75rem 0.45rem;
   border-top: 1px solid var(--border);
@@ -2144,6 +2150,26 @@ button.link-button:hover:not(:disabled) {
   overflow: hidden;
 }
 
+.database-menu-create {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.3rem;
+  padding-bottom: 0.45rem;
+  border-bottom: 1px solid var(--border);
+  border-radius: 6px 6px 0 0;
+}
+
+.database-menu-create svg {
+  width: 0.8rem;
+  height: 0.8rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+
 .database-menu-search {
   position: relative;
   display: block;
@@ -2216,6 +2242,13 @@ button.link-button:hover:not(:disabled) {
   min-height: 0;
 }
 
+.database-menu-list,
+.database-menu-create,
+.database-context-menu {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 .database-menu-item {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2228,6 +2261,13 @@ button.link-button:hover:not(:disabled) {
 
 .database-menu-item.highlighted {
   background: var(--bg-hover);
+}
+
+.database-context-menu {
+  position: fixed;
+  right: auto;
+  z-index: 13;
+  min-width: 10rem;
 }
 
 .database-menu-empty {

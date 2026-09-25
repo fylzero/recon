@@ -135,6 +135,60 @@ fn literal(value: &str) -> String {
     format!("'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
 }
 
+/// Counts the objects `RENAME TABLE` can't carry into another database.
+pub fn rename_blockers_sql(database: &str) -> String {
+    let name = literal(database);
+    format!(
+        "SELECT (SELECT COUNT(*) FROM information_schema.VIEWS WHERE TABLE_SCHEMA = {name}) \
+         + (SELECT COUNT(*) FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = {name}) \
+         + (SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = {name}) \
+         + (SELECT COUNT(*) FROM information_schema.EVENTS WHERE EVENT_SCHEMA = {name})"
+    )
+}
+
+pub fn charset_sql(database: &str) -> String {
+    format!(
+        "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME \
+         FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = {}",
+        literal(database)
+    )
+}
+
+pub fn base_tables_sql(database: &str) -> String {
+    format!(
+        "SELECT TABLE_NAME FROM information_schema.TABLES \
+         WHERE TABLE_SCHEMA = {} AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME",
+        literal(database)
+    )
+}
+
+pub fn create_like_sql(database: &str, charset: &str, collation: &str) -> String {
+    let mut sql = format!("CREATE DATABASE {}", quote_backtick(database));
+    if !charset.is_empty() {
+        sql.push_str(&format!(" CHARACTER SET {}", literal(charset)));
+    }
+    if !collation.is_empty() {
+        sql.push_str(&format!(" COLLATE {}", literal(collation)));
+    }
+    sql
+}
+
+pub fn move_tables_sql(from: &str, to: &str, tables: &[String]) -> String {
+    let moves: Vec<String> = tables
+        .iter()
+        .map(|table| {
+            format!(
+                "{}.{} TO {}.{}",
+                quote_backtick(from),
+                quote_backtick(table),
+                quote_backtick(to),
+                quote_backtick(table)
+            )
+        })
+        .collect();
+    format!("RENAME TABLE {}", moves.join(", "))
+}
+
 /**
  * Column defaults as SQL expressions that can be written back into a column
  * definition. MySQL stores literals unquoted and expressions without their
@@ -336,6 +390,14 @@ impl Dialect for MysqlDialect {
     fn use_namespace_sql(&self, namespace: &str) -> Option<String> {
         Some(format!("USE {}", quote_backtick(namespace)))
     }
+
+    fn create_namespace_sql(&self, namespace: &str) -> Option<String> {
+        Some(format!("CREATE DATABASE {}", quote_backtick(namespace)))
+    }
+
+    fn drop_namespace_sql(&self, namespace: &str) -> Option<String> {
+        Some(format!("DROP DATABASE {}", quote_backtick(namespace)))
+    }
 }
 
 #[cfg(test)]
@@ -345,6 +407,20 @@ mod tests {
     #[test]
     fn escapes_backslashes_in_literals() {
         assert_eq!(literal("a\\'b"), "'a\\\\''b'");
+    }
+
+    #[test]
+    fn builds_database_rename_statements() {
+        let tables = vec!["users".to_string(), "we`ird".to_string()];
+        assert_eq!(
+            move_tables_sql("old", "new", &tables),
+            "RENAME TABLE `old`.`users` TO `new`.`users`, `old`.`we``ird` TO `new`.`we``ird`"
+        );
+        assert_eq!(
+            create_like_sql("new", "utf8mb4", "utf8mb4_0900_ai_ci"),
+            "CREATE DATABASE `new` CHARACTER SET 'utf8mb4' COLLATE 'utf8mb4_0900_ai_ci'"
+        );
+        assert_eq!(create_like_sql("new", "", ""), "CREATE DATABASE `new`");
     }
 
     #[test]

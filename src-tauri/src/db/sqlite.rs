@@ -174,6 +174,14 @@ impl Dialect for SqliteDialect {
     fn use_namespace_sql(&self, _namespace: &str) -> Option<String> {
         None
     }
+
+    fn create_namespace_sql(&self, _namespace: &str) -> Option<String> {
+        None
+    }
+
+    fn drop_namespace_sql(&self, _namespace: &str) -> Option<String> {
+        None
+    }
 }
 
 #[cfg(test)]

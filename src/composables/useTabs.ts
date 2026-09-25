@@ -19,9 +19,15 @@ export interface AppTab {
   accentColor?: string;
 }
 
-interface ConnectionTab {
+/**
+ * A connection's first tab uses the connection id as its tab id. Extra tabs
+ * opened on a specific database get their own id and backend session.
+ */
+export interface ConnectionTab {
   id: string;
+  connectionId: string;
   title: string;
+  namespace?: string;
 }
 
 const connectionTabs = ref<ConnectionTab[]>([]);
@@ -66,9 +72,9 @@ export function useTabs() {
   const tabs = computed<AppTab[]>(() => [
     { id: CONNECTIONS_TAB_ID, title: "Connections", closable: false },
     ...connectionTabs.value.map((tab) => {
-      const match = findConnection(tab.id);
+      const match = findConnection(tab.connectionId);
       return {
-        ...tab,
+        id: tab.id,
         title: liveTitles.value[tab.id] || tab.title,
         closable: true,
         accentColor: match?.connection.headerColor || match?.group?.headerColor,
@@ -89,7 +95,7 @@ export function useTabs() {
     if (connectionTabs.value.some((tab) => tab.id === id)) {
       return;
     }
-    connectionTabs.value = [...connectionTabs.value, { id, title: titleFor(id) }];
+    connectionTabs.value = [...connectionTabs.value, { id, connectionId: id, title: titleFor(id) }];
   }
 
   function routeFor(id: string) {
@@ -118,6 +124,16 @@ export function useTabs() {
 
   function openConnection(id: string) {
     ensureTab(id);
+    activate(id);
+  }
+
+  function openConnectionTab(connectionId: string, namespace: string, afterId = connectionId) {
+    const id = `${connectionId}~${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    const tab: ConnectionTab = { id, connectionId, title: titleFor(connectionId), namespace };
+    const index = connectionTabs.value.findIndex((item) => item.id === afterId);
+    const next = [...connectionTabs.value];
+    next.splice(index >= 0 ? index + 1 : next.length, 0, tab);
+    connectionTabs.value = next;
     activate(id);
   }
 
@@ -263,8 +279,8 @@ export function useTabs() {
 
   function refreshTitles() {
     connectionTabs.value = connectionTabs.value
-      .filter((tab) => findConnection(tab.id))
-      .map((tab) => ({ ...tab, title: titleFor(tab.id) }));
+      .filter((tab) => findConnection(tab.connectionId))
+      .map((tab) => ({ ...tab, title: titleFor(tab.connectionId) }));
     if (
       !tabs.value.some((tab) => tab.id === activeId.value) &&
       activeId.value !== CONNECTIONS_TAB_ID
@@ -282,6 +298,7 @@ export function useTabs() {
     settingsSection,
     activeId,
     openConnection,
+    openConnectionTab,
     openConnections,
     openHistory,
     openSettings,

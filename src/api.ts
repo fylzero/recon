@@ -139,8 +139,13 @@ export function createSqliteDatabase(path: string) {
   return invoke<void>("create_sqlite_database", { path });
 }
 
-export function connect(connectionId: string, password: string | null) {
-  return invoke<SessionInfo>("connect", { connectionId, password });
+export function connect(
+  connectionId: string,
+  password: string | null,
+  sessionId: string | null = null,
+  namespace: string | null = null,
+) {
+  return invoke<SessionInfo>("connect", { connectionId, password, sessionId, namespace });
 }
 
 export function reconnect(connectionId: string, password: string | null = null) {
@@ -157,6 +162,18 @@ export function listDatabases(connectionId: string) {
 
 export function setDatabase(connectionId: string, namespace: string) {
   return invoke<void>("set_database", { connectionId, namespace });
+}
+
+export function createDatabase(connectionId: string, namespace: string) {
+  return invoke<void>("create_database", { connectionId, namespace });
+}
+
+export function dropDatabase(connectionId: string, namespace: string) {
+  return invoke<void>("drop_database", { connectionId, namespace });
+}
+
+export function renameDatabase(connectionId: string, from: string, to: string) {
+  return invoke<void>("rename_database", { connectionId, from, to });
 }
 
 export function listTables(connectionId: string, namespace: string) {

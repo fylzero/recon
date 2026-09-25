@@ -204,7 +204,12 @@ watch([groups, standaloneConnections], () => {
         class="main-pane"
         v-show="activeId === tab.id"
       >
-        <ConnectionPane :connection-id="tab.id" :active="activeId === tab.id" />
+        <ConnectionPane
+          :connection-id="tab.connectionId"
+          :session-id="tab.id"
+          :initial-namespace="tab.namespace"
+          :active="activeId === tab.id"
+        />
       </div>
       <div v-if="historyTabOpen" class="main-pane" v-show="activeId === HISTORY_TAB_ID">
         <HistoryView />

@@ -6,11 +6,12 @@ import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } fr
 import * as api from "../api";
 import { SIDEBAR_MAX, SIDEBAR_MIN, useApp } from "../composables/useApp";
 import { useConnectionForm } from "../composables/useConnectionForm";
-import { registerInnerTabCloser, setLiveTitle } from "../composables/useTabs";
+import { registerInnerTabCloser, setLiveTitle, useTabs } from "../composables/useTabs";
 import { driverLabel, type SessionInfo, type TableInfo } from "../types";
 import ConnectionViewTabs, { type ConnectionViewTab } from "./ConnectionViewTabs.vue";
 import DatabaseSwitcher from "./DatabaseSwitcher.vue";
 import DriverIcon from "./DriverIcon.vue";
+import Modal from "./Modal.vue";
 import QueryEditor from "./QueryEditor.vue";
 import TableView from "./TableView.vue";
 
@@ -20,11 +21,14 @@ type PaneTab =
 
 const props = defineProps<{
   connectionId: string;
+  sessionId: string;
+  initialNamespace?: string;
   active: boolean;
 }>();
 
 const { findConnection, sidebarWidth, previewPreferences, savePreferences, showToast } = useApp();
 const { openEditConnection } = useConnectionForm();
+const { openConnectionTab } = useTabs();
 
 type ConnectionEvent = { connectionId: string; error: string | null };
 
@@ -50,6 +54,11 @@ const activeQueryTabId = ref("");
 const tabsRestored = ref(false);
 const dirtyTabs = ref(new Map<string, number>());
 const saving = ref(false);
+const nameDialog = ref<{ mode: "create" } | { mode: "rename"; from: string } | null>(null);
+const nameValue = ref("");
+const nameError = ref("");
+const nameBusy = ref(false);
+const nameInput = ref<HTMLInputElement | null>(null);
 const editors = new Map<string, InstanceType<typeof QueryEditor>>();
 const tableViews = new Map<string, InstanceType<typeof TableView>>();
 
@@ -62,6 +71,7 @@ const unsavedLabel = computed(() => {
 });
 
 const match = computed(() => findConnection(props.connectionId));
+const extraTab = computed(() => props.sessionId !== props.connectionId);
 const entry = computed(() => match.value?.connection ?? null);
 const driver = computed(() => entry.value?.driver ?? "mysql");
 const namespaceLabel = computed(() => session.value?.namespaceLabel ?? "Database");
@@ -85,11 +95,11 @@ const databaseTitle = computed(() => {
 
 watch(
   () => (status.value === "connected" ? databaseTitle.value : ""),
-  (title) => setLiveTitle(props.connectionId, title),
+  (title) => setLiveTitle(props.sessionId, title),
   { immediate: true },
 );
 
-const queryTabsKey = computed(() => `recon.queryTabs.${props.connectionId}`);
+const queryTabsKey = computed(() => `recon.queryTabs.${props.sessionId}`);
 
 const viewTabs = computed(() =>
   tabs.value.filter((tab) => (view.value === "sql" ? tab.kind === "query" : tab.kind === "table")),
@@ -118,7 +128,7 @@ const subtitle = computed(() => {
 });
 
 function nextQueryKey() {
-  return `${props.connectionId}:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  return `${props.sessionId}:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
 
 function queryTitle() {
@@ -151,7 +161,7 @@ function restoreQueryTabs() {
   } catch {
     saved = [];
   }
-  const singleKey = `recon.queryKey.${props.connectionId}`;
+  const singleKey = `recon.queryKey.${props.sessionId}`;
   const single = localStorage.getItem(singleKey);
   if (single && !saved.some((item) => item.key === single)) {
     saved = [{ key: single, title: "Query 1" }, ...saved];
@@ -251,7 +261,7 @@ async function saveAll() {
   saving.value = true;
   try {
     const count = await api.saveTableChanges(
-      props.connectionId,
+      props.sessionId,
       changed.map((item) => item.request),
     );
     for (const item of changed) {
@@ -357,7 +367,7 @@ function setEditorRef(id: string, instance: unknown) {
 
 async function loadSchema() {
   try {
-    const columns = await api.schemaColumns(props.connectionId, namespace.value);
+    const columns = await api.schemaColumns(props.sessionId, namespace.value);
     const next: Record<string, string[]> = {};
     for (const table of tables.value) {
       next[table.name] = [];
@@ -379,7 +389,7 @@ async function loadTables() {
   tablesLoading.value = true;
   tablesError.value = "";
   try {
-    tables.value = await api.listTables(props.connectionId, namespace.value);
+    tables.value = await api.listTables(props.sessionId, namespace.value);
     void loadSchema();
   } catch (err) {
     tablesError.value = String(err);
@@ -393,7 +403,12 @@ async function connect(withPassword: string | null = null) {
   status.value = "connecting";
   connectError.value = "";
   try {
-    const info = await api.connect(props.connectionId, withPassword);
+    const info = await api.connect(
+      props.connectionId,
+      withPassword,
+      props.sessionId,
+      props.initialNamespace ?? null,
+    );
     session.value = info;
     namespaces.value = info.namespaces.items;
     namespace.value = info.namespaces.current;
@@ -428,7 +443,7 @@ async function changeNamespace(next: string) {
   namespace.value = next;
   filter.value = "";
   try {
-    await api.setDatabase(props.connectionId, next);
+    await api.setDatabase(props.sessionId, next);
     await loadTables();
   } catch (err) {
     namespace.value = previous;
@@ -438,11 +453,132 @@ async function changeNamespace(next: string) {
 
 async function refreshNamespaces() {
   try {
-    const list = await api.listDatabases(props.connectionId);
+    const list = await api.listDatabases(props.sessionId);
     namespaces.value = list.items;
     if (list.current) {
       namespace.value = list.current;
     }
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+}
+
+function openNameDialog(dialog: NonNullable<typeof nameDialog.value>) {
+  nameValue.value = dialog.mode === "rename" ? dialog.from : "";
+  nameError.value = "";
+  nameDialog.value = dialog;
+  void nextTick(() => nameInput.value?.select());
+}
+
+function closeNameDialog() {
+  if (!nameBusy.value) {
+    nameDialog.value = null;
+  }
+}
+
+async function submitNameDialog() {
+  const dialog = nameDialog.value;
+  const name = nameValue.value.trim();
+  if (!dialog || !name || nameBusy.value) {
+    return;
+  }
+  if (dialog.mode === "rename" && name === dialog.from) {
+    nameDialog.value = null;
+    return;
+  }
+  nameBusy.value = true;
+  nameError.value = "";
+  try {
+    if (dialog.mode === "create") {
+      await createNamespace(name);
+    } else {
+      await renameNamespace(dialog.from, name);
+    }
+    nameDialog.value = null;
+  } catch (err) {
+    nameError.value = String(err);
+  } finally {
+    nameBusy.value = false;
+  }
+}
+
+async function createNamespace(name: string) {
+  await api.createDatabase(props.sessionId, name);
+  await refreshNamespaces();
+  await changeNamespace(name);
+  showToast(`Created ${namespaceLabel.value.toLowerCase()} “${name}”`);
+}
+
+function startRename(name: string) {
+  const dirty = tabs.value.some(
+    (tab) => tab.kind === "table" && tab.namespace === name && dirtyTabs.value.has(tab.id),
+  );
+  if (dirty) {
+    showToast(`Save or discard your changes in “${name}” before renaming it.`, "error");
+    return;
+  }
+  openNameDialog({ mode: "rename", from: name });
+}
+
+async function renameNamespace(from: string, to: string) {
+  await api.renameDatabase(props.sessionId, from, to);
+  tabs.value = tabs.value.map((tab) => {
+    if (tab.kind !== "table" || tab.namespace !== from) {
+      return tab;
+    }
+    const id = `table:${to}.${tab.table}`;
+    if (activeTableTabId.value === tab.id) {
+      activeTableTabId.value = id;
+    }
+    return { ...tab, id, namespace: to };
+  });
+  const wasCurrent = namespace.value === from;
+  await refreshNamespaces();
+  if (wasCurrent) {
+    namespace.value = to;
+    await loadTables();
+  }
+  showToast(`Renamed ${namespaceLabel.value.toLowerCase()} “${from}” to “${to}”`);
+}
+
+async function copyNamespaceName(name: string) {
+  try {
+    await navigator.clipboard.writeText(name);
+    showToast(`Copied “${name}”`);
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+}
+
+function openNamespaceInNewTab(name: string) {
+  openConnectionTab(props.connectionId, name, props.sessionId);
+}
+
+async function dropNamespace(name: string) {
+  if (!name || name === namespace.value) {
+    return;
+  }
+  const label = namespaceLabel.value.toLowerCase();
+  const ok = await confirm(
+    `Drop the ${label} “${name}”? All of its tables and data will be permanently deleted. This can't be undone.`,
+    {
+      title: `Drop ${label}`,
+      kind: "warning",
+      okLabel: "Drop",
+      cancelLabel: "Cancel",
+    },
+  );
+  if (!ok) {
+    return;
+  }
+  try {
+    await api.dropDatabase(props.sessionId, name);
+    for (const tab of tabs.value.filter((item) => item.kind === "table" && item.namespace === name)) {
+      setTabChanges(tab.id, 0);
+      removeTab(tab.id);
+    }
+    await refreshNamespaces();
+    showToast(`Dropped ${label} “${name}”`);
   } catch (err) {
     showToast(String(err), "error");
   }
@@ -466,7 +602,7 @@ async function refreshTablesQuietly() {
   }
   const requested = namespace.value;
   try {
-    const next = await api.listTables(props.connectionId, requested);
+    const next = await api.listTables(props.sessionId, requested);
     if (requested !== namespace.value) {
       return;
     }
@@ -506,7 +642,7 @@ async function reconnect() {
   }
   reconnecting.value = true;
   try {
-    const info = await api.reconnect(props.connectionId);
+    const info = await api.reconnect(props.sessionId);
     session.value = info;
     namespaces.value = info.namespaces.items;
     namespace.value = info.namespaces.current;
@@ -522,7 +658,7 @@ async function reconnect() {
 }
 
 function onConnectionLost(event: ConnectionEvent) {
-  if (event.connectionId !== props.connectionId) {
+  if (event.connectionId !== props.sessionId) {
     return;
   }
   lost.value = true;
@@ -530,7 +666,7 @@ function onConnectionLost(event: ConnectionEvent) {
 }
 
 function onConnectionRestored(event: ConnectionEvent) {
-  if (event.connectionId === props.connectionId) {
+  if (event.connectionId === props.sessionId) {
     showToast(`Reconnected to ${entry.value?.name ?? "the database"}`);
   }
 }
@@ -626,7 +762,7 @@ onMounted(() => {
   void connect(null);
 });
 
-const unregisterCloser = registerInnerTabCloser(props.connectionId, closeActivePaneTab);
+const unregisterCloser = registerInnerTabCloser(props.sessionId, closeActivePaneTab);
 
 onUnmounted(() => {
   window.removeEventListener("keydown", onWindowKeydown, true);
@@ -634,8 +770,16 @@ onUnmounted(() => {
   stopLost?.();
   stopRestored?.();
   unregisterCloser();
-  setLiveTitle(props.connectionId, "");
-  void api.disconnect(props.connectionId).catch(() => undefined);
+  setLiveTitle(props.sessionId, "");
+  void api.disconnect(props.sessionId).catch(() => undefined);
+  if (extraTab.value) {
+    for (const tab of tabs.value) {
+      if (tab.kind === "query") {
+        localStorage.removeItem(`recon.query.${tab.key}`);
+      }
+    }
+    localStorage.removeItem(queryTabsKey.value);
+  }
 });
 </script>
 
@@ -695,12 +839,20 @@ onUnmounted(() => {
           </strong>
           <DatabaseSwitcher
             v-if="namespaces.length > 1 || driver !== 'sqlite'"
-            :menu-id="connectionId"
+            :menu-id="sessionId"
             :current="namespace"
             :items="namespaces"
             :label="namespaceLabel"
+            :creatable="driver !== 'sqlite'"
+            :droppable="driver !== 'sqlite'"
+            :renamable="driver !== 'sqlite'"
             @open="refreshNamespaces"
             @select="changeNamespace"
+            @create="openNameDialog({ mode: 'create' })"
+            @drop="dropNamespace"
+            @rename="startRename"
+            @copy="copyNamespaceName"
+            @open-tab="openNamespaceInNewTab"
           />
           <span class="muted tiny db-toolbar-version" :title="session?.serverVersion">
             {{ session?.serverVersion }}
@@ -857,7 +1009,7 @@ onUnmounted(() => {
           >
             <TableView
               v-if="tab.kind === 'table'"
-              :connection-id="connectionId"
+              :connection-id="sessionId"
               :namespace="tab.namespace"
               :table="tab.table"
               :kind="tab.tableKind"
@@ -869,7 +1021,7 @@ onUnmounted(() => {
             <QueryEditor
               v-else
               :ref="(instance) => setEditorRef(tab.id, instance)"
-              :connection-id="connectionId"
+              :connection-id="sessionId"
               :driver="driver"
               :schema="schema"
               :storage-key="tab.key"
@@ -879,6 +1031,49 @@ onUnmounted(() => {
           </div>
         </section>
       </div>
+      <Modal
+        v-if="nameDialog"
+        :title="
+          nameDialog.mode === 'create'
+            ? `New ${namespaceLabel.toLowerCase()}`
+            : `Rename ${namespaceLabel.toLowerCase()} “${nameDialog.from}”`
+        "
+        @close="closeNameDialog"
+      >
+        <form @submit.prevent="submitNameDialog">
+          <label class="modal-label">
+            <span class="muted tiny">Name</span>
+            <input
+              ref="nameInput"
+              v-model="nameValue"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              :disabled="nameBusy"
+            />
+          </label>
+          <p v-if="nameDialog.mode === 'rename' && driver === 'mysql'" class="muted tiny">
+            MySQL renames a database by moving its tables into a new one. Privileges granted on the old
+            name are not carried over.
+          </p>
+          <p v-if="nameError" class="settings-error">{{ nameError }}</p>
+        </form>
+        <template #actions>
+          <button class="ghost" type="button" :disabled="nameBusy" @click="closeNameDialog">
+            Cancel
+          </button>
+          <button
+            class="primary"
+            type="button"
+            :disabled="!nameValue.trim() || nameBusy"
+            @click="submitNameDialog"
+          >
+            <span v-if="nameBusy" class="spinner" aria-hidden="true" />
+            <template v-if="nameDialog.mode === 'create'">{{ nameBusy ? "Creating…" : "Create" }}</template>
+            <template v-else>{{ nameBusy ? "Renaming…" : "Rename" }}</template>
+          </button>
+        </template>
+      </Modal>
     </template>
   </div>
 </template>

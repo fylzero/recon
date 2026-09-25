@@ -224,4 +224,16 @@ impl Dialect for PostgresDialect {
         }
         Some(format!("SET search_path TO {}, public", quote_double(namespace)))
     }
+
+    fn create_namespace_sql(&self, namespace: &str) -> Option<String> {
+        Some(format!("CREATE SCHEMA {}", quote_double(namespace)))
+    }
+
+    fn drop_namespace_sql(&self, namespace: &str) -> Option<String> {
+        Some(format!("DROP SCHEMA {} CASCADE", quote_double(namespace)))
+    }
+
+    fn rename_namespace_sql(&self, from: &str, to: &str) -> Option<String> {
+        Some(format!("ALTER SCHEMA {} RENAME TO {}", quote_double(from), quote_double(to)))
+    }
 }

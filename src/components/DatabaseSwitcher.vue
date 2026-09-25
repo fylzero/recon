@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onUnmounted, ref, watch } from "vue";
 import { useOverflowMenu } from "../composables/useOverflowMenu";
 
 const props = defineProps<{
@@ -7,12 +7,22 @@ const props = defineProps<{
   current: string;
   items: string[];
   label: string;
+  creatable?: boolean;
+  droppable?: boolean;
+  renamable?: boolean;
 }>();
 
 const emit = defineEmits<{
   select: [name: string];
   open: [];
+  create: [];
+  drop: [name: string];
+  rename: [name: string];
+  copy: [name: string];
+  openTab: [name: string];
 }>();
+
+const contextMenu = ref<{ name: string; x: number; y: number } | null>(null);
 
 const { isOpen, toggle, close } = useOverflowMenu(() => `database-${props.menuId}`);
 const query = ref("");
@@ -53,6 +63,50 @@ function select(name: string) {
   close();
   if (name !== props.current) {
     emit("select", name);
+  }
+}
+
+function create() {
+  close();
+  emit("create");
+}
+
+function onContextKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") {
+    event.stopImmediatePropagation();
+    event.preventDefault();
+    closeContextMenu();
+  }
+}
+
+function openContextMenu(event: MouseEvent, name: string) {
+  event.preventDefault();
+  contextMenu.value = { name, x: event.clientX, y: event.clientY };
+  document.addEventListener("keydown", onContextKeydown, true);
+}
+
+function closeContextMenu() {
+  contextMenu.value = null;
+  document.removeEventListener("keydown", onContextKeydown, true);
+}
+
+function onDropdownPointerDown(event: PointerEvent) {
+  if (!(event.target instanceof Element && event.target.closest(".database-context-menu"))) {
+    closeContextMenu();
+  }
+}
+
+function runAction(action: "drop" | "rename" | "copy" | "openTab", name: string) {
+  closeContextMenu();
+  close();
+  if (action === "drop") {
+    emit("drop", name);
+  } else if (action === "rename") {
+    emit("rename", name);
+  } else if (action === "copy") {
+    emit("copy", name);
+  } else {
+    emit("openTab", name);
   }
 }
 
@@ -119,8 +173,11 @@ watch(filtered, (items) => {
   }
 });
 
+onUnmounted(closeContextMenu);
+
 watch(isOpen, async (open) => {
   if (!open) {
+    closeContextMenu();
     query.value = "";
     moved.value = false;
     return;
@@ -158,7 +215,20 @@ watch(isOpen, async (open) => {
       class="overflow-menu-dropdown database-menu-dropdown"
       role="menu"
       :aria-label="`${label} list`"
+      @pointerdown="onDropdownPointerDown"
     >
+      <button
+        v-if="creatable"
+        class="overflow-menu-item database-menu-create"
+        type="button"
+        role="menuitem"
+        @click="create"
+      >
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M8 3v10M3 8h10" />
+        </svg>
+        New {{ label.toLowerCase() }}…
+      </button>
       <label class="database-menu-search">
         <span class="sr-only">Filter {{ label.toLowerCase() }}s</span>
         <svg class="database-menu-search-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -186,7 +256,7 @@ watch(isOpen, async (open) => {
           </svg>
         </button>
       </label>
-      <div ref="listEl" class="database-menu-list">
+      <div ref="listEl" class="database-menu-list" @scroll="closeContextMenu">
         <p v-if="!items.length" class="muted tiny database-menu-empty">
           No {{ label.toLowerCase() }}s.
         </p>
@@ -197,16 +267,70 @@ watch(isOpen, async (open) => {
           class="overflow-menu-item database-menu-item"
           :class="{
             active: item === current,
-            highlighted: index === activeIndex && item !== current,
+            highlighted:
+              item !== current && (contextMenu ? contextMenu.name === item : index === activeIndex),
           }"
           :data-database-index="index"
           type="button"
           role="menuitem"
           @mouseenter="onHover(index)"
           @click="select(item)"
+          @contextmenu="openContextMenu($event, item)"
         >
           {{ item }}
         </button>
+      </div>
+      <div
+        v-if="contextMenu"
+        class="overflow-menu-dropdown database-context-menu"
+        role="menu"
+        :aria-label="`${contextMenu.name} actions`"
+        :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
+        @contextmenu.prevent
+      >
+        <button
+          class="overflow-menu-item"
+          type="button"
+          role="menuitem"
+          @click="runAction('openTab', contextMenu.name)"
+        >
+          Open in new tab
+        </button>
+        <button
+          class="overflow-menu-item"
+          type="button"
+          role="menuitem"
+          @click="runAction('copy', contextMenu.name)"
+        >
+          Copy name
+        </button>
+        <template v-if="renamable || droppable">
+          <div class="overflow-menu-divider" role="separator" />
+          <button
+            v-if="renamable"
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            @click="runAction('rename', contextMenu.name)"
+          >
+            Rename…
+          </button>
+          <button
+            v-if="droppable"
+            class="overflow-menu-item danger"
+            type="button"
+            role="menuitem"
+            :disabled="contextMenu.name === current"
+            :title="
+              contextMenu.name === current
+                ? `Switch to another ${label.toLowerCase()} before dropping this one`
+                : undefined
+            "
+            @click="runAction('drop', contextMenu.name)"
+          >
+            Drop {{ label.toLowerCase() }}…
+          </button>
+        </template>
       </div>
     </div>
   </div>

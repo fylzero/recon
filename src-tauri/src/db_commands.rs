@@ -205,6 +205,8 @@ pub async fn connect(
     results: State<'_, ResultStore>,
     connection_id: String,
     password: Option<String>,
+    session_id: Option<String>,
+    namespace: Option<String>,
 ) -> Result<SessionInfo, String> {
     let entry = {
         let data = state.data.lock().map_err(|err| err.to_string())?;
@@ -212,13 +214,14 @@ pub async fn connect(
             .cloned()
             .ok_or_else(|| "Connection not found".to_string())?
     };
+    let key = session_id.filter(|id| !id.is_empty()).unwrap_or(connection_id);
     let password = resolve_password(&entry, password)?;
-    if let Some(previous) = sessions.remove(&connection_id).await {
+    if let Some(previous) = sessions.remove(&key).await {
         previous.close().await;
-        results.remove_connection(&connection_id);
+        results.remove_connection(&key);
     }
-    let (session, info) = open_session(entry, password, "").await?;
-    if let Some(stale) = sessions.insert(&connection_id, session).await {
+    let (session, info) = open_session(entry, password, namespace.as_deref().unwrap_or_default()).await?;
+    if let Some(stale) = sessions.insert(&key, session).await {
         stale.close().await;
     }
     Ok(info)
@@ -303,15 +306,11 @@ async fn open_session(
  * Re-reads the saved connection so edits made since connecting apply, and
  * falls back to the password typed for the stale session when none is saved.
  */
-fn reopen_credentials(
-    app: &AppHandle,
-    connection_id: &str,
-    stale: &Session,
-) -> Result<(ConnectionEntry, Option<String>), String> {
+fn reopen_credentials(app: &AppHandle, stale: &Session) -> Result<(ConnectionEntry, Option<String>), String> {
     let entry = {
         let state = app.state::<AppState>();
         let data = state.data.lock().map_err(|err| err.to_string())?;
-        data.find_connection(connection_id)
+        data.find_connection(&stale.entry.id)
             .cloned()
             .unwrap_or_else(|| stale.entry.clone())
     };
@@ -325,7 +324,7 @@ async fn rebuild(
     stale: &Arc<Session>,
     password: Option<String>,
 ) -> Result<(Arc<Session>, SessionInfo), String> {
-    let (entry, saved) = reopen_credentials(app, connection_id, stale)?;
+    let (entry, saved) = reopen_credentials(app, stale)?;
     let password = password.filter(|value| !value.is_empty()).or(saved);
     let (session, info) = open_session(entry, password, &stale.namespace()).await?;
     match app.state::<SessionStore>().replace(connection_id, stale, session).await {
@@ -425,6 +424,104 @@ pub async fn list_databases(app: AppHandle, connection_id: String) -> Result<Nam
 pub async fn set_database(app: AppHandle, connection_id: String, namespace: String) -> Result<(), String> {
     let namespace = namespace.as_str();
     with_session(&app, &connection_id, move |session| use_namespace(session, namespace)).await
+}
+
+#[tauri::command]
+pub async fn create_database(app: AppHandle, connection_id: String, namespace: String) -> Result<(), String> {
+    let namespace = namespace.trim();
+    if namespace.is_empty() {
+        return Err("Enter a name.".into());
+    }
+    let session = app.state::<SessionStore>().get(&connection_id).await?;
+    let dialect = dialect(session.driver);
+    let sql = dialect
+        .create_namespace_sql(namespace)
+        .ok_or_else(|| format!("{} can't create a {} here.", session.driver.label(), dialect.namespace_label().to_lowercase()))?;
+    pool_run(&session, &sql, 0, QueryOrigin::Schema).await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn drop_database(app: AppHandle, connection_id: String, namespace: String) -> Result<(), String> {
+    let session = app.state::<SessionStore>().get(&connection_id).await?;
+    let dialect = dialect(session.driver);
+    let label = dialect.namespace_label().to_lowercase();
+    if namespace == session.namespace() {
+        return Err(format!("Switch to another {label} before dropping this one."));
+    }
+    let sql = dialect
+        .drop_namespace_sql(&namespace)
+        .ok_or_else(|| format!("{} can't drop a {label} here.", session.driver.label()))?;
+    pool_run(&session, &sql, 0, QueryOrigin::Schema).await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn rename_database(app: AppHandle, connection_id: String, from: String, to: String) -> Result<(), String> {
+    let to = to.trim();
+    if to.is_empty() {
+        return Err("Enter a name.".into());
+    }
+    if to == from {
+        return Ok(());
+    }
+    let session = app.state::<SessionStore>().get(&connection_id).await?;
+    let dialect = dialect(session.driver);
+    match (session.driver, dialect.rename_namespace_sql(&from, to)) {
+        (_, Some(sql)) => {
+            pool_run(&session, &sql, 0, QueryOrigin::Schema).await?;
+        }
+        (Driver::Mysql, None) => rename_mysql_database(&session, &from, to).await?,
+        (driver, None) => {
+            let label = dialect.namespace_label().to_lowercase();
+            return Err(format!("{} can't rename a {label} here.", driver.label()));
+        }
+    }
+    if session.namespace() == from {
+        use_namespace(session, to).await?;
+    }
+    Ok(())
+}
+
+/**
+ * MySQL has no RENAME DATABASE, so this creates the new database with the
+ * same charset, moves every table in one atomic RENAME TABLE, then drops the
+ * emptied original. Grants on the old name are not carried over.
+ */
+async fn rename_mysql_database(session: &Session, from: &str, to: &str) -> Result<(), String> {
+    let blockers = first_text(&pool_run(session, &db::mysql::rename_blockers_sql(from), 1, QueryOrigin::Schema).await?);
+    if blockers.parse::<u64>().unwrap_or(0) > 0 {
+        return Err(
+            "MySQL can only rename a database by moving its tables, and this one has views, triggers, \
+             routines, or events that can't be moved."
+                .into(),
+        );
+    }
+    let charset = pool_run(session, &db::mysql::charset_sql(from), 1, QueryOrigin::Schema)
+        .await?
+        .text_rows()
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    let tables: Vec<String> = pool_run(session, &db::mysql::base_tables_sql(from), usize::MAX, QueryOrigin::Schema)
+        .await?
+        .text_rows()
+        .into_iter()
+        .filter_map(|row| row.into_iter().next().flatten())
+        .collect();
+    let create = db::mysql::create_like_sql(to, &text_at(&charset, 0), &text_at(&charset, 1));
+    pool_run(session, &create, 0, QueryOrigin::Schema).await?;
+    if !tables.is_empty() {
+        let moved = pool_run(session, &db::mysql::move_tables_sql(from, to, &tables), 0, QueryOrigin::Schema).await;
+        if let Err(err) = moved {
+            let cleanup = format!("DROP DATABASE {}", db::quote_backtick(to));
+            let _ = pool_run(session, &cleanup, 0, QueryOrigin::Schema).await;
+            return Err(err);
+        }
+    }
+    let drop = format!("DROP DATABASE {}", db::quote_backtick(from));
+    pool_run(session, &drop, 0, QueryOrigin::Schema).await?;
+    Ok(())
 }
 
 async fn use_namespace(session: Arc<Session>, namespace: &str) -> Result<(), String> {

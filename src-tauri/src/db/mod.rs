@@ -675,6 +675,13 @@ pub trait Dialect: Sync {
     fn schema_columns_sql(&self, namespace: &str) -> String;
     fn quote_ident(&self, ident: &str) -> String;
     fn use_namespace_sql(&self, namespace: &str) -> Option<String>;
+    fn create_namespace_sql(&self, namespace: &str) -> Option<String>;
+    fn drop_namespace_sql(&self, namespace: &str) -> Option<String>;
+
+    /// A single statement that renames the namespace, when the database has one.
+    fn rename_namespace_sql(&self, _from: &str, _to: &str) -> Option<String> {
+        None
+    }
 
     fn index_columns(&self, raw: String) -> String {
         raw
