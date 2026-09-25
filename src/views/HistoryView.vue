@@ -38,6 +38,9 @@ function originLabel(entry: QueryLogEntry) {
   if (entry.origin === "editor") {
     return "Query";
   }
+  if (entry.origin === "edit") {
+    return "Edit";
+  }
   return entry.origin === "browse" ? "Browse" : "Schema";
 }
 

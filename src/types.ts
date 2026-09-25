@@ -164,6 +164,24 @@ export interface BrowseResult {
   durationMs: number;
 }
 
+export type EditValue = null | boolean | number | string;
+
+export interface CellEdit {
+  column: string;
+  value: EditValue;
+}
+
+export interface RowUpdate {
+  key: CellEdit[];
+  changes: CellEdit[];
+}
+
+export interface SaveRequest {
+  namespace: string;
+  table: string;
+  updates: RowUpdate[];
+}
+
 export interface StatementResult {
   sql: string;
   resultId: string | null;
@@ -176,7 +194,7 @@ export interface StatementResult {
   error: string | null;
 }
 
-export type QueryOrigin = "editor" | "browse" | "schema";
+export type QueryOrigin = "editor" | "browse" | "schema" | "edit";
 
 export interface QueryLogEntry {
   id: string;

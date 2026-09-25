@@ -2064,6 +2064,18 @@ button.link-button:hover:not(:disabled) {
   white-space: nowrap;
 }
 
+.db-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-shrink: 0;
+  margin: -0.2rem 0 -0.2rem auto;
+}
+
+.db-toolbar-actions button {
+  padding: 0.15rem 0.6rem;
+}
+
 .db-toolbar-driver {
   flex-shrink: 0;
   padding: 0.05rem 0.4rem;
@@ -2353,6 +2365,23 @@ button.view-tab.active:hover:not(:disabled) {
   white-space: nowrap;
 }
 
+.dirty-dot {
+  flex: 0 0 auto;
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: var(--warn);
+}
+
+.db-table.dirty .db-table-name {
+  color: var(--warn);
+  font-style: italic;
+}
+
+.db-table .dirty-dot {
+  margin-left: auto;
+}
+
 .db-sidebar-footer {
   display: flex;
   align-items: center;
@@ -2474,6 +2503,19 @@ button.view-tab.active:hover:not(:disabled) {
 .subtab-close:hover:not(:disabled) {
   background: var(--bg-hover);
   color: var(--text);
+}
+
+.subtab.dirty .subtab-title {
+  font-style: italic;
+}
+
+.subtab.dirty .subtab-close {
+  opacity: 1;
+}
+
+.subtab.dirty .subtab-close:not(:hover) .subtab-close-icon,
+.subtab-close:hover .dirty-dot {
+  display: none;
 }
 
 .subtab.query .subtab-icon {
@@ -2728,6 +2770,20 @@ button.view-tab.active:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.022);
 }
 
+.grid-row.active {
+  background: rgba(17, 135, 119, 0.1);
+}
+
+.grid-row.active .grid-gutter {
+  background: #142520;
+  color: #7ee0c7;
+}
+
+.grid-row.modified .grid-gutter {
+  box-shadow: inset 3px 0 0 var(--warn);
+  color: var(--warn);
+}
+
 .grid-gutter {
   position: sticky;
   left: 0;
@@ -2771,7 +2827,48 @@ button.view-tab.active:hover:not(:disabled) {
 }
 
 .grid-cell.focused {
-  box-shadow: inset 0 0 0 1px var(--accent);
+  box-shadow: inset 0 0 0 1px #1fb39f;
+}
+
+.grid-cell.modified {
+  background-image: linear-gradient(rgba(230, 192, 123, 0.16), rgba(230, 192, 123, 0.16));
+  color: #f3d9a4;
+}
+
+.grid-cell.editing {
+  padding: 0;
+  box-shadow: none;
+}
+
+.grid-editor {
+  display: block;
+  width: 100%;
+  height: var(--grid-row-height);
+  min-height: 0;
+  margin: 0;
+  padding: 0 0.5rem;
+  border: 0;
+  border-radius: 0;
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: #0b0e13;
+  color: var(--text);
+  font: inherit;
+  font-style: normal;
+  line-height: var(--grid-row-height);
+  white-space: pre;
+  overflow: hidden;
+  resize: none;
+  user-select: text;
+}
+
+.grid-editor::placeholder {
+  color: #5d6676;
+  font-style: italic;
+}
+
+.edit-status {
+  color: var(--warn);
 }
 
 .grid-loading {

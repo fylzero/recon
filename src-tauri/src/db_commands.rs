@@ -9,8 +9,8 @@ use crate::commands::{sanitize_connection, AppState};
 use crate::db::ssh::Tunnel;
 use crate::db::{
     self, dialect, first_text, text_at, BrowseRequest, BrowseResult, CellValue, ColumnDetail,
-    ColumnMeta, IndexInfo, NamespaceList, Pool, RawOutput, ResultStore, RowValues, SchemaColumn,
-    Session, SessionStore, TableInfo, TableStructure,
+    ColumnMeta, IndexInfo, NamespaceList, Pool, RawOutput, ResultStore, RowValues, SaveRequest,
+    SchemaColumn, Session, SessionStore, TableInfo, TableStructure,
 };
 use crate::models::{ConnectionEntry, Driver};
 use crate::query_log::{self, QueryOrigin, QueryRecord};
@@ -433,6 +433,47 @@ pub async fn browse_table(
         total,
         duration_ms,
     })
+}
+
+#[tauri::command]
+pub async fn save_table_changes(
+    sessions: State<'_, SessionStore>,
+    connection_id: String,
+    requests: Vec<SaveRequest>,
+) -> Result<usize, String> {
+    let session = sessions.get(&connection_id).await?;
+    let dialect = dialect(session.driver);
+    let mut statements = Vec::new();
+    for request in &requests {
+        let table = dialect.qualified(&request.namespace, &request.table);
+        for update in &request.updates {
+            statements.push(db::update_statement(session.driver, &table, update)?);
+        }
+    }
+    if statements.is_empty() {
+        return Ok(0);
+    }
+    let started = Instant::now();
+    let outcome = session.pool.apply(&statements).await;
+    let sql = statements
+        .iter()
+        .map(|statement| statement.display.as_str())
+        .collect::<Vec<_>>()
+        .join(";\n");
+    let namespace = session.namespace();
+    query_log::record(QueryRecord {
+        connection: &session.name,
+        driver: session.driver.label(),
+        database: &namespace,
+        sql: &sql,
+        origin: QueryOrigin::Edit,
+        duration: started.elapsed(),
+        outcome: match &outcome {
+            Ok(()) => Ok(Some(statements.len() as u64)),
+            Err(err) => Err(err.as_str()),
+        },
+    });
+    outcome.map(|()| statements.len())
 }
 
 #[tauri::command]

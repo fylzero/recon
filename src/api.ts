@@ -9,6 +9,7 @@ import type {
   PreferencesPatch,
   QueryLogEntry,
   RowValues,
+  SaveRequest,
   SchemaColumn,
   SessionInfo,
   StatementResult,
@@ -168,6 +169,10 @@ export function schemaColumns(connectionId: string, namespace: string) {
 
 export function browseTable(connectionId: string, request: BrowseRequest) {
   return invoke<BrowseResult>("browse_table", { connectionId, request });
+}
+
+export function saveTableChanges(connectionId: string, requests: SaveRequest[]) {
+  return invoke<number>("save_table_changes", { connectionId, requests });
 }
 
 export function runQuery(connectionId: string, statements: string[]) {

@@ -20,6 +20,7 @@ pub enum QueryOrigin {
     Editor,
     Browse,
     Schema,
+    Edit,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

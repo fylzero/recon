@@ -314,6 +314,35 @@ mod tests {
         let error = run(&mut conn, "SELECT * FROM missing_table", 100, None).await.unwrap_err();
         assert!(error.contains("missing_table"), "{error}");
 
+        let table = MysqlDialect.qualified("recon_live_test", "things");
+        let update = |id: i64, label: &str| -> super::super::RowUpdate {
+            serde_json::from_value(serde_json::json!({
+                "key": [{ "column": "id", "value": id }],
+                "changes": [
+                    { "column": "label", "value": label },
+                    { "column": "flag", "value": false },
+                    { "column": "ratio", "value": "0.25" },
+                ],
+            }))
+            .unwrap()
+        };
+        let statement = |id: i64, label: &str| {
+            super::super::update_statement(crate::models::Driver::Mysql, &table, &update(id, label)).unwrap()
+        };
+        let missing = opened
+            .pool
+            .apply(&[statement(1, "rolled back"), statement(404, "nope")])
+            .await
+            .unwrap_err();
+        assert!(missing.contains("id = 404"), "{missing}");
+        opened.pool.apply(&[statement(1, "a\\b 'c'")]).await.unwrap();
+        opened.pool.apply(&[statement(1, "a\\b 'c'")]).await.unwrap();
+        let saved = run(&mut conn, "SELECT label, flag, ratio FROM things WHERE id = 1", 1, None)
+            .await
+            .unwrap();
+        assert!(matches!(&saved.rows[0][0], CellValue::Text(text) if text == "a\\b 'c'"));
+        assert!(matches!(saved.rows[0][1], CellValue::Int(0)));
+
         let Pool::MySql(pool) = opened.pool else {
             panic!("expected a MySQL pool");
         };

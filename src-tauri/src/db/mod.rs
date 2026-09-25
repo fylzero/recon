@@ -201,6 +201,188 @@ pub struct BrowseResult {
     pub duration_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum EditValue {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Text(String),
+}
+
+impl<'de> Deserialize<'de> for EditValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde_json::Value;
+        match Value::deserialize(deserializer)? {
+            Value::Null => Ok(EditValue::Null),
+            Value::Bool(value) => Ok(EditValue::Bool(value)),
+            Value::Number(number) => match number.as_i64() {
+                Some(value) => Ok(EditValue::Int(value)),
+                None => number
+                    .as_f64()
+                    .map(EditValue::Float)
+                    .ok_or_else(|| serde::de::Error::custom("number out of range")),
+            },
+            Value::String(value) => Ok(EditValue::Text(value)),
+            _ => Err(serde::de::Error::custom("expected null, a boolean, a number, or a string")),
+        }
+    }
+}
+
+impl EditValue {
+    fn text(&self) -> Option<String> {
+        match self {
+            EditValue::Null => None,
+            EditValue::Bool(value) => Some(value.to_string()),
+            EditValue::Int(value) => Some(value.to_string()),
+            EditValue::Float(value) => Some(value.to_string()),
+            EditValue::Text(value) => Some(value.clone()),
+        }
+    }
+
+    /// Postgres infers the column type from an untyped literal, so every value is quoted.
+    fn postgres_literal(&self) -> String {
+        match self.text() {
+            None => "NULL".into(),
+            Some(text) => format!("E'{}'", text.replace('\\', "\\\\").replace('\'', "''")),
+        }
+    }
+
+    fn display_literal(&self) -> String {
+        match self {
+            EditValue::Null => "NULL".into(),
+            EditValue::Bool(_) | EditValue::Int(_) | EditValue::Float(_) => {
+                self.text().unwrap_or_default()
+            }
+            EditValue::Text(text) => quote_literal(text),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CellEdit {
+    pub column: String,
+    pub value: EditValue,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RowUpdate {
+    pub key: Vec<CellEdit>,
+    pub changes: Vec<CellEdit>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveRequest {
+    pub namespace: String,
+    pub table: String,
+    pub updates: Vec<RowUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EditStatement {
+    pub sql: String,
+    pub params: Vec<EditValue>,
+    pub display: String,
+    pub table: String,
+    pub label: String,
+}
+
+pub fn update_statement(driver: Driver, table: &str, update: &RowUpdate) -> Result<EditStatement, String> {
+    if update.key.is_empty() {
+        return Err("Rows can only be updated by primary key.".into());
+    }
+    if update.changes.is_empty() {
+        return Err("There is nothing to update.".into());
+    }
+    let dialect = dialect(driver);
+    let inline = driver == Driver::Postgres;
+    let mut params = Vec::new();
+    let mut value_sql = |value: &EditValue| {
+        if inline {
+            value.postgres_literal()
+        } else {
+            params.push(value.clone());
+            "?".to_string()
+        }
+    };
+    let mut set = Vec::new();
+    let mut set_display = Vec::new();
+    for change in &update.changes {
+        let column = dialect.quote_ident(&change.column);
+        let sql = match change.value {
+            EditValue::Null => "NULL".to_string(),
+            ref value => value_sql(value),
+        };
+        set.push(format!("{column} = {sql}"));
+        set_display.push(format!("{column} = {}", change.value.display_literal()));
+    }
+    let mut filter = Vec::new();
+    let mut filter_display = Vec::new();
+    let mut label = Vec::new();
+    for key in &update.key {
+        let column = dialect.quote_ident(&key.column);
+        let (sql, display) = match key.value {
+            EditValue::Null => (format!("{column} IS NULL"), format!("{column} IS NULL")),
+            ref value => (
+                format!("{column} = {}", value_sql(value)),
+                format!("{column} = {}", value.display_literal()),
+            ),
+        };
+        filter.push(sql);
+        filter_display.push(display);
+        label.push(format!("{} = {}", key.column, key.value.display_literal()));
+    }
+    Ok(EditStatement {
+        sql: format!("UPDATE {table} SET {} WHERE {}", set.join(", "), filter.join(" AND ")),
+        params,
+        display: format!(
+            "UPDATE {table} SET {} WHERE {}",
+            set_display.join(", "),
+            filter_display.join(" AND ")
+        ),
+        table: table.to_string(),
+        label: label.join(", "),
+    })
+}
+
+fn check_matched(statement: &EditStatement, matched: u64) -> Result<(), String> {
+    match matched {
+        1 => Ok(()),
+        0 => Err(format!(
+            "The row in {} where {} was not found. It may have been changed or deleted since it was loaded. Nothing was saved.",
+            statement.table, statement.label
+        )),
+        count => Err(format!(
+            "The row in {} where {} matched {count} rows, so it cannot be updated safely. Nothing was saved.",
+            statement.table, statement.label
+        )),
+    }
+}
+
+macro_rules! apply_in_transaction {
+    ($pool:expr, $statements:expr) => {{
+        let mut tx = $pool.begin().await.map_err(describe_error)?;
+        for statement in $statements {
+            let mut query = sqlx::query(&statement.sql);
+            for param in &statement.params {
+                query = match param {
+                    EditValue::Null => query.bind(None::<String>),
+                    EditValue::Bool(value) => query.bind(*value),
+                    EditValue::Int(value) => query.bind(*value),
+                    EditValue::Float(value) => query.bind(*value),
+                    EditValue::Text(value) => query.bind(value.as_str()),
+                };
+            }
+            let result = query.execute(&mut *tx).await.map_err(describe_error)?;
+            check_matched(statement, result.rows_affected())?;
+        }
+        tx.commit().await.map_err(describe_error)
+    }};
+}
+
 #[derive(Debug)]
 pub struct RawOutput {
     pub columns: Vec<ColumnMeta>,
@@ -286,6 +468,14 @@ impl Pool {
                 let mut conn = pool.acquire().await.map_err(describe_error)?;
                 sqlite::run(&mut conn, sql, limit, None).await
             }
+        }
+    }
+
+    pub async fn apply(&self, statements: &[EditStatement]) -> Result<(), String> {
+        match self {
+            Pool::MySql(pool) => apply_in_transaction!(pool, statements),
+            Pool::Postgres(pool) => apply_in_transaction!(pool, statements),
+            Pool::Sqlite(pool) => apply_in_transaction!(pool, statements),
         }
     }
 }
@@ -608,6 +798,88 @@ mod tests {
             index_columns_from_definition("CREATE UNIQUE INDEX users_email ON public.users USING btree (email, lower(name))"),
             "email, lower(name)"
         );
+    }
+
+    fn sample_update() -> RowUpdate {
+        serde_json::from_value(serde_json::json!({
+            "key": [{ "column": "id", "value": 7 }],
+            "changes": [
+                { "column": "name", "value": "o'brien \\ co" },
+                { "column": "note", "value": null },
+                { "column": "active", "value": true },
+            ],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn binds_update_values_for_mysql_and_sqlite() {
+        let statement = update_statement(Driver::Mysql, "`app`.`users`", &sample_update()).unwrap();
+        assert_eq!(
+            statement.sql,
+            "UPDATE `app`.`users` SET `name` = ?, `note` = NULL, `active` = ? WHERE `id` = ?"
+        );
+        assert_eq!(
+            statement.params,
+            vec![
+                EditValue::Text("o'brien \\ co".into()),
+                EditValue::Bool(true),
+                EditValue::Int(7),
+            ]
+        );
+        assert_eq!(statement.label, "id = 7");
+    }
+
+    #[test]
+    fn inlines_escaped_literals_for_postgres() {
+        let statement = update_statement(Driver::Postgres, "\"users\"", &sample_update()).unwrap();
+        assert_eq!(
+            statement.sql,
+            "UPDATE \"users\" SET \"name\" = E'o''brien \\\\ co', \"note\" = NULL, \"active\" = E'true' \
+             WHERE \"id\" = E'7'"
+        );
+        assert!(statement.params.is_empty());
+    }
+
+    #[test]
+    fn refuses_updates_without_a_key() {
+        let mut update = sample_update();
+        update.key.clear();
+        assert!(update_statement(Driver::Sqlite, "\"users\"", &update).is_err());
+    }
+
+    #[tokio::test]
+    async fn applies_updates_in_one_transaction() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let pool = Pool::Sqlite(pool);
+        pool.run("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)", 0)
+            .await
+            .unwrap();
+        pool.run("INSERT INTO users VALUES (1, 'ada', 1), (2, 'bob', 2)", 0).await.unwrap();
+
+        let update = |id: i64, name: &str| RowUpdate {
+            key: vec![CellEdit { column: "id".into(), value: EditValue::Int(id) }],
+            changes: vec![
+                CellEdit { column: "name".into(), value: EditValue::Text(name.into()) },
+                CellEdit { column: "score".into(), value: EditValue::Text("42".into()) },
+            ],
+        };
+        let statements = [update(1, "ada'"), update(99, "ghost")]
+            .iter()
+            .map(|row| update_statement(Driver::Sqlite, "\"users\"", row).unwrap())
+            .collect::<Vec<_>>();
+        let error = pool.apply(&statements).await.unwrap_err();
+        assert!(error.contains("id = 99"), "{error}");
+        let unchanged = pool.run("SELECT name FROM users WHERE id = 1", 1).await.unwrap();
+        assert_eq!(unchanged.rows[0][0], CellValue::Text("ada".into()));
+
+        pool.apply(&statements[..1]).await.unwrap();
+        let saved = pool.run("SELECT name, score FROM users WHERE id = 1", 1).await.unwrap();
+        assert_eq!(saved.rows[0], vec![CellValue::Text("ada'".into()), CellValue::Int(42)]);
     }
 
     #[test]

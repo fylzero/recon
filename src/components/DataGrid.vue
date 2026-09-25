@@ -1,14 +1,23 @@
-<script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
-import { useVirtualizer } from "@tanstack/vue-virtual";
-import { cellCopyText, cellDisplay, cellTitle, initialColumnWidth, isNumericColumn } from "../cells";
-import { useApp } from "../composables/useApp";
-import type { ColumnMeta, RowValues, SortDirection } from "../types";
-
-interface CellPosition {
+<script lang="ts">
+export interface CellPosition {
   row: number;
   col: number;
 }
+</script>
+
+<script setup lang="ts">
+import { computed, nextTick, ref, watch } from "vue";
+import { useVirtualizer } from "@tanstack/vue-virtual";
+import {
+  cellCopyText,
+  cellDisplay,
+  cellTitle,
+  initialColumnWidth,
+  isBytes,
+  isNumericColumn,
+} from "../cells";
+import { useApp } from "../composables/useApp";
+import type { ColumnMeta, RowValues, SortDirection } from "../types";
 
 const props = defineProps<{
   columns: ColumnMeta[];
@@ -17,11 +26,16 @@ const props = defineProps<{
   sortable?: boolean;
   sortColumn?: string | null;
   sortDir?: SortDirection | null;
+  editable?: boolean;
+  editableColumns?: boolean[];
+  modified?: Map<number, Set<number>>;
 }>();
 
 const emit = defineEmits<{
   sort: [column: string];
   needRows: [start: number, end: number];
+  edit: [row: number, col: number, text: string];
+  setNull: [cells: CellPosition[]];
 }>();
 
 const { gridFontSize, maxAutoColumnWidth, showToast } = useApp();
@@ -33,6 +47,9 @@ const widths = ref<number[]>([]);
 let autoFitPending = false;
 const anchor = ref<CellPosition | null>(null);
 const focus = ref<CellPosition | null>(null);
+const editing = ref<CellPosition | null>(null);
+const draft = ref("");
+let initialDraft = "";
 
 const rowHeight = computed(() => Math.round(gridFontSize.value * 1.85 + 2));
 const headerHeight = computed(() => rowHeight.value + 4);
@@ -55,6 +72,7 @@ watch(
     widths.value = props.columns.map((column) => initialColumnWidth(column, charWidth.value));
     anchor.value = null;
     focus.value = null;
+    editing.value = null;
     autoFitPending = true;
     autoFitColumns();
   },
@@ -160,7 +178,102 @@ function isFocused(row: number, col: number) {
   return focus.value?.row === row && focus.value?.col === col;
 }
 
+function isRowActive(row: number) {
+  const range = selection.value;
+  return Boolean(range && row >= range.top && row <= range.bottom);
+}
+
+function isEditing(row: number, col: number) {
+  return editing.value?.row === row && editing.value?.col === col;
+}
+
+function isModified(row: number, col: number) {
+  return Boolean(props.modified?.get(row)?.has(col));
+}
+
+function canEdit(row: number, col: number) {
+  const values = props.rows[row];
+  return Boolean(
+    props.editable &&
+      props.editableColumns?.[col] !== false &&
+      values &&
+      !isBytes(values[col] ?? null),
+  );
+}
+
+function startEdit(row: number, col: number, initial?: string) {
+  if (!canEdit(row, col)) {
+    return;
+  }
+  const value = props.rows[row]?.[col] ?? null;
+  initialDraft = value === null ? "" : String(value);
+  draft.value = initial ?? initialDraft;
+  editing.value = { row, col };
+  anchor.value = { row, col };
+  focus.value = { row, col };
+  scrollCellIntoView({ row, col });
+}
+
+function commitEdit() {
+  const position = editing.value;
+  if (!position) {
+    return;
+  }
+  editing.value = null;
+  if (draft.value !== initialDraft) {
+    emit("edit", position.row, position.col, draft.value);
+  }
+}
+
+function cancelEdit() {
+  editing.value = null;
+}
+
+function focusEditor(element: unknown) {
+  if (element instanceof HTMLTextAreaElement && document.activeElement !== element) {
+    element.focus({ preventScroll: true });
+    element.setSelectionRange(element.value.length, element.value.length);
+  }
+}
+
+function onEditorKeydown(event: KeyboardEvent) {
+  event.stopPropagation();
+  if (event.key === "Enter" && !event.shiftKey && !event.altKey) {
+    event.preventDefault();
+    commitEdit();
+    scroller.value?.focus({ preventScroll: true });
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    cancelEdit();
+    scroller.value?.focus({ preventScroll: true });
+  } else if (event.key === "Tab") {
+    event.preventDefault();
+    commitEdit();
+    scroller.value?.focus({ preventScroll: true });
+    moveFocus(0, event.shiftKey ? -1 : 1, false);
+  }
+}
+
+function setSelectionNull() {
+  const range = selection.value;
+  if (!range) {
+    return;
+  }
+  const cells: CellPosition[] = [];
+  for (let row = range.top; row <= range.bottom; row += 1) {
+    for (let col = range.left; col <= range.right; col += 1) {
+      if (canEdit(row, col)) {
+        cells.push({ row, col });
+      }
+    }
+  }
+  if (cells.length) {
+    emit("setNull", cells);
+  }
+}
+
 function selectCell(event: MouseEvent, row: number, col: number) {
+  commitEdit();
   const position = { row, col };
   if (event.shiftKey && anchor.value) {
     focus.value = position;
@@ -172,6 +285,7 @@ function selectCell(event: MouseEvent, row: number, col: number) {
 }
 
 function selectRow(event: MouseEvent, row: number) {
+  commitEdit();
   const last = Math.max(props.columns.length - 1, 0);
   if (event.shiftKey && anchor.value) {
     focus.value = { row, col: last };
@@ -301,6 +415,20 @@ function onKeydown(event: KeyboardEvent) {
   if (event.key === "Escape" && anchor.value) {
     anchor.value = null;
     focus.value = null;
+    return;
+  }
+  if (!props.editable || !focus.value || event.altKey || meta) {
+    return;
+  }
+  if (event.key === "Enter" || event.key === "F2") {
+    event.preventDefault();
+    startEdit(focus.value.row, focus.value.col);
+  } else if (event.key === "Backspace" || event.key === "Delete") {
+    event.preventDefault();
+    setSelectionNull();
+  } else if (event.key.length === 1) {
+    event.preventDefault();
+    startEdit(focus.value.row, focus.value.col, event.key);
   }
 }
 
@@ -361,7 +489,7 @@ function scrollToTop() {
   });
 }
 
-defineExpose({ scrollToTop });
+defineExpose({ scrollToTop, commitEdit });
 </script>
 
 <template>
@@ -409,7 +537,11 @@ defineExpose({ scrollToTop });
         v-for="item in virtualRows"
         :key="item.index"
         class="grid-row"
-        :class="{ odd: item.index % 2 === 1 }"
+        :class="{
+          odd: item.index % 2 === 1,
+          active: isRowActive(item.index),
+          modified: modified?.has(item.index),
+        }"
         role="row"
         :style="{ transform: `translateY(${item.start - headerHeight}px)` }"
       >
@@ -426,11 +558,29 @@ defineExpose({ scrollToTop });
               numeric: numeric[col],
               selected: isSelected(item.index, col),
               focused: isFocused(item.index, col),
+              modified: isModified(item.index, col),
+              editing: isEditing(item.index, col),
             }"
-            :title="cellTitle(value)"
+            :title="isEditing(item.index, col) ? undefined : cellTitle(value)"
             @mousedown.prevent="selectCell($event, item.index, col)"
+            @dblclick="startEdit(item.index, col)"
           >
-            {{ cellDisplay(value) }}
+            <textarea
+              v-if="isEditing(item.index, col)"
+              :ref="focusEditor"
+              v-model="draft"
+              class="grid-editor"
+              rows="1"
+              spellcheck="false"
+              autocomplete="off"
+              autocapitalize="off"
+              :placeholder="value === null ? 'NULL' : ''"
+              @keydown="onEditorKeydown"
+              @blur="commitEdit"
+              @mousedown.stop
+              @dblclick.stop
+            />
+            <template v-else>{{ cellDisplay(value) }}</template>
           </div>
         </template>
         <div v-else class="grid-cell grid-loading">Loading…</div>

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { SQLNamespace } from "@codemirror/lang-sql";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
 import * as api from "../api";
 import { SIDEBAR_MAX, SIDEBAR_MIN, useApp } from "../composables/useApp";
@@ -41,7 +42,18 @@ const view = ref<ConnectionViewTab>("tables");
 const activeTableTabId = ref("");
 const activeQueryTabId = ref("");
 const tabsRestored = ref(false);
+const dirtyTabs = ref(new Map<string, number>());
+const saving = ref(false);
 const editors = new Map<string, InstanceType<typeof QueryEditor>>();
+const tableViews = new Map<string, InstanceType<typeof TableView>>();
+
+const unsavedRows = computed(() => [...dirtyTabs.value.values()].reduce((sum, count) => sum + count, 0));
+const unsavedLabel = computed(() => {
+  const rows = unsavedRows.value;
+  const tableCount = dirtyTabs.value.size;
+  const rowText = `${rows.toLocaleString()} unsaved ${rows === 1 ? "row" : "rows"}`;
+  return tableCount > 1 ? `${rowText} in ${tableCount} tables` : rowText;
+});
 
 const match = computed(() => findConnection(props.connectionId));
 const entry = computed(() => match.value?.connection ?? null);
@@ -188,7 +200,100 @@ function selectView(next: ConnectionViewTab) {
   }
 }
 
+function setTabChanges(id: string, rows: number) {
+  if ((dirtyTabs.value.get(id) ?? 0) === rows) {
+    return;
+  }
+  const next = new Map(dirtyTabs.value);
+  if (rows) {
+    next.set(id, rows);
+  } else {
+    next.delete(id);
+  }
+  dirtyTabs.value = next;
+}
+
+function setTableViewRef(id: string, instance: unknown) {
+  if (instance) {
+    tableViews.set(id, instance as InstanceType<typeof TableView>);
+  } else {
+    tableViews.delete(id);
+  }
+}
+
+function dirtyTableViews() {
+  return [...dirtyTabs.value.keys()].flatMap((id) => tableViews.get(id) ?? []);
+}
+
+async function saveAll() {
+  if (saving.value) {
+    return;
+  }
+  const pending = [...tableViews.values()].map((view) => ({ view, ...view.pendingChanges() }));
+  const changed = pending.filter((item) => item.request.updates.length);
+  if (!changed.length) {
+    return;
+  }
+  saving.value = true;
+  try {
+    const count = await api.saveTableChanges(
+      props.connectionId,
+      changed.map((item) => item.request),
+    );
+    for (const item of changed) {
+      item.view.markSaved(item.snapshot);
+    }
+    const tableText = changed.length > 1 ? ` in ${changed.length} tables` : "";
+    showToast(`Saved ${count.toLocaleString()} ${count === 1 ? "row" : "rows"}${tableText}`);
+  } catch (err) {
+    showToast(String(err), "error");
+  } finally {
+    saving.value = false;
+  }
+}
+
+function discardAll() {
+  for (const view of dirtyTableViews()) {
+    view.discard();
+  }
+}
+
+function onWindowKeydown(event: KeyboardEvent) {
+  if (
+    !props.active ||
+    !(event.metaKey || event.ctrlKey) ||
+    event.altKey ||
+    event.shiftKey ||
+    event.key.toLowerCase() !== "s"
+  ) {
+    return;
+  }
+  event.preventDefault();
+  void saveAll();
+}
+
+async function confirmCloseTab(id: string, table: string) {
+  const ok = await confirm(`Discard unsaved changes to “${table}”?`, {
+    title: "Unsaved changes",
+    kind: "warning",
+    okLabel: "Discard",
+    cancelLabel: "Cancel",
+  });
+  if (ok) {
+    removeTab(id);
+  }
+}
+
 function closeTab(id: string) {
+  const tab = tabs.value.find((item) => item.id === id);
+  if (tab?.kind === "table" && dirtyTabs.value.has(id)) {
+    void confirmCloseTab(id, tab.table);
+    return;
+  }
+  removeTab(id);
+}
+
+function removeTab(id: string) {
   const tab = tabs.value.find((item) => item.id === id);
   if (!tab) {
     return;
@@ -403,6 +508,7 @@ function startSidebarResize(event: PointerEvent) {
 }
 
 onMounted(() => {
+  window.addEventListener("keydown", onWindowKeydown, true);
   if (needsPassword.value) {
     status.value = "password";
     void nextTick(() => passwordInput.value?.focus());
@@ -414,6 +520,7 @@ onMounted(() => {
 const unregisterCloser = registerInnerTabCloser(props.connectionId, closeActivePaneTab);
 
 onUnmounted(() => {
+  window.removeEventListener("keydown", onWindowKeydown, true);
   unregisterCloser();
   setLiveTitle(props.connectionId, "");
   void api.disconnect(props.connectionId).catch(() => undefined);
@@ -487,6 +594,28 @@ onUnmounted(() => {
             {{ session?.serverVersion }}
           </span>
           <span class="muted tiny db-toolbar-driver">{{ driverLabel(driver) }}</span>
+          <div v-if="dirtyTabs.size" class="db-toolbar-actions">
+            <span v-if="saving" class="spinner" aria-label="Saving" />
+            <span class="tiny edit-status">{{ unsavedLabel }}</span>
+            <button
+              class="ghost tiny"
+              type="button"
+              title="Discard changes in every table"
+              :disabled="saving"
+              @click="discardAll"
+            >
+              Discard
+            </button>
+            <button
+              class="primary tiny"
+              type="button"
+              title="Save changes in every table (⌘S)"
+              :disabled="saving"
+              @click="saveAll"
+            >
+              Save
+            </button>
+          </div>
         </div>
       </header>
       <ConnectionViewTabs :active="view" :table-count="tables.length" @select="selectView" />
@@ -511,8 +640,18 @@ onUnmounted(() => {
               type="button"
               role="option"
               :aria-selected="activeTableTabId === `table:${namespace}.${table.name}`"
-              :class="{ active: activeTableTabId === `table:${namespace}.${table.name}`, view: table.kind === 'view' }"
-              :title="table.kind === 'view' ? `${table.name} (view)` : table.name"
+              :class="{
+                active: activeTableTabId === `table:${namespace}.${table.name}`,
+                view: table.kind === 'view',
+                dirty: dirtyTabs.has(`table:${namespace}.${table.name}`),
+              }"
+              :title="
+                dirtyTabs.has(`table:${namespace}.${table.name}`)
+                  ? `${table.name} (unsaved changes)`
+                  : table.kind === 'view'
+                    ? `${table.name} (view)`
+                    : table.name
+              "
               @click="openTable(table)"
               @dblclick="queryTable(table)"
             >
@@ -525,6 +664,11 @@ onUnmounted(() => {
                 <path d="M2 6.5h12M6.5 6.5V13" />
               </svg>
               <span class="db-table-name">{{ table.name }}</span>
+              <span
+                v-if="dirtyTabs.has(`table:${namespace}.${table.name}`)"
+                class="dirty-dot"
+                aria-label="Unsaved changes"
+              />
             </button>
           </div>
           <div class="db-sidebar-footer">
@@ -555,7 +699,7 @@ onUnmounted(() => {
               v-for="tab in viewTabs"
               :key="tab.id"
               class="subtab"
-              :class="{ active: activeTabId === tab.id, query: tab.kind === 'query' }"
+              :class="{ active: activeTabId === tab.id, query: tab.kind === 'query', dirty: dirtyTabs.has(tab.id) }"
               role="tab"
               :aria-selected="activeTabId === tab.id"
               :title="tab.kind === 'table' ? `${tab.namespace}.${tab.table}` : tab.title"
@@ -576,7 +720,8 @@ onUnmounted(() => {
                 :aria-label="`Close ${tabTitle(tab)}`"
                 @click.stop="closeTab(tab.id)"
               >
-                ×
+                <span v-if="dirtyTabs.has(tab.id)" class="dirty-dot" aria-hidden="true" />
+                <span class="subtab-close-icon">×</span>
               </button>
             </div>
             <button
@@ -606,6 +751,9 @@ onUnmounted(() => {
               :namespace="tab.namespace"
               :table="tab.table"
               :kind="tab.tableKind"
+              :ref="(instance) => setTableViewRef(tab.id, instance)"
+              :active="active && view === 'tables' && activeTableTabId === tab.id"
+              @changes="setTabChanges(tab.id, $event)"
             />
             <QueryEditor
               v-else

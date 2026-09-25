@@ -81,6 +81,7 @@ pub fn run() {
             db_commands::table_structure,
             db_commands::schema_columns,
             db_commands::browse_table,
+            db_commands::save_table_changes,
             db_commands::run_query,
             db_commands::fetch_rows,
             db_commands::close_results,
