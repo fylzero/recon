@@ -2691,7 +2691,7 @@ button.view-tab.active:hover:not(:disabled) {
 .grid-row {
   display: grid;
   grid-template-columns: var(--grid-template);
-  width: var(--grid-width);
+  width: max(var(--grid-width), 100%);
 }
 
 .grid-header {
@@ -2759,7 +2759,20 @@ button.view-tab.active:hover:not(:disabled) {
 
 .grid-body {
   position: relative;
-  width: var(--grid-width);
+  width: max(var(--grid-width), 100%);
+}
+
+.grid-filler {
+  width: max(var(--grid-width), 100%);
+  overflow: hidden;
+}
+
+.grid-filler .grid-row {
+  position: static;
+}
+
+.grid-filler .grid-cell {
+  cursor: default;
 }
 
 .grid-row {
@@ -2881,9 +2894,12 @@ button.view-tab.active:hover:not(:disabled) {
 }
 
 .grid-empty {
-  position: sticky;
-  left: 0;
+  position: absolute;
+  top: var(--grid-header-height);
+  left: var(--grid-gutter-width);
+  z-index: 1;
   padding: 0.75rem;
+  pointer-events: none;
 }
 
 body.resizing-columns,

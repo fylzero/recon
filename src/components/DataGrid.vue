@@ -6,7 +6,7 @@ export interface CellPosition {
 </script>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useVirtualizer } from "@tanstack/vue-virtual";
 import {
   cellCopyText,
@@ -128,6 +128,28 @@ watch(rowHeight, () => virtualizer.value.measure());
 
 const virtualRows = computed(() => virtualizer.value.getVirtualItems());
 const bodyHeight = computed(() => virtualizer.value.getTotalSize());
+
+const viewportHeight = ref(0);
+const fillerHeight = computed(() =>
+  Math.max(viewportHeight.value - headerHeight.value - bodyHeight.value, 0),
+);
+const fillerRows = computed(() => Math.ceil(fillerHeight.value / rowHeight.value));
+
+let resizeObserver: ResizeObserver | null = null;
+
+onMounted(() => {
+  const node = scroller.value;
+  if (!node) {
+    return;
+  }
+  viewportHeight.value = node.clientHeight;
+  resizeObserver = new ResizeObserver(() => {
+    viewportHeight.value = node.clientHeight;
+  });
+  resizeObserver.observe(node);
+});
+
+onBeforeUnmount(() => resizeObserver?.disconnect());
 
 watch(
   () => {
@@ -501,6 +523,7 @@ defineExpose({ scrollToTop, commitEdit });
       '--grid-row-height': `${rowHeight}px`,
       '--grid-header-height': `${headerHeight}px`,
       '--grid-template': templateColumns,
+      '--grid-gutter-width': `${gutterWidth}px`,
       '--grid-width': `${totalWidth}px`,
     }"
     @keydown="onKeydown"
@@ -584,6 +607,22 @@ defineExpose({ scrollToTop, commitEdit });
           </div>
         </template>
         <div v-else class="grid-cell grid-loading">Loading…</div>
+      </div>
+    </div>
+    <div
+      v-if="fillerRows"
+      class="grid-filler"
+      aria-hidden="true"
+      :style="{ height: `${fillerHeight}px` }"
+    >
+      <div
+        v-for="index in fillerRows"
+        :key="index"
+        class="grid-row"
+        :class="{ odd: (rows.length + index - 1) % 2 === 1 }"
+      >
+        <div class="grid-gutter" />
+        <div v-for="col in columns.length" :key="col" class="grid-cell" />
       </div>
     </div>
     <div v-if="!rows.length" class="grid-empty muted tiny">No rows</div>

@@ -23,6 +23,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       "Dragging to select text in a dialog no longer closes it when the mouse is released outside.",
       "The editor font now defaults to 14px and the grid font to 13px.",
       "Settings has a new Table list font and size for the table names in the connection sidebar.",
+      "Table data and query results now fill the whole pane with a continuous grid, even when there are only a few rows or columns.",
     ],
   },
   {
