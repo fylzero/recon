@@ -74,6 +74,7 @@ pub fn run() {
             db_commands::test_connection,
             db_commands::create_sqlite_database,
             db_commands::connect,
+            db_commands::reconnect,
             db_commands::disconnect,
             db_commands::list_databases,
             db_commands::set_database,

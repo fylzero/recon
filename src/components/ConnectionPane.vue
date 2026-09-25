@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { SQLNamespace } from "@codemirror/lang-sql";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
 import * as api from "../api";
@@ -25,8 +26,13 @@ const props = defineProps<{
 const { findConnection, sidebarWidth, previewPreferences, savePreferences, showToast } = useApp();
 const { openEditConnection } = useConnectionForm();
 
+type ConnectionEvent = { connectionId: string; error: string | null };
+
 const status = ref<"connecting" | "password" | "connected" | "error">("connecting");
 const connectError = ref("");
+const lost = ref(false);
+const lostError = ref("");
+const reconnecting = ref(false);
 const password = ref("");
 const passwordInput = ref<HTMLInputElement | null>(null);
 const session = shallowRef<SessionInfo | null>(null);
@@ -381,6 +387,7 @@ async function connect(withPassword: string | null = null) {
     namespaces.value = info.namespaces.items;
     namespace.value = info.namespaces.current;
     password.value = "";
+    lost.value = false;
     status.value = "connected";
     if (!tabsRestored.value) {
       restoreQueryTabs();
@@ -435,9 +442,86 @@ async function refreshAll() {
   await loadTables();
 }
 
+/**
+ * Picks up tables created or dropped outside Recon (migrations, other
+ * clients). Failures are ignored so a background check never clears the list.
+ */
+async function refreshTablesQuietly() {
+  if (status.value !== "connected" || lost.value || tablesLoading.value) {
+    return;
+  }
+  if (!namespace.value && driver.value !== "sqlite") {
+    return;
+  }
+  const requested = namespace.value;
+  try {
+    const next = await api.listTables(props.connectionId, requested);
+    if (requested !== namespace.value) {
+      return;
+    }
+    const names = (list: TableInfo[]) => list.map((table) => `${table.kind}:${table.name}`).join("\n");
+    if (names(next) !== names(tables.value)) {
+      tables.value = next;
+      tablesError.value = "";
+      void loadSchema();
+    }
+  } catch {
+    return;
+  }
+}
+
+function onWindowFocus() {
+  if (props.active) {
+    void refreshTablesQuietly();
+  }
+}
+
+watch(
+  () => props.active,
+  (active) => {
+    if (active) {
+      void refreshTablesQuietly();
+    }
+  },
+);
+
+/**
+ * Rebuilds the backend session in place, so open tabs and unsaved
+ * table edits survive the reconnect.
+ */
 async function reconnect() {
-  await api.disconnect(props.connectionId).catch(() => undefined);
-  await connect(null);
+  if (reconnecting.value) {
+    return;
+  }
+  reconnecting.value = true;
+  try {
+    const info = await api.reconnect(props.connectionId);
+    session.value = info;
+    namespaces.value = info.namespaces.items;
+    namespace.value = info.namespaces.current;
+    lost.value = false;
+    lostError.value = "";
+    await loadTables();
+    void tableViews.get(activeTableTabId.value)?.refresh();
+  } catch (err) {
+    lostError.value = String(err);
+  } finally {
+    reconnecting.value = false;
+  }
+}
+
+function onConnectionLost(event: ConnectionEvent) {
+  if (event.connectionId !== props.connectionId) {
+    return;
+  }
+  lost.value = true;
+  lostError.value = event.error ?? "";
+}
+
+function onConnectionRestored(event: ConnectionEvent) {
+  if (event.connectionId === props.connectionId) {
+    showToast(`Reconnected to ${entry.value?.name ?? "the database"}`);
+  }
 }
 
 function onExecuted(statements: string[]) {
@@ -507,8 +591,22 @@ function startSidebarResize(event: PointerEvent) {
   window.addEventListener("pointercancel", onUp);
 }
 
+let stopLost: UnlistenFn | null = null;
+let stopRestored: UnlistenFn | null = null;
+
 onMounted(() => {
   window.addEventListener("keydown", onWindowKeydown, true);
+  window.addEventListener("focus", onWindowFocus);
+  void listen<ConnectionEvent>("connection-lost", (event) => onConnectionLost(event.payload)).then(
+    (unlisten) => {
+      stopLost = unlisten;
+    },
+  );
+  void listen<ConnectionEvent>("connection-restored", (event) => onConnectionRestored(event.payload)).then(
+    (unlisten) => {
+      stopRestored = unlisten;
+    },
+  );
   if (needsPassword.value) {
     status.value = "password";
     void nextTick(() => passwordInput.value?.focus());
@@ -521,6 +619,9 @@ const unregisterCloser = registerInnerTabCloser(props.connectionId, closeActiveP
 
 onUnmounted(() => {
   window.removeEventListener("keydown", onWindowKeydown, true);
+  window.removeEventListener("focus", onWindowFocus);
+  stopLost?.();
+  stopRestored?.();
   unregisterCloser();
   setLiveTitle(props.connectionId, "");
   void api.disconnect(props.connectionId).catch(() => undefined);
@@ -618,6 +719,17 @@ onUnmounted(() => {
           </div>
         </div>
       </header>
+      <div v-if="lost" class="connection-lost" role="alert">
+        <p class="connection-lost-message">
+          <strong>Connection lost.</strong>
+          <span v-if="lostError" class="muted" :title="lostError">{{ lostError }}</span>
+        </p>
+        <button class="ghost tiny" type="button" @click="editConnection">Edit connection</button>
+        <button class="primary tiny" type="button" :disabled="reconnecting" @click="reconnect">
+          <span v-if="reconnecting" class="spinner" aria-hidden="true" />
+          {{ reconnecting ? "Reconnecting…" : "Reconnect" }}
+        </button>
+      </div>
       <ConnectionViewTabs :active="view" :table-count="tables.length" @select="selectView" />
       <div class="db-body">
         <aside v-show="view === 'tables'" class="db-sidebar" :style="{ width: `${sidebarWidth}px` }">
@@ -669,19 +781,6 @@ onUnmounted(() => {
                 class="dirty-dot"
                 aria-label="Unsaved changes"
               />
-            </button>
-          </div>
-          <div class="db-sidebar-footer">
-            <span class="muted tiny">{{ tables.length.toLocaleString() }} {{ tables.length === 1 ? "table" : "tables" }}</span>
-            <button class="ghost tiny" type="button" title="Reload tables" @click="refreshAll">
-              <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path
-                  d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99"
-                />
-              </svg>
-            </button>
-            <button class="ghost tiny" type="button" title="Reconnect" @click="reconnect">
-              Reconnect
             </button>
           </div>
         </aside>

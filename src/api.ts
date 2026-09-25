@@ -143,6 +143,10 @@ export function connect(connectionId: string, password: string | null) {
   return invoke<SessionInfo>("connect", { connectionId, password });
 }
 
+export function reconnect(connectionId: string, password: string | null = null) {
+  return invoke<SessionInfo>("reconnect", { connectionId, password });
+}
+
 export function disconnect(connectionId: string) {
   return invoke<void>("disconnect", { connectionId });
 }

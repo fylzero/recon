@@ -1,9 +1,10 @@
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::commands::{sanitize_connection, AppState};
 use crate::db::ssh::Tunnel;
@@ -18,6 +19,18 @@ use crate::secrets;
 
 const FIRST_PAGE: usize = 200;
 const BROWSE_LIMIT_MAX: u64 = 5_000;
+const CONNECTION_LOST_EVENT: &str = "connection-lost";
+const CONNECTION_RESTORED_EVENT: &str = "connection-restored";
+const EDITOR_RECONNECTED: &str = "The connection to the database server was lost while running this statement, \
+                                  so it may not have run. Recon reconnected, but any open transaction or session \
+                                  settings were reset.";
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectionEvent<'a> {
+    connection_id: &'a str,
+    error: Option<&'a str>,
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -204,6 +217,23 @@ pub async fn connect(
         previous.close().await;
         results.remove_connection(&connection_id);
     }
+    let (session, info) = open_session(entry, password, "").await?;
+    if let Some(stale) = sessions.insert(&connection_id, session).await {
+        stale.close().await;
+    }
+    Ok(info)
+}
+
+/**
+ * Opens the tunnel, pool, and editor connection for `entry`. A non-empty
+ * `restore` namespace is selected in place of the server's default so a
+ * reconnect lands back where the user was.
+ */
+async fn open_session(
+    entry: ConnectionEntry,
+    password: Option<String>,
+    restore: &str,
+) -> Result<(Session, SessionInfo), String> {
     let (target, tunnel) = open_tunnel(&entry, None).await?;
     let opened = match target.driver {
         Driver::Mysql => db::mysql::open(&target, password.as_deref()).await,
@@ -223,25 +253,29 @@ pub async fn connect(
     let session = Session {
         name: entry.name.clone(),
         driver: entry.driver,
+        entry,
+        password,
         pool: opened.pool,
         query_conn: tokio::sync::Mutex::new(Some(opened.conn)),
         backend_id: opened.backend_id,
         cancel: AtomicBool::new(false),
+        lost: AtomicBool::new(false),
         namespace: Mutex::new(String::new()),
         tunnel,
     };
-    let dialect = dialect(entry.driver);
+    let dialect = dialect(session.driver);
     let setup = async {
         let version = first_text(&pool_run(&session, dialect.version_sql(), 1, QueryOrigin::Schema).await?);
         let reported = first_text(
             &conn_run(&session, dialect.current_namespace_sql(), 1, None, QueryOrigin::Schema).await?,
         );
         let mut namespaces = load_namespaces(&session).await?;
+        let wanted = if restore.is_empty() { reported.as_str() } else { restore };
         let current = pick_namespace(
             &namespaces.items,
-            &reported,
+            wanted,
             dialect.system_namespaces(),
-            &entry.database,
+            &session.entry.database,
         );
         session.set_namespace(&current);
         if current != reported && !current.is_empty() {
@@ -257,17 +291,116 @@ pub async fn connect(
         })
     };
     match setup.await {
-        Ok(info) => {
-            if let Some(stale) = sessions.insert(&connection_id, session).await {
-                stale.close().await;
-            }
-            Ok(info)
-        }
+        Ok(info) => Ok((session, info)),
         Err(err) => {
             session.close().await;
             Err(err)
         }
     }
+}
+
+/**
+ * Re-reads the saved connection so edits made since connecting apply, and
+ * falls back to the password typed for the stale session when none is saved.
+ */
+fn reopen_credentials(
+    app: &AppHandle,
+    connection_id: &str,
+    stale: &Session,
+) -> Result<(ConnectionEntry, Option<String>), String> {
+    let entry = {
+        let state = app.state::<AppState>();
+        let data = state.data.lock().map_err(|err| err.to_string())?;
+        data.find_connection(connection_id)
+            .cloned()
+            .unwrap_or_else(|| stale.entry.clone())
+    };
+    let saved = resolve_password(&entry, None)?;
+    Ok((entry, saved.or_else(|| stale.password.clone())))
+}
+
+async fn rebuild(
+    app: &AppHandle,
+    connection_id: &str,
+    stale: &Arc<Session>,
+    password: Option<String>,
+) -> Result<(Arc<Session>, SessionInfo), String> {
+    let (entry, saved) = reopen_credentials(app, connection_id, stale)?;
+    let password = password.filter(|value| !value.is_empty()).or(saved);
+    let (session, info) = open_session(entry, password, &stale.namespace()).await?;
+    match app.state::<SessionStore>().replace(connection_id, stale, session).await {
+        Ok(next) => {
+            let stale = stale.clone();
+            tauri::async_runtime::spawn(async move { stale.close().await });
+            Ok((next, info))
+        }
+        Err(unused) => {
+            unused.close().await;
+            Err("This connection was closed.".into())
+        }
+    }
+}
+
+/**
+ * Called after an operation fails because the connection dropped. Returns a
+ * working session, or marks the connection lost and tells the frontend.
+ */
+async fn recover(app: &AppHandle, connection_id: &str, stale: &Arc<Session>) -> Option<Arc<Session>> {
+    let sessions = app.state::<SessionStore>();
+    let _guard = sessions.reconnect_guard().await;
+    let current = sessions.current(connection_id).await?;
+    if !Arc::ptr_eq(&current, stale) || current.is_lost() {
+        return (!current.is_lost()).then_some(current);
+    }
+    match rebuild(app, connection_id, stale, None).await {
+        Ok((session, _)) => {
+            let event = ConnectionEvent { connection_id, error: None };
+            let _ = app.emit(CONNECTION_RESTORED_EVENT, event);
+            Some(session)
+        }
+        Err(err) => {
+            stale.mark_lost();
+            let event = ConnectionEvent { connection_id, error: Some(&err) };
+            let _ = app.emit(CONNECTION_LOST_EVENT, event);
+            None
+        }
+    }
+}
+
+/**
+ * Runs `op` against the open session. If the connection turns out to be
+ * gone, reconnects once and runs `op` again, so only operations that are
+ * safe to repeat should go through here.
+ */
+async fn with_session<T, F, Fut>(app: &AppHandle, connection_id: &str, op: F) -> Result<T, String>
+where
+    F: Fn(Arc<Session>) -> Fut,
+    Fut: Future<Output = Result<T, String>>,
+{
+    let session = app.state::<SessionStore>().get(connection_id).await?;
+    match op(session.clone()).await {
+        Err(err) if db::is_connection_lost(&err) => match recover(app, connection_id, &session).await {
+            Some(next) => op(next).await,
+            None => Err(err),
+        },
+        outcome => outcome,
+    }
+}
+
+#[tauri::command]
+pub async fn reconnect(
+    app: AppHandle,
+    connection_id: String,
+    password: Option<String>,
+) -> Result<SessionInfo, String> {
+    let sessions = app.state::<SessionStore>();
+    let _guard = sessions.reconnect_guard().await;
+    let stale = sessions
+        .current(&connection_id)
+        .await
+        .ok_or_else(|| "This connection is not open.".to_string())?;
+    let (_, info) = rebuild(&app, &connection_id, &stale, password).await?;
+    Ok(info)
 }
 
 #[tauri::command]
@@ -284,36 +417,32 @@ pub async fn disconnect(
 }
 
 #[tauri::command]
-pub async fn list_databases(
-    sessions: State<'_, SessionStore>,
-    connection_id: String,
-) -> Result<NamespaceList, String> {
-    let session = sessions.get(&connection_id).await?;
-    load_namespaces(&session).await
+pub async fn list_databases(app: AppHandle, connection_id: String) -> Result<NamespaceList, String> {
+    with_session(&app, &connection_id, |session| async move { load_namespaces(&session).await }).await
 }
 
 #[tauri::command]
-pub async fn set_database(
-    sessions: State<'_, SessionStore>,
-    connection_id: String,
-    namespace: String,
-) -> Result<(), String> {
-    let session = sessions.get(&connection_id).await?;
-    if let Some(sql) = dialect(session.driver).use_namespace_sql(&namespace) {
+pub async fn set_database(app: AppHandle, connection_id: String, namespace: String) -> Result<(), String> {
+    let namespace = namespace.as_str();
+    with_session(&app, &connection_id, move |session| use_namespace(session, namespace)).await
+}
+
+async fn use_namespace(session: Arc<Session>, namespace: &str) -> Result<(), String> {
+    if let Some(sql) = dialect(session.driver).use_namespace_sql(namespace) {
         conn_run(&session, &sql, 0, None, QueryOrigin::Schema).await?;
     }
-    session.set_namespace(&namespace);
+    session.set_namespace(namespace);
     Ok(())
 }
 
 #[tauri::command]
-pub async fn list_tables(
-    sessions: State<'_, SessionStore>,
-    connection_id: String,
-    namespace: String,
-) -> Result<Vec<TableInfo>, String> {
-    let session = sessions.get(&connection_id).await?;
-    let sql = dialect(session.driver).tables_sql(&namespace);
+pub async fn list_tables(app: AppHandle, connection_id: String, namespace: String) -> Result<Vec<TableInfo>, String> {
+    let namespace = namespace.as_str();
+    with_session(&app, &connection_id, move |session| tables_in(session, namespace)).await
+}
+
+async fn tables_in(session: Arc<Session>, namespace: &str) -> Result<Vec<TableInfo>, String> {
+    let sql = dialect(session.driver).tables_sql(namespace);
     let output = pool_run(&session, &sql, usize::MAX, QueryOrigin::Schema).await?;
     Ok(output
         .text_rows()
@@ -331,14 +460,18 @@ pub async fn list_tables(
 
 #[tauri::command]
 pub async fn table_structure(
-    sessions: State<'_, SessionStore>,
+    app: AppHandle,
     connection_id: String,
     namespace: String,
     table: String,
 ) -> Result<TableStructure, String> {
-    let session = sessions.get(&connection_id).await?;
+    let (namespace, table) = (namespace.as_str(), table.as_str());
+    with_session(&app, &connection_id, move |session| structure_of(session, namespace, table)).await
+}
+
+async fn structure_of(session: Arc<Session>, namespace: &str, table: &str) -> Result<TableStructure, String> {
     let dialect = dialect(session.driver);
-    let columns_sql = dialect.columns_sql(&namespace, &table);
+    let columns_sql = dialect.columns_sql(namespace, table);
     let columns = pool_run(&session, &columns_sql, usize::MAX, QueryOrigin::Schema)
         .await?
         .rows
@@ -355,7 +488,7 @@ pub async fn table_structure(
             }
         })
         .collect();
-    let indexes_sql = dialect.indexes_sql(&namespace, &table);
+    let indexes_sql = dialect.indexes_sql(namespace, table);
     let indexes = pool_run(&session, &indexes_sql, usize::MAX, QueryOrigin::Schema)
         .await?
         .rows
@@ -375,12 +508,16 @@ pub async fn table_structure(
 
 #[tauri::command]
 pub async fn schema_columns(
-    sessions: State<'_, SessionStore>,
+    app: AppHandle,
     connection_id: String,
     namespace: String,
 ) -> Result<Vec<SchemaColumn>, String> {
-    let session = sessions.get(&connection_id).await?;
-    let sql = dialect(session.driver).schema_columns_sql(&namespace);
+    let namespace = namespace.as_str();
+    with_session(&app, &connection_id, move |session| columns_in(session, namespace)).await
+}
+
+async fn columns_in(session: Arc<Session>, namespace: &str) -> Result<Vec<SchemaColumn>, String> {
+    let sql = dialect(session.driver).schema_columns_sql(namespace);
     let output = pool_run(&session, &sql, usize::MAX, QueryOrigin::Schema).await?;
     Ok(output
         .text_rows()
@@ -394,11 +531,15 @@ pub async fn schema_columns(
 
 #[tauri::command]
 pub async fn browse_table(
-    sessions: State<'_, SessionStore>,
+    app: AppHandle,
     connection_id: String,
     request: BrowseRequest,
 ) -> Result<BrowseResult, String> {
-    let session = sessions.get(&connection_id).await?;
+    let request = &request;
+    with_session(&app, &connection_id, move |session| browse(session, request)).await
+}
+
+async fn browse(session: Arc<Session>, request: &BrowseRequest) -> Result<BrowseResult, String> {
     let dialect = dialect(session.driver);
     let table = dialect.qualified(&request.namespace, &request.table);
     let order = match request.order_by.as_deref().filter(|column| !column.is_empty()) {
@@ -437,14 +578,22 @@ pub async fn browse_table(
 
 #[tauri::command]
 pub async fn save_table_changes(
-    sessions: State<'_, SessionStore>,
+    app: AppHandle,
     connection_id: String,
     requests: Vec<SaveRequest>,
 ) -> Result<usize, String> {
-    let session = sessions.get(&connection_id).await?;
+    let requests = requests.as_slice();
+    with_session(&app, &connection_id, move |session| save(session, requests)).await
+}
+
+/**
+ * Edits are primary-key updates to absolute values inside one transaction,
+ * so repeating them after a dropped connection cannot apply anything twice.
+ */
+async fn save(session: Arc<Session>, requests: &[SaveRequest]) -> Result<usize, String> {
     let dialect = dialect(session.driver);
     let mut statements = Vec::new();
-    for request in &requests {
+    for request in requests {
         let table = dialect.qualified(&request.namespace, &request.table);
         for update in &request.updates {
             statements.push(db::update_statement(session.driver, &table, update)?);
@@ -478,6 +627,7 @@ pub async fn save_table_changes(
 
 #[tauri::command]
 pub async fn run_query(
+    app: AppHandle,
     state: State<'_, AppState>,
     sessions: State<'_, SessionStore>,
     results: State<'_, ResultStore>,
@@ -530,6 +680,8 @@ pub async fn run_query(
             Err(err) => {
                 let error = if session.cancelled() {
                     "Query cancelled.".to_string()
+                } else if db::is_connection_lost(&err) && recover(&app, &connection_id, &session).await.is_some() {
+                    EDITOR_RECONNECTED.to_string()
                 } else {
                     err
                 };

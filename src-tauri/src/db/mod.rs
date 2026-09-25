@@ -13,9 +13,11 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
 use sqlx::{Column, Database, Either, Executor, Row, TypeInfo};
 
-use crate::models::Driver;
+use crate::models::{ConnectionEntry, Driver};
 
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+pub const CONNECTION_LOST: &str = "The connection to the database server was lost";
+pub const SESSION_LOST: &str = "The connection to the database server was lost. Reconnect to continue.";
 const MAX_SAFE_JS_INT: i64 = 9_007_199_254_740_991;
 const BYTES_PREVIEW: usize = 48;
 
@@ -519,15 +521,26 @@ pub struct Opened {
 pub struct Session {
     pub name: String,
     pub driver: Driver,
+    pub entry: ConnectionEntry,
+    pub password: Option<String>,
     pub pool: Pool,
     pub query_conn: tokio::sync::Mutex<Option<Conn>>,
     pub backend_id: Option<i64>,
     pub cancel: AtomicBool,
+    pub lost: AtomicBool,
     pub namespace: Mutex<String>,
     pub tunnel: Option<ssh::Tunnel>,
 }
 
 impl Session {
+    pub fn is_lost(&self) -> bool {
+        self.lost.load(Ordering::Relaxed)
+    }
+
+    pub fn mark_lost(&self) {
+        self.lost.store(true, Ordering::Relaxed);
+    }
+
     pub fn namespace(&self) -> String {
         self.namespace
             .lock()
@@ -559,16 +572,52 @@ impl Session {
 #[derive(Default)]
 pub struct SessionStore {
     sessions: tokio::sync::Mutex<HashMap<String, Arc<Session>>>,
+    reconnecting: tokio::sync::Mutex<()>,
 }
 
 impl SessionStore {
     pub async fn get(&self, connection_id: &str) -> Result<Arc<Session>, String> {
-        self.sessions
-            .lock()
+        let session = self
+            .current(connection_id)
             .await
-            .get(connection_id)
-            .cloned()
-            .ok_or_else(|| "This connection is not open. Reconnect and try again.".to_string())
+            .ok_or_else(|| "This connection is not open. Reconnect and try again.".to_string())?;
+        if session.is_lost() {
+            return Err(SESSION_LOST.into());
+        }
+        Ok(session)
+    }
+
+    pub async fn current(&self, connection_id: &str) -> Option<Arc<Session>> {
+        self.sessions.lock().await.get(connection_id).cloned()
+    }
+
+    /**
+     * Held while a session is being rebuilt so concurrent failures on the
+     * same dropped connection trigger a single reconnect.
+     */
+    pub async fn reconnect_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.reconnecting.lock().await
+    }
+
+    /**
+     * Swaps in a rebuilt session only if `stale` is still the current one,
+     * so a reconnect never resurrects a connection the user has closed.
+     */
+    pub async fn replace(
+        &self,
+        connection_id: &str,
+        stale: &Arc<Session>,
+        next: Session,
+    ) -> Result<Arc<Session>, Arc<Session>> {
+        let next = Arc::new(next);
+        let mut sessions = self.sessions.lock().await;
+        match sessions.get(connection_id) {
+            Some(current) if Arc::ptr_eq(current, stale) => {
+                sessions.insert(connection_id.to_string(), next.clone());
+                Ok(next)
+            }
+            _ => Err(next),
+        }
     }
 
     pub async fn insert(&self, connection_id: &str, session: Session) -> Option<Arc<Session>> {
@@ -709,7 +758,7 @@ where
     })
 }
 
-pub fn describe_error(err: sqlx::Error) -> String {
+fn describe_plain(err: sqlx::Error) -> String {
     match err {
         sqlx::Error::Database(db) => db.message().to_string(),
         sqlx::Error::PoolTimedOut => "Timed out waiting for a database connection.".into(),
@@ -719,11 +768,48 @@ pub fn describe_error(err: sqlx::Error) -> String {
     }
 }
 
+/**
+ * Errors that mean the connection itself is gone (network drop, server
+ * restart, idle timeout, dead SSH tunnel) rather than the statement failing.
+ */
+fn is_lost_connection(err: &sqlx::Error) -> bool {
+    match err {
+        sqlx::Error::Io(_) | sqlx::Error::PoolClosed | sqlx::Error::WorkerCrashed => true,
+        sqlx::Error::Database(db) => {
+            if let Some(mysql) = db.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>() {
+                // ER_SERVER_SHUTDOWN, ER_CONNECTION_KILLED, ER_CLIENT_INTERACTION_TIMEOUT
+                if matches!(mysql.number(), 1053 | 1927 | 4031) {
+                    return true;
+                }
+            }
+            db.code().is_some_and(|code| {
+                code.starts_with("08") || matches!(code.as_ref(), "57P01" | "57P02" | "57P03" | "57P05")
+            })
+        }
+        _ => false,
+    }
+}
+
+pub fn is_connection_lost(message: &str) -> bool {
+    message.starts_with(CONNECTION_LOST)
+}
+
+pub fn describe_error(err: sqlx::Error) -> String {
+    if !is_lost_connection(&err) {
+        return describe_plain(err);
+    }
+    let detail = match err {
+        sqlx::Error::Io(io) => io.to_string(),
+        other => describe_plain(other),
+    };
+    format!("{CONNECTION_LOST} ({detail}).")
+}
+
 pub async fn with_timeout<T>(
     future: impl std::future::Future<Output = Result<T, sqlx::Error>>,
 ) -> Result<T, String> {
     match tokio::time::timeout(CONNECT_TIMEOUT, future).await {
-        Ok(result) => result.map_err(describe_error),
+        Ok(result) => result.map_err(describe_plain),
         Err(_) => Err("Timed out connecting to the database server.".into()),
     }
 }
@@ -783,6 +869,17 @@ mod tests {
         assert!(returns_rows("WITH x AS (SELECT 1) SELECT * FROM x"));
         assert!(!returns_rows("UPDATE t SET a = 1"));
         assert!(!returns_rows("insert into t values (1)"));
+    }
+
+    #[test]
+    fn flags_dropped_connections_but_not_statement_errors() {
+        let broken = sqlx::Error::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken pipe"));
+        let message = describe_error(broken);
+        assert!(is_connection_lost(&message), "{message}");
+        assert!(message.contains("broken pipe"));
+        assert!(is_connection_lost(&describe_error(sqlx::Error::PoolClosed)));
+        assert!(!is_connection_lost(&describe_error(sqlx::Error::RowNotFound)));
+        assert!(!is_connection_lost(&describe_error(sqlx::Error::PoolTimedOut)));
     }
 
     #[test]

@@ -2385,22 +2385,40 @@ button.view-tab.active:hover:not(:disabled) {
   margin-left: auto;
 }
 
-.db-sidebar-footer {
+.connection-lost {
   display: flex;
   align-items: center;
-  gap: 0.25rem;
-  padding: 0.35rem 0.5rem 0.35rem 0.75rem;
-  border-top: 1px solid var(--border);
+  gap: 0.5rem;
+  padding: 0.45rem 0.75rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--bad) 35%, var(--border));
+  background: color-mix(in srgb, var(--bad) 12%, var(--bg-raised));
+  font-size: 12px;
 }
 
-.db-sidebar-footer > span {
-  margin-right: auto;
+.connection-lost-message {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
+  margin: 0 auto 0 0;
 }
 
-.db-sidebar-footer button {
+.connection-lost-message strong {
+  flex-shrink: 0;
+  color: var(--bad);
+}
+
+.connection-lost-message span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connection-lost button {
   display: inline-flex;
   align-items: center;
-  border-color: transparent;
+  gap: 0.35rem;
+  flex-shrink: 0;
 }
 
 .db-sidebar-resize {

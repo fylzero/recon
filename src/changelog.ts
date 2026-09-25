@@ -24,6 +24,10 @@ export const CHANGELOG: ChangelogRelease[] = [
       "The editor font now defaults to 14px and the grid font to 13px.",
       "Settings has a new Table list font and size for the table names in the connection sidebar.",
       "Table data and query results now fill the whole pane with a continuous grid, even when there are only a few rows or columns.",
+      "Recon reconnects on its own when a connection or SSH tunnel drops, for example after sleep or a server restart, and stays on the database you were using.",
+      "If reconnecting fails, a Connection lost banner explains why and offers Reconnect, keeping your tabs and unsaved edits. The Reconnect button in the table sidebar is gone.",
+      "The table list refreshes on its own when you switch to a connection tab or come back to Recon, so tables from migrations or other clients show up without the old Reload tables button.",
+      "A query that was interrupted by a dropped connection is not re-run automatically, since it may already have run.",
     ],
   },
   {
