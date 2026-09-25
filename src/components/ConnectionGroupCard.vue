@@ -246,18 +246,6 @@ function onHeaderClick(event: MouseEvent) {
         </button>
       </div>
       <div class="group-actions">
-        <button
-          v-if="!draft && !renaming"
-          class="ghost tiny"
-          type="button"
-          title="Add a connection to this group"
-          @click="addConnection"
-        >
-          <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M12 5v14M5 12h14" />
-          </svg>
-          Connection
-        </button>
         <div v-if="!draft" class="overflow-menu group-menu">
           <button
             class="ghost tiny overflow-menu-trigger"
