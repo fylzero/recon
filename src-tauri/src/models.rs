@@ -130,6 +130,57 @@ impl Driver {
     }
 }
 
+pub const DEFAULT_SSH_PORT: u16 = 22;
+
+fn default_ssh_port() -> u16 {
+    DEFAULT_SSH_PORT
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SshAuth {
+    #[default]
+    Password,
+    Key,
+    Agent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshTunnel {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub user: String,
+    #[serde(default)]
+    pub auth: SshAuth,
+    #[serde(default)]
+    pub key_path: String,
+}
+
+impl Default for SshTunnel {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: String::new(),
+            port: DEFAULT_SSH_PORT,
+            user: String::new(),
+            auth: SshAuth::default(),
+            key_path: String::new(),
+        }
+    }
+}
+
+impl SshTunnel {
+    pub fn uses_secret(&self) -> bool {
+        self.enabled && self.auth != SshAuth::Agent
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionEntry {
@@ -153,6 +204,8 @@ pub struct ConnectionEntry {
     pub header_color: String,
     #[serde(default = "default_true")]
     pub save_password: bool,
+    #[serde(default)]
+    pub ssh: SshTunnel,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,6 +312,7 @@ mod tests {
                 ssl_mode: "prefer".into(),
                 header_color: String::new(),
                 save_password: true,
+                ssh: SshTunnel::default(),
             }],
         });
         let json = serde_json::to_string(&data).unwrap();
@@ -277,6 +331,12 @@ mod tests {
         assert_eq!(parsed.query_row_limit, 10_000);
         assert_eq!(parsed.editor_font_family, "jetbrains");
         assert_eq!(parsed.grid_font_size, 12.0);
+
+        let entry: ConnectionEntry =
+            serde_json::from_str(r#"{"name":"old","driver":"mysql"}"#).unwrap();
+        assert!(!entry.ssh.enabled);
+        assert_eq!(entry.ssh.port, 22);
+        assert_eq!(entry.ssh.auth, SshAuth::Password);
     }
 
     #[test]

@@ -27,3 +27,12 @@ pub fn delete(connection_id: &str) -> Result<(), String> {
         Err(err) => Err(format!("Could not remove the password from the Keychain: {err}")),
     }
 }
+
+pub fn ssh_account(connection_id: &str) -> String {
+    format!("{connection_id}:ssh")
+}
+
+pub fn delete_all(connection_id: &str) -> Result<(), String> {
+    delete(connection_id)?;
+    delete(&ssh_account(connection_id))
+}

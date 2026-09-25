@@ -1898,7 +1898,8 @@ button.link-button:hover:not(:disabled) {
   gap: 0.4rem;
 }
 
-.file-picker input {
+.file-picker input,
+.file-picker select {
   flex: 1;
   min-width: 0;
 }
@@ -1918,6 +1919,15 @@ button.link-button:hover:not(:disabled) {
 .checkbox-row input {
   margin: 0;
   accent-color: var(--accent);
+}
+
+.ssh-toggle {
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border);
+}
+
+.ssh-hint {
+  margin: 0;
 }
 
 .color-choice {

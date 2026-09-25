@@ -50,7 +50,8 @@ const target = computed(() => {
     return entry.filePath.replace(/^\/Users\/[^/]+/, "~");
   }
   const address = `${entry.user}@${entry.host}:${entry.port}`;
-  return entry.database ? `${address}/${entry.database}` : address;
+  const full = entry.database ? `${address}/${entry.database}` : address;
+  return entry.ssh?.enabled ? `${full} via ${entry.ssh.host}` : full;
 });
 
 function handleClick(event: MouseEvent) {

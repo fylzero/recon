@@ -56,6 +56,8 @@ pub fn run() {
             commands::remove_connection,
             commands::reorder_connections,
             commands::has_saved_password,
+            commands::has_saved_ssh_secret,
+            commands::list_ssh_keys,
             commands::update_preferences,
             commands::replace_app_data,
             commands::write_text_file,

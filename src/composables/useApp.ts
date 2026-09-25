@@ -218,8 +218,9 @@ export function useApp() {
     groupId: string | null,
     connection: ConnectionEntry,
     password: string | null,
+    sshSecret: string | null = null,
   ) {
-    const saved = await api.saveConnection(groupId, connection, password);
+    const saved = await api.saveConnection(groupId, connection, password, sshSecret);
     const current = findConnection(saved.id);
     const sameGroup = current && (current.group?.id ?? null) === groupId;
     if (current && sameGroup) {

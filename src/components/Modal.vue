@@ -11,6 +11,20 @@ const emit = defineEmits<{
   close: [];
 }>();
 
+let pressedOnBackdrop = false;
+
+function onBackdropDown(event: PointerEvent) {
+  pressedOnBackdrop = event.target === event.currentTarget;
+}
+
+function onBackdropClick(event: MouseEvent) {
+  const releasedOnBackdrop = event.target === event.currentTarget;
+  if (pressedOnBackdrop && releasedOnBackdrop) {
+    emit("close");
+  }
+  pressedOnBackdrop = false;
+}
+
 function onKeydown(event: KeyboardEvent) {
   if (event.key === "Escape") {
     event.stopImmediatePropagation();
@@ -29,7 +43,7 @@ onUnmounted(() => {
 
 <template>
   <Teleport to="body">
-    <div class="modal-layer" @click.self="emit('close')">
+    <div class="modal-layer" @pointerdown="onBackdropDown" @click="onBackdropClick">
       <div class="modal" :class="{ wide, medium }" role="dialog" aria-modal="true">
         <div class="modal-title">{{ title }}</div>
         <div class="modal-body">

@@ -6,6 +6,16 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "0.2.0",
+    date: "September 25, 2026",
+    notes: [
+      "Connect to remote MySQL and PostgreSQL servers through an SSH tunnel, signing in with a password, a private key, or your SSH agent.",
+      "Private keys in ~/.ssh are listed so you can pick one, and SSH passwords and key passphrases are stored in the macOS Keychain.",
+      "New SSH hosts are added to ~/.ssh/known_hosts on first connect, and Recon refuses to connect if a host key changes.",
+      "Dragging to select text in a dialog no longer closes it when the mouse is released outside.",
+    ],
+  },
+  {
     version: "0.1.6",
     date: "September 25, 2026",
     notes: [

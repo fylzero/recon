@@ -72,7 +72,7 @@ const {
 } = useUpdater();
 
 const GITHUB_URL = "https://github.com/fylzero/recon";
-const appVersion = ref("0.1.6");
+const appVersion = ref("0.2.0");
 const {
   connectionTabs,
   historyTabOpen,

@@ -1,6 +1,7 @@
 pub mod mysql;
 pub mod postgres;
 pub mod sqlite;
+pub mod ssh;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -333,6 +334,7 @@ pub struct Session {
     pub backend_id: Option<i64>,
     pub cancel: AtomicBool,
     pub namespace: Mutex<String>,
+    pub tunnel: Option<ssh::Tunnel>,
 }
 
 impl Session {
@@ -358,6 +360,9 @@ impl Session {
             conn.close().await;
         }
         self.pool.close().await;
+        if let Some(tunnel) = &self.tunnel {
+            tunnel.close().await;
+        }
     }
 }
 

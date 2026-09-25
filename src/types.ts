@@ -11,6 +11,23 @@ export function driverLabel(driver: Driver) {
   return DRIVER_OPTIONS.find((option) => option.id === driver)?.label ?? driver;
 }
 
+export type SshAuth = "password" | "key" | "agent";
+
+export interface SshTunnel {
+  enabled: boolean;
+  host: string;
+  port: number;
+  user: string;
+  auth: SshAuth;
+  keyPath: string;
+}
+
+export const DEFAULT_SSH_PORT = 22;
+
+export function defaultSshTunnel(): SshTunnel {
+  return { enabled: false, host: "", port: DEFAULT_SSH_PORT, user: "", auth: "password", keyPath: "" };
+}
+
 export interface ConnectionEntry {
   id: string;
   name: string;
@@ -23,6 +40,7 @@ export interface ConnectionEntry {
   sslMode: SslMode;
   headerColor: string;
   savePassword: boolean;
+  ssh?: SshTunnel;
 }
 
 export interface ConnectionGroup {

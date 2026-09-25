@@ -6,7 +6,8 @@ use tauri::{AppHandle, State};
 
 use crate::models::{
     sanitize_color, sanitize_font_family, sanitize_font_size, AppData, ConnectionEntry,
-    ConnectionGroup, Driver, PreferencesPatch, DEFAULT_EDITOR_FONT_SIZE, DEFAULT_GRID_FONT_SIZE,
+    ConnectionGroup, Driver, PreferencesPatch, SshAuth, SshTunnel, DEFAULT_EDITOR_FONT_SIZE,
+    DEFAULT_GRID_FONT_SIZE, DEFAULT_SSH_PORT,
     MAX_AUTO_COLUMN_WIDTH_MAX, MAX_AUTO_COLUMN_WIDTH_MIN, PAGE_SIZE_MAX, PAGE_SIZE_MIN,
     QUERY_ROW_LIMIT_MAX, QUERY_ROW_LIMIT_MIN, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
 };
@@ -72,6 +73,28 @@ fn connection_location(data: &AppData, connection_id: &str) -> Option<(Option<St
     })
 }
 
+fn sanitize_ssh(ssh: &mut SshTunnel) -> Result<(), String> {
+    ssh.host = ssh.host.trim().to_string();
+    ssh.user = ssh.user.trim().to_string();
+    ssh.key_path = ssh.key_path.trim().to_string();
+    if ssh.port == 0 {
+        ssh.port = DEFAULT_SSH_PORT;
+    }
+    if !ssh.enabled {
+        return Ok(());
+    }
+    if ssh.host.is_empty() {
+        return Err("An SSH host is required.".into());
+    }
+    if ssh.user.is_empty() {
+        return Err("An SSH user name is required.".into());
+    }
+    if ssh.auth == SshAuth::Key && ssh.key_path.is_empty() {
+        return Err("Choose an SSH private key file.".into());
+    }
+    Ok(())
+}
+
 pub fn sanitize_connection(mut entry: ConnectionEntry) -> Result<ConnectionEntry, String> {
     entry.name = entry.name.trim().to_string();
     entry.host = entry.host.trim().to_string();
@@ -95,6 +118,7 @@ pub fn sanitize_connection(mut entry: ConnectionEntry) -> Result<ConnectionEntry
             entry.user.clear();
             entry.database.clear();
             entry.save_password = false;
+            entry.ssh = SshTunnel::default();
             if entry.name.is_empty() {
                 entry.name = Path::new(&entry.file_path)
                     .file_stem()
@@ -113,6 +137,7 @@ pub fn sanitize_connection(mut entry: ConnectionEntry) -> Result<ConnectionEntry
                 return Err("A user name is required.".into());
             }
             entry.file_path.clear();
+            sanitize_ssh(&mut entry.ssh)?;
             if entry.name.is_empty() {
                 entry.name = if entry.database.is_empty() {
                     entry.host.clone()
@@ -261,7 +286,7 @@ pub fn delete_group(app: AppHandle, state: State<AppState>, group_id: String) ->
     persist::save(&app, &data)?;
     drop(data);
     for entry in group.connections {
-        let _ = secrets::delete(&entry.id);
+        let _ = secrets::delete_all(&entry.id);
     }
     Ok(())
 }
@@ -307,6 +332,7 @@ pub fn save_connection(
     group_id: Option<String>,
     connection: ConnectionEntry,
     password: Option<String>,
+    ssh_secret: Option<String>,
 ) -> Result<ConnectionEntry, String> {
     let mut entry = sanitize_connection(connection)?;
     let is_new = entry.id.trim().is_empty();
@@ -340,6 +366,12 @@ pub fn save_connection(
             secrets::set(&entry.id, &password)?;
         }
     }
+    let ssh_account = secrets::ssh_account(&entry.id);
+    if !entry.ssh.uses_secret() {
+        secrets::delete(&ssh_account)?;
+    } else if let Some(secret) = ssh_secret.filter(|value| !value.is_empty()) {
+        secrets::set(&ssh_account, &secret)?;
+    }
     Ok(entry)
 }
 
@@ -355,7 +387,7 @@ pub fn remove_connection(
             .ok_or_else(|| "Connection not found".to_string())?;
         persist::save(&app, &data)?;
     }
-    secrets::delete(&connection_id)
+    secrets::delete_all(&connection_id)
 }
 
 #[tauri::command]
@@ -374,6 +406,16 @@ pub fn reorder_connections(
 #[tauri::command]
 pub fn has_saved_password(connection_id: String) -> Result<bool, String> {
     Ok(secrets::get(&connection_id)?.is_some())
+}
+
+#[tauri::command]
+pub fn list_ssh_keys() -> Vec<String> {
+    crate::db::ssh::find_private_keys()
+}
+
+#[tauri::command]
+pub fn has_saved_ssh_secret(connection_id: String) -> Result<bool, String> {
+    Ok(secrets::get(&secrets::ssh_account(&connection_id))?.is_some())
 }
 
 #[tauri::command]
@@ -519,7 +561,30 @@ mod tests {
             ssl_mode: "bogus".into(),
             header_color: "nope".into(),
             save_password: true,
+            ssh: SshTunnel::default(),
         }
+    }
+
+    #[test]
+    fn validates_ssh_tunnels() {
+        let mut mysql = entry(Driver::Mysql);
+        mysql.ssh.enabled = true;
+        assert!(sanitize_connection(mysql.clone()).is_err());
+        mysql.ssh.host = " bastion.example.com ".into();
+        mysql.ssh.user = "deploy".into();
+        mysql.ssh.port = 0;
+        let saved = sanitize_connection(mysql.clone()).unwrap();
+        assert_eq!(saved.ssh.host, "bastion.example.com");
+        assert_eq!(saved.ssh.port, 22);
+        mysql.ssh.auth = SshAuth::Key;
+        assert!(sanitize_connection(mysql.clone()).is_err());
+        mysql.ssh.key_path = "~/.ssh/id_ed25519".into();
+        assert!(sanitize_connection(mysql).is_ok());
+
+        let mut lite = entry(Driver::Sqlite);
+        lite.file_path = "/tmp/app.db".into();
+        lite.ssh.enabled = true;
+        assert!(!sanitize_connection(lite).unwrap().ssh.enabled);
     }
 
     #[test]

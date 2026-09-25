@@ -6,6 +6,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::commands::{sanitize_connection, AppState};
+use crate::db::ssh::Tunnel;
 use crate::db::{
     self, dialect, first_text, text_at, BrowseRequest, BrowseResult, CellValue, ColumnDetail,
     ColumnMeta, IndexInfo, NamespaceList, Pool, RawOutput, ResultStore, RowValues, SchemaColumn,
@@ -48,6 +49,38 @@ fn resolve_password(entry: &ConnectionEntry, password: Option<String>) -> Result
         return Ok(None);
     }
     secrets::get(&entry.id)
+}
+
+fn resolve_ssh_secret(entry: &ConnectionEntry, secret: Option<String>) -> Result<Option<String>, String> {
+    if !entry.ssh.uses_secret() {
+        return Ok(None);
+    }
+    if let Some(secret) = secret.filter(|value| !value.is_empty()) {
+        return Ok(Some(secret));
+    }
+    if entry.id.is_empty() {
+        return Ok(None);
+    }
+    secrets::get(&secrets::ssh_account(&entry.id))
+}
+
+async fn open_tunnel(
+    entry: &ConnectionEntry,
+    ssh_secret: Option<String>,
+) -> Result<(ConnectionEntry, Option<Tunnel>), String> {
+    if !entry.ssh.enabled || entry.driver == Driver::Sqlite {
+        return Ok((entry.clone(), None));
+    }
+    let secret = resolve_ssh_secret(entry, ssh_secret)?;
+    let tunnel = db::ssh::open(entry, secret.as_deref()).await?;
+    Ok((tunnel.local_entry(entry), Some(tunnel)))
+}
+
+fn explain(tunnel: Option<&Tunnel>, err: String) -> String {
+    match tunnel {
+        Some(tunnel) => tunnel.explain(err),
+        None => err,
+    }
 }
 
 fn record(session: &Session, sql: &str, origin: QueryOrigin, started: Instant, outcome: &Result<RawOutput, String>) {
@@ -124,14 +157,24 @@ fn pick_namespace(items: &[String], reported: &str, system: &[&str], preferred: 
 }
 
 #[tauri::command]
-pub async fn test_connection(connection: ConnectionEntry, password: Option<String>) -> Result<String, String> {
+pub async fn test_connection(
+    connection: ConnectionEntry,
+    password: Option<String>,
+    ssh_secret: Option<String>,
+) -> Result<String, String> {
     let entry = sanitize_connection(connection)?;
     let password = resolve_password(&entry, password)?;
-    match entry.driver {
-        Driver::Mysql => db::mysql::test(&entry, password.as_deref()).await,
-        Driver::Postgres => db::postgres::test(&entry, password.as_deref()).await,
-        Driver::Sqlite => db::sqlite::test(&entry).await,
+    let (target, tunnel) = open_tunnel(&entry, ssh_secret).await?;
+    let outcome = match target.driver {
+        Driver::Mysql => db::mysql::test(&target, password.as_deref()).await,
+        Driver::Postgres => db::postgres::test(&target, password.as_deref()).await,
+        Driver::Sqlite => db::sqlite::test(&target).await,
+    };
+    let outcome = outcome.map_err(|err| explain(tunnel.as_ref(), err));
+    if let Some(tunnel) = tunnel {
+        tunnel.close().await;
     }
+    outcome
 }
 
 #[tauri::command]
@@ -161,10 +204,21 @@ pub async fn connect(
         previous.close().await;
         results.remove_connection(&connection_id);
     }
-    let opened = match entry.driver {
-        Driver::Mysql => db::mysql::open(&entry, password.as_deref()).await?,
-        Driver::Postgres => db::postgres::open(&entry, password.as_deref()).await?,
-        Driver::Sqlite => db::sqlite::open(&entry).await?,
+    let (target, tunnel) = open_tunnel(&entry, None).await?;
+    let opened = match target.driver {
+        Driver::Mysql => db::mysql::open(&target, password.as_deref()).await,
+        Driver::Postgres => db::postgres::open(&target, password.as_deref()).await,
+        Driver::Sqlite => db::sqlite::open(&target).await,
+    };
+    let opened = match opened {
+        Ok(opened) => opened,
+        Err(err) => {
+            let err = explain(tunnel.as_ref(), err);
+            if let Some(tunnel) = tunnel {
+                tunnel.close().await;
+            }
+            return Err(err);
+        }
     };
     let session = Session {
         name: entry.name.clone(),
@@ -174,6 +228,7 @@ pub async fn connect(
         backend_id: opened.backend_id,
         cancel: AtomicBool::new(false),
         namespace: Mutex::new(String::new()),
+        tunnel,
     };
     let dialect = dialect(entry.driver);
     let setup = async {

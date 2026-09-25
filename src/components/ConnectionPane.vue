@@ -95,7 +95,8 @@ const subtitle = computed(() => {
   if (connection.driver === "sqlite") {
     return connection.filePath.split("/").pop() ?? connection.filePath;
   }
-  return `${connection.user}@${connection.host}:${connection.port}`;
+  const address = `${connection.user}@${connection.host}:${connection.port}`;
+  return connection.ssh?.enabled ? `${address} via ${connection.ssh.host}` : address;
 });
 
 function nextQueryKey() {

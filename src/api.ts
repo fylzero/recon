@@ -49,8 +49,9 @@ export function saveConnection(
   groupId: string | null,
   connection: ConnectionEntry,
   password: string | null,
+  sshSecret: string | null = null,
 ) {
-  return invoke<ConnectionEntry>("save_connection", { groupId, connection, password });
+  return invoke<ConnectionEntry>("save_connection", { groupId, connection, password, sshSecret });
 }
 
 export function removeConnection(connectionId: string) {
@@ -63,6 +64,14 @@ export function reorderConnections(groupId: string | null, connectionIds: string
 
 export function hasSavedPassword(connectionId: string) {
   return invoke<boolean>("has_saved_password", { connectionId });
+}
+
+export function listSshKeys() {
+  return invoke<string[]>("list_ssh_keys");
+}
+
+export function hasSavedSshSecret(connectionId: string) {
+  return invoke<boolean>("has_saved_ssh_secret", { connectionId });
 }
 
 export function updatePreferences(patch: PreferencesPatch) {
@@ -117,8 +126,12 @@ export function clearQueryHistory() {
   return invoke<void>("clear_query_history");
 }
 
-export function testConnection(connection: ConnectionEntry, password: string | null) {
-  return invoke<string>("test_connection", { connection, password });
+export function testConnection(
+  connection: ConnectionEntry,
+  password: string | null,
+  sshSecret: string | null = null,
+) {
+  return invoke<string>("test_connection", { connection, password, sshSecret });
 }
 
 export function createSqliteDatabase(path: string) {
