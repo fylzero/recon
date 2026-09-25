@@ -6,6 +6,14 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "0.1.6",
+    date: "September 25, 2026",
+    notes: [
+      "Connections now have Tables and SQL tabs. The SQL tab hides the table sidebar so queries get the full width, and a + button opens another query.",
+      "Larger driver icons in the connections list.",
+    ],
+  },
+  {
     version: "0.1.5",
     date: "September 24, 2026",
     notes: [

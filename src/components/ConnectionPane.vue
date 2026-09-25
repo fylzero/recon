@@ -6,6 +6,7 @@ import { SIDEBAR_MAX, SIDEBAR_MIN, useApp } from "../composables/useApp";
 import { useConnectionForm } from "../composables/useConnectionForm";
 import { registerInnerTabCloser, setLiveTitle } from "../composables/useTabs";
 import { driverLabel, type SessionInfo, type TableInfo } from "../types";
+import ConnectionViewTabs, { type ConnectionViewTab } from "./ConnectionViewTabs.vue";
 import DatabaseSwitcher from "./DatabaseSwitcher.vue";
 import DriverIcon from "./DriverIcon.vue";
 import QueryEditor from "./QueryEditor.vue";
@@ -36,7 +37,9 @@ const tablesError = ref("");
 const filter = ref("");
 const schema = shallowRef<SQLNamespace>({});
 const tabs = ref<PaneTab[]>([]);
-const activeTabId = ref("");
+const view = ref<ConnectionViewTab>("tables");
+const activeTableTabId = ref("");
+const activeQueryTabId = ref("");
 const tabsRestored = ref(false);
 const editors = new Map<string, InstanceType<typeof QueryEditor>>();
 
@@ -69,6 +72,13 @@ watch(
 );
 
 const queryTabsKey = computed(() => `recon.queryTabs.${props.connectionId}`);
+
+const viewTabs = computed(() =>
+  tabs.value.filter((tab) => (view.value === "sql" ? tab.kind === "query" : tab.kind === "table")),
+);
+const activeTabId = computed(() =>
+  view.value === "sql" ? activeQueryTabId.value : activeTableTabId.value,
+);
 
 const filteredTables = computed(() => {
   const needle = filter.value.trim().toLowerCase();
@@ -134,7 +144,7 @@ function restoreQueryTabs() {
     key: item.key,
     title: item.title,
   }));
-  activeTabId.value = tabs.value[0]?.id ?? "";
+  activeQueryTabId.value = tabs.value[0]?.id ?? "";
   tabsRestored.value = true;
   saveQueryTabs();
 }
@@ -143,7 +153,8 @@ function openQueryTab(initialSql?: string) {
   const key = nextQueryKey();
   const tab: PaneTab = { id: `query:${key}`, kind: "query", key, title: queryTitle() };
   tabs.value = [...tabs.value, tab];
-  activeTabId.value = tab.id;
+  activeQueryTabId.value = tab.id;
+  view.value = "sql";
   saveQueryTabs();
   if (initialSql) {
     void nextTick(() => editors.get(tab.id)?.insertText(initialSql));
@@ -158,28 +169,48 @@ function openTable(table: TableInfo) {
       { id, kind: "table", namespace: namespace.value, table: table.name, tableKind: table.kind },
     ];
   }
-  activeTabId.value = id;
+  activeTableTabId.value = id;
+}
+
+function selectTab(tab: PaneTab) {
+  if (tab.kind === "query") {
+    activeQueryTabId.value = tab.id;
+  } else {
+    activeTableTabId.value = tab.id;
+  }
+}
+
+function selectView(next: ConnectionViewTab) {
+  view.value = next;
+  if (next === "sql" && !tabs.value.some((tab) => tab.kind === "query")) {
+    openQueryTab();
+  }
 }
 
 function closeTab(id: string) {
-  const index = tabs.value.findIndex((tab) => tab.id === id);
-  if (index === -1) {
+  const tab = tabs.value.find((item) => item.id === id);
+  if (!tab) {
     return;
   }
-  const tab = tabs.value[index];
+  const siblings = tabs.value.filter((item) => item.kind === tab.kind);
+  const index = siblings.indexOf(tab);
+  const remaining = siblings.filter((item) => item.id !== id);
+  const next = remaining[Math.min(index, remaining.length - 1)]?.id ?? "";
   tabs.value = tabs.value.filter((item) => item.id !== id);
   if (tab.kind === "query") {
     localStorage.removeItem(`recon.query.${tab.key}`);
     editors.delete(id);
     saveQueryTabs();
-  }
-  if (activeTabId.value === id) {
-    activeTabId.value = tabs.value[Math.min(index, tabs.value.length - 1)]?.id ?? "";
+    if (activeQueryTabId.value === id) {
+      activeQueryTabId.value = next;
+    }
+  } else if (activeTableTabId.value === id) {
+    activeTableTabId.value = next;
   }
 }
 
 function closeActivePaneTab() {
-  if (!tabs.value.some((tab) => tab.id === activeTabId.value)) {
+  if (!viewTabs.value.some((tab) => tab.id === activeTabId.value)) {
     return false;
   }
   closeTab(activeTabId.value);
@@ -335,13 +366,7 @@ function onExecuted(statements: string[]) {
 function queryTable(table: TableInfo) {
   const quote = driver.value === "mysql" ? "`" : '"';
   const name = `${quote}${table.name.split(quote).join(quote + quote)}${quote}`;
-  const active = tabs.value.find((tab) => tab.id === activeTabId.value);
-  const sql = `SELECT * FROM ${name} LIMIT 100;`;
-  if (active?.kind === "query") {
-    editors.get(active.id)?.insertText(sql);
-  } else {
-    openQueryTab(sql);
-  }
+  openQueryTab(`SELECT * FROM ${name} LIMIT 100;`);
 }
 
 function editConnection() {
@@ -462,22 +487,10 @@ onUnmounted(() => {
           </span>
           <span class="muted tiny db-toolbar-driver">{{ driverLabel(driver) }}</span>
         </div>
-        <div class="db-toolbar-bar">
-          <button
-            class="ghost tiny"
-            type="button"
-            title="Open a new query tab"
-            @click="openQueryTab()"
-          >
-            <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5" />
-            </svg>
-            SQL
-          </button>
-        </div>
       </header>
+      <ConnectionViewTabs :active="view" :table-count="tables.length" @select="selectView" />
       <div class="db-body">
-        <aside class="db-sidebar" :style="{ width: `${sidebarWidth}px` }">
+        <aside v-show="view === 'tables'" class="db-sidebar" :style="{ width: `${sidebarWidth}px` }">
           <div class="db-filter">
             <input v-model="filter" type="search" placeholder="Filter tables" spellcheck="false" />
           </div>
@@ -496,8 +509,8 @@ onUnmounted(() => {
               class="db-table"
               type="button"
               role="option"
-              :aria-selected="activeTabId === `table:${namespace}.${table.name}`"
-              :class="{ active: activeTabId === `table:${namespace}.${table.name}`, view: table.kind === 'view' }"
+              :aria-selected="activeTableTabId === `table:${namespace}.${table.name}`"
+              :class="{ active: activeTableTabId === `table:${namespace}.${table.name}`, view: table.kind === 'view' }"
               :title="table.kind === 'view' ? `${table.name} (view)` : table.name"
               @click="openTable(table)"
               @dblclick="queryTable(table)"
@@ -527,19 +540,25 @@ onUnmounted(() => {
             </button>
           </div>
         </aside>
-        <div class="db-sidebar-resize" role="separator" aria-orientation="vertical" @pointerdown="startSidebarResize" />
+        <div
+          v-show="view === 'tables'"
+          class="db-sidebar-resize"
+          role="separator"
+          aria-orientation="vertical"
+          @pointerdown="startSidebarResize"
+        />
 
         <section class="db-main">
-          <div v-if="tabs.length" class="subtab-bar" role="tablist">
+          <div v-if="viewTabs.length || view === 'sql'" class="subtab-bar" role="tablist">
             <div
-              v-for="tab in tabs"
+              v-for="tab in viewTabs"
               :key="tab.id"
               class="subtab"
               :class="{ active: activeTabId === tab.id, query: tab.kind === 'query' }"
               role="tab"
               :aria-selected="activeTabId === tab.id"
               :title="tab.kind === 'table' ? `${tab.namespace}.${tab.table}` : tab.title"
-              @click="activeTabId = tab.id"
+              @click="selectTab(tab)"
               @auxclick.middle="closeTab(tab.id)"
             >
               <svg v-if="tab.kind === 'query'" class="subtab-icon" viewBox="0 0 16 16" aria-hidden="true">
@@ -559,9 +578,20 @@ onUnmounted(() => {
                 ×
               </button>
             </div>
+            <button
+              v-if="view === 'sql'"
+              class="subtab-add"
+              type="button"
+              title="Open a new query tab"
+              aria-label="Open a new query tab"
+              @click="openQueryTab()"
+            >
+              +
+            </button>
           </div>
-          <div v-if="!tabs.length" class="db-empty muted">
-            <p>Pick a table on the left, or open a query with the SQL button.</p>
+          <div v-if="!viewTabs.length" class="db-empty muted">
+            <p v-if="view === 'sql'">No open queries. Use + to start one.</p>
+            <p v-else>Pick a table on the left, or double-click one to query it.</p>
           </div>
           <div
             v-for="tab in tabs"
@@ -583,7 +613,7 @@ onUnmounted(() => {
               :driver="driver"
               :schema="schema"
               :storage-key="tab.key"
-              :active="active && activeTabId === tab.id"
+              :active="active && view === 'sql' && activeQueryTabId === tab.id"
               @executed="onExecuted"
             />
           </div>

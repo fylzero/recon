@@ -2204,20 +2204,60 @@ button.link-button:hover:not(:disabled) {
   padding: 0.45rem 0.55rem;
 }
 
-.db-toolbar-bar {
+.view-tabs {
   display: flex;
-  align-items: center;
-  gap: 0.45rem;
+  flex-shrink: 0;
+  align-items: stretch;
+  min-height: 2.25rem;
+  border-bottom: 1px solid var(--border);
 }
 
-.db-toolbar-bar .ghost {
+.connection-view-tabs {
+  overflow-x: auto;
+  padding: 0 0.5rem;
+}
+
+.view-tab,
+button.view-tab:hover:not(:disabled),
+button.view-tab:active {
   display: inline-flex;
   align-items: center;
-  gap: 0.3rem;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 0 0.75rem;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: inset 0 -2px 0 transparent;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
 }
 
-.db-toolbar-bar .ghost.active {
-  background: var(--bg-active);
+button.view-tab:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.view-tab.active,
+button.view-tab.active:hover:not(:disabled) {
+  box-shadow: inset 0 -2px 0 var(--accent);
+  color: var(--text);
+}
+
+.file-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.25rem;
+  height: 1.15rem;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  background: var(--chip);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
 
 .db-body {
@@ -2428,6 +2468,28 @@ button.link-button:hover:not(:disabled) {
 
 .subtab.query .subtab-icon {
   color: var(--accent);
+}
+
+.subtab-add {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  margin-bottom: 0.15rem;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.subtab-add:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
 .db-main-pane {
