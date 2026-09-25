@@ -24,7 +24,7 @@ const SettingsView = defineAsyncComponent({
 });
 const ChangelogView = defineAsyncComponent(() => import("./views/ChangelogView.vue"));
 import { useApp } from "./composables/useApp";
-import { resolveFontStack } from "./fonts";
+import { DEFAULT_LIST_FONT, UI_FONT_FALLBACK, resolveFontStack } from "./fonts";
 import { useUpdater } from "./composables/useUpdater";
 import { useConnectionForm } from "./composables/useConnectionForm";
 import {
@@ -50,6 +50,8 @@ const {
   editorFontSize,
   gridFontFamily,
   gridFontSize,
+  listFontFamily,
+  listFontSize,
 } = useApp();
 
 const appStyle = computed(() => ({
@@ -57,6 +59,8 @@ const appStyle = computed(() => ({
   "--editor-font-size": `${editorFontSize.value}px`,
   "--grid-font-family": resolveFontStack(gridFontFamily.value),
   "--grid-font-size": `${gridFontSize.value}px`,
+  "--list-font-family": resolveFontStack(listFontFamily.value, DEFAULT_LIST_FONT, UI_FONT_FALLBACK),
+  "--list-font-size": `${listFontSize.value}px`,
 }));
 const {
   status,

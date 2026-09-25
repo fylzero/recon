@@ -4,12 +4,20 @@ fn default_code_font() -> String {
     "jetbrains".into()
 }
 
+fn default_list_font() -> String {
+    "ui".into()
+}
+
 fn default_editor_font_size() -> f64 {
-    13.0
+    DEFAULT_EDITOR_FONT_SIZE
 }
 
 fn default_grid_font_size() -> f64 {
-    12.0
+    DEFAULT_GRID_FONT_SIZE
+}
+
+fn default_list_font_size() -> f64 {
+    DEFAULT_LIST_FONT_SIZE
 }
 
 fn default_page_size() -> u32 {
@@ -40,8 +48,9 @@ fn default_true() -> bool {
     true
 }
 
-pub const DEFAULT_EDITOR_FONT_SIZE: f64 = 13.0;
-pub const DEFAULT_GRID_FONT_SIZE: f64 = 12.0;
+pub const DEFAULT_EDITOR_FONT_SIZE: f64 = 14.0;
+pub const DEFAULT_GRID_FONT_SIZE: f64 = 13.0;
+pub const DEFAULT_LIST_FONT_SIZE: f64 = 12.5;
 pub const PAGE_SIZE_MIN: u32 = 50;
 pub const PAGE_SIZE_MAX: u32 = 5_000;
 pub const QUERY_ROW_LIMIT_MIN: u32 = 100;
@@ -52,6 +61,14 @@ pub const MAX_AUTO_COLUMN_WIDTH_MIN: u32 = 120;
 pub const MAX_AUTO_COLUMN_WIDTH_MAX: u32 = 1_600;
 
 pub fn sanitize_font_family(value: &str) -> String {
+    sanitize_font_family_or(value, default_code_font)
+}
+
+pub fn sanitize_list_font_family(value: &str) -> String {
+    sanitize_font_family_or(value, default_list_font)
+}
+
+fn sanitize_font_family_or(value: &str, default: fn() -> String) -> String {
     let value = value.trim();
     if value.is_empty()
         || value.len() > 80
@@ -59,9 +76,10 @@ pub fn sanitize_font_family(value: &str) -> String {
             .chars()
             .any(|c| c.is_control() || matches!(c, '/' | '\\' | ';' | '{' | '}'))
     {
-        return default_code_font();
+        return default();
     }
     match value.to_ascii_lowercase().as_str() {
+        "ui" | "inter" | "interface" => "ui".into(),
         "jetbrains" | "jetbrains mono" => "jetbrains".into(),
         "system" | "system mono" | "default" | "ui-monospace" => "system".into(),
         "sf-mono" | "sf mono" | "sfmono" => "sf-mono".into(),
@@ -236,6 +254,10 @@ pub struct AppData {
     pub grid_font_family: String,
     #[serde(default = "default_grid_font_size")]
     pub grid_font_size: f64,
+    #[serde(default = "default_list_font")]
+    pub list_font_family: String,
+    #[serde(default = "default_list_font_size")]
+    pub list_font_size: f64,
     #[serde(default = "default_page_size")]
     pub page_size: u32,
     #[serde(default = "default_query_row_limit")]
@@ -257,6 +279,8 @@ impl Default for AppData {
             editor_font_size: default_editor_font_size(),
             grid_font_family: default_code_font(),
             grid_font_size: default_grid_font_size(),
+            list_font_family: default_list_font(),
+            list_font_size: default_list_font_size(),
             page_size: default_page_size(),
             query_row_limit: default_query_row_limit(),
             sidebar_width: default_sidebar_width(),
@@ -282,6 +306,8 @@ pub struct PreferencesPatch {
     pub editor_font_size: Option<f64>,
     pub grid_font_family: Option<String>,
     pub grid_font_size: Option<f64>,
+    pub list_font_family: Option<String>,
+    pub list_font_size: Option<f64>,
     pub page_size: Option<u32>,
     pub query_row_limit: Option<u32>,
     pub sidebar_width: Option<u32>,
@@ -330,7 +356,10 @@ mod tests {
         assert_eq!(parsed.page_size, 300);
         assert_eq!(parsed.query_row_limit, 10_000);
         assert_eq!(parsed.editor_font_family, "jetbrains");
-        assert_eq!(parsed.grid_font_size, 12.0);
+        assert_eq!(parsed.editor_font_size, 14.0);
+        assert_eq!(parsed.grid_font_size, 13.0);
+        assert_eq!(parsed.list_font_family, "ui");
+        assert_eq!(parsed.list_font_size, 12.5);
 
         let entry: ConnectionEntry =
             serde_json::from_str(r#"{"name":"old","driver":"mysql"}"#).unwrap();

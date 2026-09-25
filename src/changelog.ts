@@ -21,6 +21,8 @@ export const CHANGELOG: ChangelogRelease[] = [
       "Private keys in ~/.ssh are listed so you can pick one, and SSH passwords and key passphrases are stored in the macOS Keychain.",
       "New SSH hosts are added to ~/.ssh/known_hosts on first connect, and Recon refuses to connect if a host key changes.",
       "Dragging to select text in a dialog no longer closes it when the mouse is released outside.",
+      "The editor font now defaults to 14px and the grid font to 13px.",
+      "Settings has a new Table list font and size for the table names in the connection sidebar.",
     ],
   },
   {

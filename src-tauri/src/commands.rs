@@ -5,9 +5,9 @@ use std::sync::Mutex;
 use tauri::{AppHandle, State};
 
 use crate::models::{
-    sanitize_color, sanitize_font_family, sanitize_font_size, AppData, ConnectionEntry,
-    ConnectionGroup, Driver, PreferencesPatch, SshAuth, SshTunnel, DEFAULT_EDITOR_FONT_SIZE,
-    DEFAULT_GRID_FONT_SIZE, DEFAULT_SSH_PORT,
+    sanitize_color, sanitize_font_family, sanitize_font_size, sanitize_list_font_family, AppData,
+    ConnectionEntry, ConnectionGroup, Driver, PreferencesPatch, SshAuth, SshTunnel,
+    DEFAULT_EDITOR_FONT_SIZE, DEFAULT_GRID_FONT_SIZE, DEFAULT_LIST_FONT_SIZE, DEFAULT_SSH_PORT,
     MAX_AUTO_COLUMN_WIDTH_MAX, MAX_AUTO_COLUMN_WIDTH_MIN, PAGE_SIZE_MAX, PAGE_SIZE_MIN,
     QUERY_ROW_LIMIT_MAX, QUERY_ROW_LIMIT_MIN, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
 };
@@ -155,6 +155,8 @@ fn sanitize_app_data(mut data: AppData) -> Result<AppData, String> {
     data.editor_font_size = sanitize_font_size(data.editor_font_size, DEFAULT_EDITOR_FONT_SIZE);
     data.grid_font_family = sanitize_font_family(&data.grid_font_family);
     data.grid_font_size = sanitize_font_size(data.grid_font_size, DEFAULT_GRID_FONT_SIZE);
+    data.list_font_family = sanitize_list_font_family(&data.list_font_family);
+    data.list_font_size = sanitize_font_size(data.list_font_size, DEFAULT_LIST_FONT_SIZE);
     data.page_size = data.page_size.clamp(PAGE_SIZE_MIN, PAGE_SIZE_MAX);
     data.query_row_limit = data
         .query_row_limit
@@ -436,6 +438,12 @@ pub fn update_preferences(
     }
     if let Some(value) = patch.grid_font_size {
         data.grid_font_size = sanitize_font_size(value, DEFAULT_GRID_FONT_SIZE);
+    }
+    if let Some(value) = patch.list_font_family {
+        data.list_font_family = sanitize_list_font_family(&value);
+    }
+    if let Some(value) = patch.list_font_size {
+        data.list_font_size = sanitize_font_size(value, DEFAULT_LIST_FONT_SIZE);
     }
     if let Some(value) = patch.page_size {
         data.page_size = value.clamp(PAGE_SIZE_MIN, PAGE_SIZE_MAX);

@@ -11,6 +11,8 @@ import {
   DEFAULT_CODE_FONT,
   DEFAULT_EDITOR_FONT_SIZE,
   DEFAULT_GRID_FONT_SIZE,
+  DEFAULT_LIST_FONT,
+  DEFAULT_LIST_FONT_SIZE,
   clampFontSize,
   sanitizeFontFamily,
 } from "../fonts";
@@ -29,6 +31,8 @@ const editorFontFamily = ref(DEFAULT_CODE_FONT);
 const editorFontSize = ref(DEFAULT_EDITOR_FONT_SIZE);
 const gridFontFamily = ref(DEFAULT_CODE_FONT);
 const gridFontSize = ref(DEFAULT_GRID_FONT_SIZE);
+const listFontFamily = ref(DEFAULT_LIST_FONT);
+const listFontSize = ref(DEFAULT_LIST_FONT_SIZE);
 const pageSize = ref(DEFAULT_PAGE_SIZE);
 const queryRowLimit = ref(DEFAULT_QUERY_ROW_LIMIT);
 const sidebarWidth = ref(260);
@@ -65,6 +69,14 @@ export function useApp() {
     gridFontSize.value = clampFontSize(
       data.gridFontSize ?? DEFAULT_GRID_FONT_SIZE,
       DEFAULT_GRID_FONT_SIZE,
+    );
+    listFontFamily.value = sanitizeFontFamily(
+      data.listFontFamily ?? DEFAULT_LIST_FONT,
+      DEFAULT_LIST_FONT,
+    );
+    listFontSize.value = clampFontSize(
+      data.listFontSize ?? DEFAULT_LIST_FONT_SIZE,
+      DEFAULT_LIST_FONT_SIZE,
     );
     pageSize.value = data.pageSize ?? DEFAULT_PAGE_SIZE;
     queryRowLimit.value = data.queryRowLimit ?? DEFAULT_QUERY_ROW_LIMIT;
@@ -105,6 +117,9 @@ export function useApp() {
     }
     if (patch.gridFontSize !== undefined) {
       gridFontSize.value = clampFontSize(patch.gridFontSize, DEFAULT_GRID_FONT_SIZE);
+    }
+    if (patch.listFontSize !== undefined) {
+      listFontSize.value = clampFontSize(patch.listFontSize, DEFAULT_LIST_FONT_SIZE);
     }
     if (patch.sidebarWidth !== undefined) {
       sidebarWidth.value = clampSidebar(patch.sidebarWidth);
@@ -288,6 +303,8 @@ export function useApp() {
     editorFontSize,
     gridFontFamily,
     gridFontSize,
+    listFontFamily,
+    listFontSize,
     pageSize,
     queryRowLimit,
     sidebarWidth,

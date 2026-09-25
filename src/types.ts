@@ -71,6 +71,8 @@ export interface AppData {
   editorFontSize?: number;
   gridFontFamily?: string;
   gridFontSize?: number;
+  listFontFamily?: string;
+  listFontSize?: number;
   pageSize?: number;
   queryRowLimit?: number;
   sidebarWidth?: number;
@@ -83,6 +85,8 @@ export interface PreferencesPatch {
   editorFontSize?: number;
   gridFontFamily?: string;
   gridFontSize?: number;
+  listFontFamily?: string;
+  listFontSize?: number;
   pageSize?: number;
   queryRowLimit?: number;
   sidebarWidth?: number;
