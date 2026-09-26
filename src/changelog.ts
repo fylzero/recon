@@ -6,6 +6,14 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "0.2.1",
+    date: "September 25, 2026",
+    notes: [
+      "Double-click the bar between the table list and the table view to fit the list to the longest table name.",
+      "Fixed an error that sometimes appeared after dragging that bar to resize the table list.",
+    ],
+  },
+  {
     version: "0.2.0",
     date: "September 25, 2026",
     notes: [

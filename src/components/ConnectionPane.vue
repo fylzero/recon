@@ -59,6 +59,7 @@ const nameValue = ref("");
 const nameError = ref("");
 const nameBusy = ref(false);
 const nameInput = ref<HTMLInputElement | null>(null);
+const sidebarEl = ref<HTMLElement | null>(null);
 const editors = new Map<string, InstanceType<typeof QueryEditor>>();
 const tableViews = new Map<string, InstanceType<typeof TableView>>();
 
@@ -719,7 +720,7 @@ function startSidebarResize(event: PointerEvent) {
   let width = startWidth;
   document.body.classList.add("resizing-columns");
   const onMove = (move: PointerEvent) => {
-    width = Math.min(Math.max(startWidth + move.clientX - startX, SIDEBAR_MIN), SIDEBAR_MAX);
+    width = Math.round(Math.min(Math.max(startWidth + move.clientX - startX, SIDEBAR_MIN), SIDEBAR_MAX));
     previewPreferences({ sidebarWidth: width });
   };
   const onUp = () => {
@@ -736,6 +737,38 @@ function startSidebarResize(event: PointerEvent) {
   window.addEventListener("pointermove", onMove);
   window.addEventListener("pointerup", onUp);
   window.addEventListener("pointercancel", onUp);
+}
+
+let measureCanvas: HTMLCanvasElement | null = null;
+
+function autoFitSidebar() {
+  const sidebar = sidebarEl.value;
+  const row = sidebar?.querySelector<HTMLElement>(".db-table");
+  const name = row?.querySelector<HTMLElement>(".db-table-name");
+  const context = (measureCanvas ??= document.createElement("canvas")).getContext("2d");
+  if (!sidebar || !row || !name || !context || !tables.value.length) return;
+
+  const font = getComputedStyle(name);
+  const base = `${font.fontWeight} ${font.fontSize} ${font.fontFamily}`;
+  const longest = tables.value.reduce((max, table) => {
+    const dirty = dirtyTabs.value.has(`table:${namespace.value}.${table.name}`);
+    context.font = dirty ? `italic ${base}` : base;
+    return Math.max(max, context.measureText(table.name).width + (dirty ? 12 : 0));
+  }, 0);
+
+  /**
+   * Everything around the name: sidebar edge to the name's start, plus the
+   * row's right padding, list padding, and scrollbar on the other side.
+   */
+  const sidebarRect = sidebar.getBoundingClientRect();
+  const rowRect = row.getBoundingClientRect();
+  const leading = name.getBoundingClientRect().left - sidebarRect.left;
+  const trailing = sidebarRect.right - rowRect.right + parseFloat(getComputedStyle(row).paddingRight);
+
+  const width = Math.min(Math.max(Math.ceil(leading + longest + trailing) + 2, SIDEBAR_MIN), SIDEBAR_MAX);
+  if (width === sidebarWidth.value) return;
+  previewPreferences({ sidebarWidth: width });
+  void savePreferences({ sidebarWidth: width }).catch((err) => showToast(String(err), "error"));
 }
 
 let stopLost: UnlistenFn | null = null;
@@ -895,7 +928,7 @@ onUnmounted(() => {
       </div>
       <ConnectionViewTabs :active="view" :table-count="tables.length" @select="selectView" />
       <div class="db-body">
-        <aside v-show="view === 'tables'" class="db-sidebar" :style="{ width: `${sidebarWidth}px` }">
+        <aside v-show="view === 'tables'" ref="sidebarEl" class="db-sidebar" :style="{ width: `${sidebarWidth}px` }">
           <div class="db-filter">
             <input v-model="filter" type="search" placeholder="Filter tables" spellcheck="false" />
           </div>
@@ -953,6 +986,7 @@ onUnmounted(() => {
           role="separator"
           aria-orientation="vertical"
           @pointerdown="startSidebarResize"
+          @dblclick="autoFitSidebar"
         />
 
         <section class="db-main">
