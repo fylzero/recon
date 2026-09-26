@@ -421,7 +421,8 @@ pub struct SaveRequest {
     pub new_indexes: Vec<NewIndex>,
 }
 
-pub fn insert_statement(driver: Driver, table: &str, insert: &RowInsert) -> EditStatement {
+/** `overriding` lets explicit values into PostgreSQL GENERATED ALWAYS identity columns. */
+pub fn insert_statement(driver: Driver, table: &str, insert: &RowInsert, overriding: bool) -> EditStatement {
     let dialect = dialect(driver);
     let mut params = Vec::new();
     let mut columns = Vec::new();
@@ -447,9 +448,10 @@ pub fn insert_statement(driver: Driver, table: &str, insert: &RowInsert) -> Edit
         (sql.clone(), sql)
     } else {
         let columns = columns.join(", ");
+        let overriding = if overriding && driver == Driver::Postgres { " OVERRIDING SYSTEM VALUE" } else { "" };
         (
-            format!("INSERT INTO {table} ({columns}) VALUES ({})", values.join(", ")),
-            format!("INSERT INTO {table} ({columns}) VALUES ({})", display_values.join(", ")),
+            format!("INSERT INTO {table} ({columns}){overriding} VALUES ({})", values.join(", ")),
+            format!("INSERT INTO {table} ({columns}){overriding} VALUES ({})", display_values.join(", ")),
         )
     };
     EditStatement {
@@ -1714,15 +1716,35 @@ mod tests {
             "values": [{ "column": "name", "value": "o'brien" }, { "column": "note", "value": null }],
         }))
         .unwrap();
-        let mysql = insert_statement(Driver::Mysql, "`users`", &insert);
+        let mysql = insert_statement(Driver::Mysql, "`users`", &insert, false);
         assert_eq!(mysql.sql, "INSERT INTO `users` (`name`, `note`) VALUES (?, NULL)");
         assert_eq!(mysql.display, "INSERT INTO `users` (`name`, `note`) VALUES ('o''brien', NULL)");
         assert!(mysql.expect_one_row);
-        let postgres = insert_statement(Driver::Postgres, "\"users\"", &insert);
+        let postgres = insert_statement(Driver::Postgres, "\"users\"", &insert, false);
         assert_eq!(postgres.sql, "INSERT INTO \"users\" (\"name\", \"note\") VALUES (E'o''brien', NULL)");
+        let overriding = insert_statement(Driver::Postgres, "\"users\"", &insert, true);
+        assert_eq!(
+            overriding.sql,
+            "INSERT INTO \"users\" (\"name\", \"note\") OVERRIDING SYSTEM VALUE VALUES (E'o''brien', NULL)"
+        );
+        assert!(!insert_statement(Driver::Mysql, "`users`", &insert, true).sql.contains("OVERRIDING"));
         let empty = RowInsert { values: Vec::new() };
-        assert_eq!(insert_statement(Driver::Mysql, "`t`", &empty).sql, "INSERT INTO `t` () VALUES ()");
-        assert_eq!(insert_statement(Driver::Sqlite, "\"t\"", &empty).sql, "INSERT INTO \"t\" DEFAULT VALUES");
+        assert_eq!(insert_statement(Driver::Mysql, "`t`", &empty, false).sql, "INSERT INTO `t` () VALUES ()");
+        assert_eq!(insert_statement(Driver::Sqlite, "\"t\"", &empty, false).sql, "INSERT INTO \"t\" DEFAULT VALUES");
+    }
+
+    #[test]
+    fn syncs_postgres_sequences_upward() {
+        let column = postgres::SequenceColumn {
+            name: "id".into(),
+            always: false,
+            sequence: "public.users_id_seq".into(),
+        };
+        assert_eq!(
+            postgres::sync_sequence_statement("\"public\".\"users\"", &column).sql,
+            "SELECT setval('public.users_id_seq', m) FROM (SELECT max(\"id\") AS m FROM \"public\".\"users\") AS t \
+             WHERE m > COALESCE(pg_sequence_last_value('public.users_id_seq'), 0)"
+        );
     }
 
     #[test]
@@ -1778,7 +1800,7 @@ mod tests {
         };
         let index = NewIndex { name: "by_status".into(), columns: "status".into(), unique: false };
         let statements = vec![
-            insert_statement(Driver::Sqlite, "\"main\".\"posts\"", &insert),
+            insert_statement(Driver::Sqlite, "\"main\".\"posts\"", &insert, false),
             add_column_statement(Driver::Sqlite, "\"main\".\"posts\"", &column).unwrap(),
             create_index_statement(Driver::Sqlite, "main", "\"main\".\"posts\"", "posts", &index).unwrap(),
         ];

@@ -123,12 +123,18 @@ impl Dialect for SqliteDialect {
         )
     }
 
+    /** A lone INTEGER PRIMARY KEY aliases the rowid, so SQLite fills it in when left out. */
     fn columns_sql(&self, namespace: &str, table: &str) -> String {
+        let (table, schema) = (quote_literal(table), quote_literal(namespace));
         format!(
-            "SELECT name, type, CASE WHEN \"notnull\" THEN 'NO' ELSE 'YES' END, dflt_value, pk > 0, '' \
-             FROM pragma_table_info({}, {}) ORDER BY cid",
-            quote_literal(table),
-            quote_literal(namespace)
+            "SELECT p.name, p.type, CASE WHEN p.\"notnull\" THEN 'NO' ELSE 'YES' END, p.dflt_value, p.pk > 0, \
+             CASE WHEN p.pk = 1 AND upper(p.type) = 'INTEGER' \
+                  AND (SELECT count(*) FROM pragma_table_info({table}, {schema}) WHERE pk > 0) = 1 \
+                  AND NOT EXISTS (SELECT 1 FROM {}.sqlite_master AS m WHERE m.type = 'table' \
+                                  AND m.name = {table} AND upper(m.sql) LIKE '%WITHOUT ROWID%') \
+             THEN 'auto_increment' ELSE '' END \
+             FROM pragma_table_info({table}, {schema}) AS p ORDER BY p.cid",
+            quote_double(namespace)
         )
     }
 
@@ -275,6 +281,19 @@ mod tests {
         assert_eq!(title[2].as_deref(), Some("NO"));
         assert_eq!(title[3].as_deref(), Some("'x'"));
         assert!(columns.rows[0][4].is_truthy());
+        assert_eq!(texts(&columns.rows[0])[5].as_deref(), Some("auto_increment"));
+        assert_eq!(title[5].as_deref(), Some(""));
+
+        run(&mut conn, "CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT) WITHOUT ROWID", 0, None)
+            .await
+            .unwrap();
+        run(&mut conn, "CREATE TABLE pairs (a INTEGER, b INTEGER, PRIMARY KEY (a, b))", 0, None)
+            .await
+            .unwrap();
+        for table in ["tags", "pairs"] {
+            let columns = run(&mut conn, &dialect.columns_sql("main", table), 100, None).await.unwrap();
+            assert_eq!(texts(&columns.rows[0])[5].as_deref(), Some(""), "{table}");
+        }
 
         let indexes = run(&mut conn, &dialect.indexes_sql("main", "posts"), 100, None).await.unwrap();
         let slug = indexes

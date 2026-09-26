@@ -15,6 +15,8 @@ export const CHANGELOG: ChangelogRelease[] = [
       "Export a whole database to a .sql file with the Export button in the connection toolbar, or right-click a table and choose Export table. Choose structure, data, or both, whether to drop existing tables first, and gzip compression, which is on by default.",
       "Cmd+click tables in the sidebar to select several, or Shift+click to select a range, then right-click any of them to export just those tables.",
       "Import runs a .sql or .sql.gz file against the current database and shows its progress. It reads dumps from mysqldump and pg_dump's plain format, including COPY data, as well as Recon's own exports.",
+      "New records skip auto-increment columns, which show auto until you save. The database then assigns the next id, and it appears in the grid. Double-click the cell to set an id yourself, or press Backspace to go back to auto.",
+      "On PostgreSQL, ids you set yourself also work for GENERATED ALWAYS identity columns, and the column's sequence moves past them so later automatic ids don't collide.",
     ],
   },
   {

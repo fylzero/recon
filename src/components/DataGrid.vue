@@ -32,6 +32,8 @@ const props = defineProps<{
   cellEditable?: (row: number, col: number) => boolean;
   /** Rows from this index on are new and numbered with a +. */
   newRowStart?: number;
+  /** Per column, whether the database assigns the value in new rows. Tab skips these cells. */
+  newRowAuto?: boolean[];
   creatable?: boolean;
   modified?: Map<number, Set<number>>;
   /** Per column, the record a value points to (such as `users.id`), or null for plain columns. */
@@ -231,6 +233,14 @@ function follow(row: number, col: number) {
   emit("follow", row, col);
 }
 
+function isAutoColumn(row: number, col: number) {
+  return props.newRowStart !== undefined && row >= props.newRowStart && Boolean(props.newRowAuto?.[col]);
+}
+
+function isAutoCell(row: number, col: number) {
+  return isAutoColumn(row, col) && props.rows[row]?.[col] === null;
+}
+
 function headerTitle(column: ColumnMeta, index: number) {
   const base = `${column.name} · ${column.typeName.toLowerCase()}`;
   const target = props.links?.[index];
@@ -250,7 +260,7 @@ function nextEditable(from: CellPosition, step: 1 | -1): CellPosition | null {
   const last = props.rows.length * width - 1;
   for (let index = from.row * width + from.col + step; index >= 0 && index <= last; index += step) {
     const position = { row: Math.floor(index / width), col: index % width };
-    if (canEdit(position.row, position.col)) {
+    if (canEdit(position.row, position.col) && !isAutoColumn(position.row, position.col)) {
       return position;
     }
   }
@@ -652,7 +662,7 @@ defineExpose({ scrollToTop, commitEdit, editCell });
               spellcheck="false"
               autocomplete="off"
               autocapitalize="off"
-              :placeholder="value === null ? 'NULL' : ''"
+              :placeholder="isAutoCell(item.index, col) ? 'auto' : value === null ? 'NULL' : ''"
               @keydown="onEditorKeydown"
               @blur="commitEdit"
               @mousedown.stop
@@ -675,6 +685,7 @@ defineExpose({ scrollToTop, commitEdit, editCell });
                 </svg>
               </button>
             </template>
+            <template v-else-if="isAutoCell(item.index, col)">auto</template>
             <template v-else>{{ cellDisplay(value) }}</template>
           </div>
         </template>

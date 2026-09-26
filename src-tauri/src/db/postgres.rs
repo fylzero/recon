@@ -7,7 +7,7 @@ use sqlx::{Connection, Postgres, Row, TypeInfo, ValueRef};
 
 use super::{
     index_columns_from_definition, quote_double, quote_literal, run_raw, with_timeout, CellValue,
-    Conn, Dialect, Opened, Pool, RawOutput, CONNECT_TIMEOUT,
+    Conn, Dialect, EditStatement, Opened, Pool, RawOutput, CONNECT_TIMEOUT,
 };
 use crate::models::ConnectionEntry;
 
@@ -254,4 +254,56 @@ impl Dialect for PostgresDialect {
     fn rename_namespace_sql(&self, from: &str, to: &str) -> Option<String> {
         Some(format!("ALTER SCHEMA {} RENAME TO {}", quote_double(from), quote_double(to)))
     }
+}
+
+/** An identity or serial column, which PostgreSQL fills from a sequence. */
+#[derive(Debug, Clone, PartialEq)]
+pub struct SequenceColumn {
+    pub name: String,
+    /** GENERATED ALWAYS, which rejects explicit values without OVERRIDING SYSTEM VALUE. */
+    pub always: bool,
+    pub sequence: String,
+}
+
+pub fn sequence_columns_sql(namespace: &str, table: &str) -> String {
+    format!(
+        "SELECT a.attname, a.attidentity = 'a', s.seq \
+         FROM pg_catalog.pg_attribute a \
+         JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         CROSS JOIN LATERAL pg_get_serial_sequence(format('%I.%I', n.nspname, c.relname), a.attname) AS s(seq) \
+         WHERE n.nspname = {} AND c.relname = {} AND a.attnum > 0 AND NOT a.attisdropped \
+         AND s.seq IS NOT NULL",
+        quote_literal(namespace),
+        quote_literal(table)
+    )
+}
+
+pub fn sequence_columns(output: &RawOutput) -> Vec<SequenceColumn> {
+    output
+        .rows
+        .iter()
+        .map(|row| {
+            let text = super::texts(row);
+            SequenceColumn {
+                name: super::text_at(&text, 0),
+                always: row.get(1).is_some_and(CellValue::is_truthy),
+                sequence: super::text_at(&text, 2),
+            }
+        })
+        .collect()
+}
+
+/**
+ * Moves the sequence up to the column's highest value so ids typed into new
+ * rows don't collide with later automatic ones. It never moves it back.
+ */
+pub fn sync_sequence_statement(table: &str, column: &SequenceColumn) -> EditStatement {
+    let sequence = quote_literal(&column.sequence);
+    let sql = format!(
+        "SELECT setval({sequence}, m) FROM (SELECT max({}) AS m FROM {table}) AS t \
+         WHERE m > COALESCE(pg_sequence_last_value({sequence}), 0)",
+        quote_double(&column.name)
+    );
+    EditStatement::schema(table, &column.name, sql)
 }

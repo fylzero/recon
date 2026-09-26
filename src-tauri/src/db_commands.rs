@@ -10,7 +10,8 @@ use crate::commands::{sanitize_connection, AppState};
 use crate::db::ssh::Tunnel;
 use crate::db::{
     self, dialect, first_text, text_at, BrowseRequest, BrowseResult, CellValue, ColumnDetail,
-    ColumnMeta, IndexInfo, NamespaceList, Pool, RawOutput, ResultStore, RowValues, SaveRequest,
+    ColumnMeta, EditValue, IndexInfo, NamespaceList, Pool, RawOutput, ResultStore, RowInsert,
+    RowValues, SaveRequest,
     SchemaColumn, Session, SessionStore, TableInfo, TableStructure,
 };
 use crate::models::{ConnectionEntry, Driver};
@@ -722,8 +723,28 @@ async fn save(session: Arc<Session>, requests: &[SaveRequest]) -> Result<usize, 
         for update in &request.updates {
             statements.push(db::update_statement(session.driver, &table, update)?);
         }
+        let explicit = |insert: &RowInsert, column: &str| {
+            insert.values.iter().any(|cell| cell.column == column && !matches!(cell.value, EditValue::Null))
+        };
+        let sequences = if session.driver == Driver::Postgres
+            && request
+                .inserts
+                .iter()
+                .any(|insert| insert.values.iter().any(|cell| !matches!(cell.value, EditValue::Null)))
+        {
+            let sql = db::postgres::sequence_columns_sql(&request.namespace, &request.table);
+            db::postgres::sequence_columns(&pool_run(&session, &sql, usize::MAX, QueryOrigin::Schema).await?)
+        } else {
+            Vec::new()
+        };
         for insert in &request.inserts {
-            statements.push(db::insert_statement(session.driver, &table, insert));
+            let overriding = sequences.iter().any(|column| column.always && explicit(insert, &column.name));
+            statements.push(db::insert_statement(session.driver, &table, insert, overriding));
+        }
+        for column in &sequences {
+            if request.inserts.iter().any(|insert| explicit(insert, &column.name)) {
+                statements.push(db::postgres::sync_sequence_statement(&table, column));
+            }
         }
         if !request.columns.is_empty() {
             let current = if session.driver == Driver::Mysql {

@@ -7,6 +7,7 @@ import type {
   BrowseResult,
   Cell,
   CellEdit,
+  ColumnDetail,
   ColumnMeta,
   Driver,
   EditValue,
@@ -83,6 +84,16 @@ function isNewKey(key: Cell[]) {
   return key[0] === NEW_ROW;
 }
 
+// New rows leave these out of the INSERT so the database assigns the next value.
+function isAutoIncrement(column: ColumnDetail) {
+  const extra = column.extra.toLowerCase();
+  return (
+    extra.includes("auto_increment") ||
+    extra === "identity" ||
+    /^nextval\(/i.test(column.defaultValue ?? "")
+  );
+}
+
 const rows = computed(() => result.value?.rows ?? []);
 const columns = computed<ColumnMeta[]>(() => result.value?.columns ?? []);
 const columnIndex = computed(
@@ -98,6 +109,12 @@ const keyIndexes = computed(() => {
 const nullable = computed(
   () => new Map((structure.value?.columns ?? []).map((column) => [column.name, column.nullable])),
 );
+const autoColumns = computed(() => {
+  const auto = new Set(
+    (structure.value?.columns ?? []).filter(isAutoIncrement).map((column) => column.name),
+  );
+  return columns.value.map((column) => auto.has(column.name));
+});
 const editable = computed(() => props.kind === "table" && keyIndexes.value.length > 0);
 const foreignKeyByColumn = computed(() => {
   const byColumn = new Map<string, ForeignKey>();
@@ -193,7 +210,9 @@ const modified = computed(() => {
 const dirty = computed(
   () => pending.value.size > 0 || newRowIds.value.length > 0 || structureChanges.value > 0,
 );
-const canInsert = computed(() => props.kind === "table" && Boolean(result.value));
+const canInsert = computed(
+  () => props.kind === "table" && Boolean(result.value) && Boolean(structure.value),
+);
 
 function cellEditable(row: number) {
   return row >= rows.value.length ? canInsert.value : editable.value;
@@ -448,7 +467,10 @@ async function createRecord() {
   mode.value = "data";
   recordEntry({ changes: [], created: [nextNewRowId++] });
   await nextTick();
-  grid.value?.editCell(allRows.value.length - 1, 0);
+  const col = autoColumns.value.findIndex((auto) => !auto);
+  if (col !== -1) {
+    grid.value?.editCell(allRows.value.length - 1, col);
+  }
 }
 
 function create() {
@@ -748,6 +770,7 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         :sort-dir="sortDir"
         :cell-editable="cellEditable"
         :new-row-start="rows.length"
+        :new-row-auto="autoColumns"
         :creatable="canInsert"
         :modified="modified"
         :links="links"
