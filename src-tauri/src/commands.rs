@@ -383,12 +383,14 @@ pub fn remove_connection(
     state: State<AppState>,
     connection_id: String,
 ) -> Result<(), String> {
-    {
+    let removed = {
         let mut data = lock(&state)?;
-        take_connection(&mut data, &connection_id)
+        let removed = take_connection(&mut data, &connection_id)
             .ok_or_else(|| "Connection not found".to_string())?;
         persist::save(&app, &data)?;
-    }
+        removed
+    };
+    let _ = query_log::clear(&connection_id, Some(&removed.name));
     secrets::delete_all(&connection_id)
 }
 
@@ -532,24 +534,35 @@ fn reveal_in_finder(path: &Path, label: &str) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
-pub fn query_history() -> Vec<query_log::QueryLogEntry> {
-    query_log::list()
+fn connection_name(state: &AppState, connection_id: &str) -> Result<Option<String>, String> {
+    Ok(lock(state)?
+        .find_connection(connection_id)
+        .map(|entry| entry.name.clone()))
 }
 
 #[tauri::command]
-pub fn query_history_paused() -> bool {
-    query_log::paused()
+pub fn query_history(
+    state: State<AppState>,
+    connection_id: String,
+) -> Result<Vec<query_log::QueryLogEntry>, String> {
+    let name = connection_name(&state, &connection_id)?;
+    Ok(query_log::list(&connection_id, name.as_deref()))
 }
 
 #[tauri::command]
-pub fn set_query_history_paused(paused: bool) -> Result<(), String> {
-    query_log::set_paused(paused)
+pub fn query_history_paused(connection_id: String) -> bool {
+    query_log::paused(&connection_id)
 }
 
 #[tauri::command]
-pub fn clear_query_history() -> Result<(), String> {
-    query_log::clear()
+pub fn set_query_history_paused(connection_id: String, paused: bool) -> Result<(), String> {
+    query_log::set_paused(&connection_id, paused)
+}
+
+#[tauri::command]
+pub fn clear_query_history(state: State<AppState>, connection_id: String) -> Result<(), String> {
+    let name = connection_name(&state, &connection_id)?;
+    query_log::clear(&connection_id, name.as_deref())
 }
 
 #[cfg(test)]

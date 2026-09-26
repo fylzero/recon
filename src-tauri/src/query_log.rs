@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -28,6 +29,8 @@ pub enum QueryOrigin {
 pub struct QueryLogEntry {
     pub id: String,
     pub at: u64,
+    #[serde(default)]
+    pub connection_id: String,
     pub connection: String,
     pub driver: String,
     pub database: String,
@@ -41,7 +44,19 @@ pub struct QueryLogEntry {
     pub error: String,
 }
 
+impl QueryLogEntry {
+    /// Entries written before history was per connection only carry the connection's name.
+    fn belongs_to(&self, connection_id: &str, legacy_name: Option<&str>) -> bool {
+        if self.connection_id.is_empty() {
+            legacy_name.is_some_and(|name| name == self.connection)
+        } else {
+            self.connection_id == connection_id
+        }
+    }
+}
+
 pub struct QueryRecord<'a> {
+    pub connection_id: &'a str,
     pub connection: &'a str,
     pub driver: &'a str,
     pub database: &'a str,
@@ -55,7 +70,7 @@ struct Logger {
     path: PathBuf,
     entries: Vec<QueryLogEntry>,
     app: Option<AppHandle>,
-    paused: bool,
+    paused: HashSet<String>,
 }
 
 static LOGGER: Mutex<Option<Logger>> = Mutex::new(None);
@@ -67,48 +82,67 @@ pub fn init(path: PathBuf, app: Option<AppHandle>) {
             path,
             entries,
             app,
-            paused: false,
+            paused: HashSet::new(),
         });
     }
 }
 
-pub fn list() -> Vec<QueryLogEntry> {
+pub fn list(connection_id: &str, legacy_name: Option<&str>) -> Vec<QueryLogEntry> {
     LOGGER
         .lock()
         .ok()
-        .and_then(|slot| slot.as_ref().map(|logger| logger.entries.clone()))
+        .and_then(|slot| {
+            slot.as_ref().map(|logger| {
+                logger
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.belongs_to(connection_id, legacy_name))
+                    .cloned()
+                    .collect()
+            })
+        })
         .unwrap_or_default()
 }
 
-pub fn paused() -> bool {
+pub fn paused(connection_id: &str) -> bool {
     LOGGER
         .lock()
         .ok()
-        .and_then(|slot| slot.as_ref().map(|logger| logger.paused))
+        .and_then(|slot| slot.as_ref().map(|logger| logger.paused.contains(connection_id)))
         .unwrap_or(false)
 }
 
-pub fn set_paused(paused: bool) -> Result<(), String> {
+pub fn set_paused(connection_id: &str, paused: bool) -> Result<(), String> {
     let mut slot = LOGGER
         .lock()
         .map_err(|_| "Could not lock the query history.".to_string())?;
     if let Some(logger) = slot.as_mut() {
-        logger.paused = paused;
+        if paused {
+            logger.paused.insert(connection_id.to_string());
+        } else {
+            logger.paused.remove(connection_id);
+        }
     }
     Ok(())
 }
 
-pub fn clear() -> Result<(), String> {
+pub fn clear(connection_id: &str, legacy_name: Option<&str>) -> Result<(), String> {
     let mut slot = LOGGER
         .lock()
         .map_err(|_| "Could not lock the query history.".to_string())?;
     let Some(logger) = slot.as_mut() else {
         return Ok(());
     };
-    logger.entries.clear();
-    fs::write(&logger.path, "").map_err(|err| format!("Could not clear query history: {err}"))?;
+    let before = logger.entries.len();
+    logger
+        .entries
+        .retain(|entry| !entry.belongs_to(connection_id, legacy_name));
+    if logger.entries.len() != before {
+        rewrite(&logger.path, &logger.entries)
+            .map_err(|err| format!("Could not clear query history: {err}"))?;
+    }
     if let Some(app) = &logger.app {
-        let _ = app.emit(QUERY_LOG_CLEARED_EVENT, ());
+        let _ = app.emit(QUERY_LOG_CLEARED_EVENT, connection_id);
     }
     Ok(())
 }
@@ -120,7 +154,7 @@ pub fn record(record: QueryRecord<'_>) {
     let Some(logger) = slot.as_mut() else {
         return;
     };
-    if logger.paused {
+    if logger.paused.contains(record.connection_id) {
         return;
     }
     let (success, rows, error) = match record.outcome {
@@ -130,6 +164,7 @@ pub fn record(record: QueryRecord<'_>) {
     let entry = QueryLogEntry {
         id: Uuid::new_v4().to_string(),
         at: now_ms(),
+        connection_id: record.connection_id.to_string(),
         connection: record.connection.to_string(),
         driver: record.driver.to_string(),
         database: record.database.to_string(),
@@ -245,6 +280,7 @@ mod tests {
 
     fn sample<'a>(connection: &'a str, sql: &'a str, outcome: Result<Option<u64>, &'a str>) -> QueryRecord<'a> {
         QueryRecord {
+            connection_id: connection,
             connection,
             driver: "PostgreSQL",
             database: "public",
@@ -259,26 +295,50 @@ mod tests {
     fn persists_pauses_and_clears_query_history() {
         let path = temp_log();
         init(path.clone(), None);
-        set_paused(false).unwrap();
         record(sample("history-a", "SELECT 1", Ok(Some(1))));
         record(sample("history-a", "SELEC 1", Err("syntax error")));
+        record(sample("history-b", "SELECT 3", Ok(Some(1))));
 
-        let mine: Vec<_> = list()
-            .into_iter()
-            .filter(|entry| entry.connection == "history-a")
-            .collect();
+        let mine = list("history-a", None);
+        assert!(mine.iter().all(|entry| entry.connection_id == "history-a"));
         assert!(mine.iter().any(|entry| entry.sql == "SELECT 1" && entry.rows == Some(1)));
         assert!(mine.iter().any(|entry| !entry.success && entry.error == "syntax error"));
 
         init(path, None);
-        assert!(list().iter().any(|entry| entry.connection == "history-a"));
+        assert!(!list("history-a", None).is_empty());
 
-        set_paused(true).unwrap();
-        record(sample("history-paused", "SELECT 2", Ok(None)));
-        assert!(!list().iter().any(|entry| entry.connection == "history-paused"));
-        set_paused(false).unwrap();
+        set_paused("history-a", true).unwrap();
+        assert!(paused("history-a"));
+        assert!(!paused("history-b"));
+        record(sample("history-a", "SELECT 2", Ok(None)));
+        record(sample("history-b", "SELECT 4", Ok(None)));
+        assert!(!list("history-a", None).iter().any(|entry| entry.sql == "SELECT 2"));
+        assert!(list("history-b", None).iter().any(|entry| entry.sql == "SELECT 4"));
+        set_paused("history-a", false).unwrap();
 
-        clear().unwrap();
-        assert!(!list().iter().any(|entry| entry.connection == "history-a"));
+        clear("history-a", None).unwrap();
+        assert!(list("history-a", None).is_empty());
+        assert!(!list("history-b", None).is_empty());
+    }
+
+    #[test]
+    fn matches_legacy_entries_by_connection_name() {
+        let entry = QueryLogEntry {
+            id: "1".into(),
+            at: 0,
+            connection_id: String::new(),
+            connection: "Staging".into(),
+            driver: "MySQL".into(),
+            database: String::new(),
+            sql: "SELECT 1".into(),
+            origin: QueryOrigin::Editor,
+            success: true,
+            duration_ms: 1,
+            rows: None,
+            error: String::new(),
+        };
+        assert!(entry.belongs_to("abc", Some("Staging")));
+        assert!(!entry.belongs_to("abc", Some("Production")));
+        assert!(!entry.belongs_to("abc", None));
     }
 }

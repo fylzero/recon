@@ -13,6 +13,7 @@ import DatabaseSwitcher from "./DatabaseSwitcher.vue";
 import DriverIcon from "./DriverIcon.vue";
 import Modal from "./Modal.vue";
 import QueryEditor from "./QueryEditor.vue";
+import QueryHistory from "./QueryHistory.vue";
 import TableView from "./TableView.vue";
 
 type PaneTab =
@@ -109,12 +110,18 @@ watch(
 
 const queryTabsKey = computed(() => `recon.queryTabs.${props.sessionId}`);
 
-const viewTabs = computed(() =>
-  tabs.value.filter((tab) => (view.value === "sql" ? tab.kind === "query" : tab.kind === "table")),
-);
-const activeTabId = computed(() =>
-  view.value === "sql" ? activeQueryTabId.value : activeTableTabId.value,
-);
+const viewTabs = computed(() => {
+  if (view.value === "history") {
+    return [];
+  }
+  return tabs.value.filter((tab) => (view.value === "sql" ? tab.kind === "query" : tab.kind === "table"));
+});
+const activeTabId = computed(() => {
+  if (view.value === "history") {
+    return "";
+  }
+  return view.value === "sql" ? activeQueryTabId.value : activeTableTabId.value;
+});
 
 const filteredTables = computed(() => {
   const needle = filter.value.trim().toLowerCase();
@@ -1024,7 +1031,12 @@ onUnmounted(() => {
           @dblclick="autoFitSidebar"
         />
 
-        <section class="db-main">
+        <QueryHistory
+          v-if="view === 'history'"
+          :connection-id="connectionId"
+          :connection-name="entry?.name ?? ''"
+        />
+        <section v-show="view !== 'history'" class="db-main">
           <div v-if="viewTabs.length || view === 'sql'" class="subtab-bar" role="tablist">
             <div
               v-for="tab in viewTabs"

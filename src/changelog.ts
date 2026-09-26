@@ -11,6 +11,7 @@ export const CHANGELOG: ChangelogRelease[] = [
     notes: [
       "Foreign key columns show an arrow next to each value. Click it to open the referenced table showing just that record, and clear the filter from the toolbar to see every row again.",
       "Hovering a foreign key column's header shows the table and column it points to.",
+      "History moved from the top bar to a History tab next to Tables and SQL, and now shows only that connection's queries. Pause and Clear apply to the current connection, and deleting a connection removes its history.",
     ],
   },
   {

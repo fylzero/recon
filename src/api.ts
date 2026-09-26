@@ -111,20 +111,20 @@ export function revealPath(path: string) {
   return invoke<void>("reveal_path", { path });
 }
 
-export function queryHistory() {
-  return invoke<QueryLogEntry[]>("query_history");
+export function queryHistory(connectionId: string) {
+  return invoke<QueryLogEntry[]>("query_history", { connectionId });
 }
 
-export function queryHistoryPaused() {
-  return invoke<boolean>("query_history_paused");
+export function queryHistoryPaused(connectionId: string) {
+  return invoke<boolean>("query_history_paused", { connectionId });
 }
 
-export function setQueryHistoryPaused(paused: boolean) {
-  return invoke<void>("set_query_history_paused", { paused });
+export function setQueryHistoryPaused(connectionId: string, paused: boolean) {
+  return invoke<void>("set_query_history_paused", { connectionId, paused });
 }
 
-export function clearQueryHistory() {
-  return invoke<void>("clear_query_history");
+export function clearQueryHistory(connectionId: string) {
+  return invoke<void>("clear_query_history", { connectionId });
 }
 
 export function testConnection(

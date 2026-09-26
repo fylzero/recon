@@ -1,16 +1,10 @@
 <script setup lang="ts">
 import { useApp } from "../composables/useApp";
-import {
-  CHANGELOG_TAB_ID,
-  CONNECTIONS_TAB_ID,
-  HISTORY_TAB_ID,
-  SETTINGS_TAB_ID,
-  useTabs,
-} from "../composables/useTabs";
+import { CHANGELOG_TAB_ID, CONNECTIONS_TAB_ID, SETTINGS_TAB_ID, useTabs } from "../composables/useTabs";
 import { useUpdater } from "../composables/useUpdater";
 import DriverIcon from "./DriverIcon.vue";
 
-const { tabs, activeId, activate, closeTab, openHistory, openSettings } = useTabs();
+const { tabs, activeId, activate, closeTab, openSettings } = useTabs();
 const { findConnection } = useApp();
 const { updateReady, availableVersion, showPrompt } = useUpdater();
 </script>
@@ -41,16 +35,6 @@ const { updateReady, availableVersion, showPrompt } = useUpdater();
           <path
             d="M6 6.878V6a2.25 2.25 0 0 1 2.25-2.25h7.5A2.25 2.25 0 0 1 18 6v.878m-12 0c.235-.083.487-.128.75-.128h10.5c.263 0 .515.045.75.128m-12 0A2.25 2.25 0 0 0 4.5 9v.878m13.5-3A2.25 2.25 0 0 1 19.5 9v.878m0 0a2.246 2.246 0 0 0-.75-.128H5.25c-.263 0-.515.045-.75.128m15 0A2.25 2.25 0 0 1 21 12v6a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 18v-6c0-.98.626-1.813 1.5-2.122"
           />
-        </svg>
-        <svg
-          v-else-if="tab.id === HISTORY_TAB_ID"
-          class="tab-icon"
-          viewBox="0 0 24 24"
-          aria-hidden="true"
-        >
-          <path d="M12 8v4l3 1.5" />
-          <path d="M3.05 11a9 9 0 1 0 .5-3.5" />
-          <path d="M3 4.5V8h3.5" />
         </svg>
         <svg
           v-else-if="tab.id === SETTINGS_TAB_ID"
@@ -99,20 +83,6 @@ const { updateReady, availableVersion, showPrompt } = useUpdater();
           <path d="M12 4v10" />
           <path d="m8 10 4 4 4-4" />
           <path d="M5 18h14" />
-        </svg>
-      </button>
-      <button
-        class="tab-tool"
-        :class="{ active: activeId === HISTORY_TAB_ID }"
-        type="button"
-        title="History"
-        aria-label="History"
-        @click="openHistory"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M12 8v4l3 1.5" />
-          <path d="M3.05 11a9 9 0 1 0 .5-3.5" />
-          <path d="M3 4.5V8h3.5" />
         </svg>
       </button>
       <button

@@ -260,6 +260,7 @@ export type QueryOrigin = "editor" | "browse" | "schema" | "edit";
 export interface QueryLogEntry {
   id: string;
   at: number;
+  connectionId: string;
   connection: string;
   driver: string;
   database: string;

@@ -3,14 +3,13 @@ import { useRouter } from "vue-router";
 import { useApp } from "./useApp";
 
 export const CONNECTIONS_TAB_ID = "connections";
-export const HISTORY_TAB_ID = "history";
 export const SETTINGS_TAB_ID = "settings";
 export const CHANGELOG_TAB_ID = "changelog";
 
 export const SETTINGS_SECTIONS = ["general", "window", "updates", "json"] as const;
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 
-type UtilityPanel = "settings" | "history" | "changelog";
+type UtilityPanel = "settings" | "changelog";
 
 export interface AppTab {
   id: string;
@@ -31,7 +30,6 @@ export interface ConnectionTab {
 }
 
 const connectionTabs = ref<ConnectionTab[]>([]);
-const historyTabOpen = ref(false);
 const settingsTabOpen = ref(false);
 const changelogTabOpen = ref(false);
 const settingsSection = ref<SettingsSection>("general");
@@ -80,7 +78,6 @@ export function useTabs() {
         accentColor: match?.connection.headerColor || match?.group?.headerColor,
       };
     }),
-    ...(historyTabOpen.value ? [{ id: HISTORY_TAB_ID, title: "History", closable: true }] : []),
     ...(settingsTabOpen.value ? [{ id: SETTINGS_TAB_ID, title: "Settings", closable: true }] : []),
     ...(changelogTabOpen.value
       ? [{ id: CHANGELOG_TAB_ID, title: "Change Log", closable: true }]
@@ -101,9 +98,6 @@ export function useTabs() {
   function routeFor(id: string) {
     if (id === CONNECTIONS_TAB_ID) {
       return "/";
-    }
-    if (id === HISTORY_TAB_ID) {
-      return "/history";
     }
     if (id === SETTINGS_TAB_ID) {
       return settingsPath();
@@ -147,9 +141,6 @@ export function useTabs() {
   }
 
   function fallbackUtilityId(closingId: string) {
-    if (closingId !== HISTORY_TAB_ID && historyTabOpen.value) {
-      return HISTORY_TAB_ID;
-    }
     if (closingId !== SETTINGS_TAB_ID && settingsTabOpen.value) {
       return SETTINGS_TAB_ID;
     }
@@ -168,11 +159,6 @@ export function useTabs() {
     if (wasActive) {
       activate(fallbackUtilityId(id));
     }
-  }
-
-  function openHistory() {
-    historyTabOpen.value = true;
-    activate(HISTORY_TAB_ID);
   }
 
   function openSettings(section: SettingsSection = "general") {
@@ -206,10 +192,6 @@ export function useTabs() {
     if (id === CONNECTIONS_TAB_ID) {
       return;
     }
-    if (id === HISTORY_TAB_ID) {
-      closeUtilityTab(HISTORY_TAB_ID, historyTabOpen);
-      return;
-    }
     if (id === SETTINGS_TAB_ID) {
       closeUtilityTab(SETTINGS_TAB_ID, settingsTabOpen);
       return;
@@ -232,9 +214,6 @@ export function useTabs() {
   }
 
   function hasTab(id: string) {
-    if (id === HISTORY_TAB_ID) {
-      return historyTabOpen.value;
-    }
     if (id === SETTINGS_TAB_ID) {
       return settingsTabOpen.value;
     }
@@ -252,11 +231,6 @@ export function useTabs() {
   ) {
     if (isHome) {
       activeId.value = CONNECTIONS_TAB_ID;
-      return;
-    }
-    if (panel === "history") {
-      historyTabOpen.value = true;
-      activeId.value = HISTORY_TAB_ID;
       return;
     }
     if (panel === "settings") {
@@ -292,7 +266,6 @@ export function useTabs() {
   return {
     tabs,
     connectionTabs,
-    historyTabOpen,
     settingsTabOpen,
     changelogTabOpen,
     settingsSection,
@@ -300,7 +273,6 @@ export function useTabs() {
     openConnection,
     openConnectionTab,
     openConnections,
-    openHistory,
     openSettings,
     openSettingsJson,
     openChangelog,

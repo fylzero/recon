@@ -726,13 +726,41 @@ button.toast.error:hover:not(:disabled) {
   border: 0;
 }
 
+.history-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.history-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.45rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.history-summary {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-message {
+  margin: 0;
+  padding: 0.45rem 0.75rem;
+}
+
 .history-terminal {
   flex: 1;
   min-height: 0;
   overflow: auto;
   padding: 0.85rem 1rem 1rem;
-  border: 1px solid var(--border);
-  border-radius: 8px;
   background: #0d1016;
   font-family: var(--font-code);
   font-size: 12.5px;
@@ -816,12 +844,8 @@ button.toast.error:hover:not(:disabled) {
   font-size: 12px;
 }
 
-.history-entry.compact {
-  margin-bottom: 0.45rem;
-}
-
 .history-entry {
-  margin-bottom: 1rem;
+  margin-bottom: 0.6rem;
 }
 
 .history-entry:last-child {
@@ -1179,7 +1203,6 @@ button:has(.spinner) {
 .main-pane > .groups-page,
 .main-pane > .settings-layout,
 .main-pane > .settings-page,
-.main-pane > .history-page,
 .main-pane > .changelog-page {
   flex: 1;
   min-height: 0;

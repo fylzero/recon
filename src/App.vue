@@ -12,7 +12,6 @@ import ConnectionForm from "./components/ConnectionForm.vue";
 import ConnectionsView from "./views/ConnectionsView.vue";
 
 const ConnectionPane = defineAsyncComponent(() => import("./components/ConnectionPane.vue"));
-const HistoryView = defineAsyncComponent(() => import("./views/HistoryView.vue"));
 const SettingsView = defineAsyncComponent({
   loader: () => import("./views/SettingsView.vue"),
   errorComponent: {
@@ -27,13 +26,7 @@ import { useApp } from "./composables/useApp";
 import { DEFAULT_LIST_FONT, UI_FONT_FALLBACK, resolveFontStack } from "./fonts";
 import { useUpdater } from "./composables/useUpdater";
 import { useConnectionForm } from "./composables/useConnectionForm";
-import {
-  CHANGELOG_TAB_ID,
-  CONNECTIONS_TAB_ID,
-  HISTORY_TAB_ID,
-  SETTINGS_TAB_ID,
-  useTabs,
-} from "./composables/useTabs";
+import { CHANGELOG_TAB_ID, CONNECTIONS_TAB_ID, SETTINGS_TAB_ID, useTabs } from "./composables/useTabs";
 
 const route = useRoute();
 const { formState } = useConnectionForm();
@@ -79,7 +72,6 @@ const GITHUB_URL = "https://github.com/fylzero/recon";
 const appVersion = ref("0.2.0");
 const {
   connectionTabs,
-  historyTabOpen,
   settingsTabOpen,
   changelogTabOpen,
   activeId,
@@ -136,13 +128,7 @@ function syncRoute() {
   const connectionId = typeof route.params.id === "string" ? route.params.id : undefined;
   const section = typeof route.params.section === "string" ? route.params.section : undefined;
   const panel =
-    route.name === "history"
-      ? "history"
-      : route.name === "settings"
-        ? "settings"
-        : route.name === "changelog"
-          ? "changelog"
-          : undefined;
+    route.name === "settings" ? "settings" : route.name === "changelog" ? "changelog" : undefined;
   syncFromRoute(connectionId, route.name === "home", panel, section);
 }
 
@@ -210,9 +196,6 @@ watch([groups, standaloneConnections], () => {
           :initial-namespace="tab.namespace"
           :active="activeId === tab.id"
         />
-      </div>
-      <div v-if="historyTabOpen" class="main-pane" v-show="activeId === HISTORY_TAB_ID">
-        <HistoryView />
       </div>
       <div v-if="settingsTabOpen" class="main-pane" v-show="activeId === SETTINGS_TAB_ID">
         <SettingsView />

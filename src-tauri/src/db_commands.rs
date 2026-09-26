@@ -106,6 +106,7 @@ fn record(session: &Session, sql: &str, origin: QueryOrigin, started: Instant, o
     });
     let namespace = session.namespace();
     query_log::record(QueryRecord {
+        connection_id: &session.entry.id,
         connection: &session.name,
         driver: session.driver.label(),
         database: &namespace,
@@ -798,6 +799,7 @@ async fn save(session: Arc<Session>, requests: &[SaveRequest]) -> Result<usize, 
         .join(";\n");
     let namespace = session.namespace();
     query_log::record(QueryRecord {
+        connection_id: &session.entry.id,
         connection: &session.name,
         driver: session.driver.label(),
         database: &namespace,
