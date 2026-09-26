@@ -21,6 +21,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       "Right-click a query tab and choose Save query, or press Cmd+S in the SQL tab, to save it with a name and an optional description. Saved queries belong to their connection and are stored in settings.json.",
       "Saved queries appear in a Saved queries tab pinned at the start of the SQL tabs. Pick one to see its SQL, edit its name or description, or open or run it in a tab. Double-click one to open it, or right-click it to delete it.",
       "A tab opened from a saved query shows a bookmark icon, and it's marked as changed when its SQL no longer matches the saved version. Cmd+S saves the changes, and renaming the tab renames the saved query.",
+      "Right-click a database in the database switcher and choose Hide from list to hide it. Click Show hidden databases at the bottom of the list to see them again, then right-click one and choose Show in list to bring it back.",
     ],
   },
   {

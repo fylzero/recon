@@ -2377,6 +2377,28 @@ button.link-button:hover:not(:disabled) {
   background: var(--bg-hover);
 }
 
+.database-menu-item.is-hidden {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.database-menu-hidden-toggle {
+  flex-shrink: 0;
+  align-self: flex-start;
+  margin: 0.3rem 0.15rem 0.05rem;
+  padding: 0.15rem 0.4rem;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.database-menu-hidden-toggle:hover:not(:disabled) {
+  background: transparent;
+  color: var(--accent);
+  text-decoration: underline;
+}
+
 .database-context-menu,
 .table-context-menu {
   position: fixed;

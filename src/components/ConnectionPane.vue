@@ -1338,6 +1338,7 @@ onUnmounted(() => {
             :current="namespace"
             :items="namespaces"
             :label="namespaceLabel"
+            :hidden-key="connectionId"
             :creatable="driver !== 'sqlite'"
             :droppable="driver !== 'sqlite'"
             :renamable="driver !== 'sqlite'"

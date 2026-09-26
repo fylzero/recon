@@ -7,6 +7,7 @@ const props = defineProps<{
   current: string;
   items: string[];
   label: string;
+  hiddenKey: string;
   creatable?: boolean;
   droppable?: boolean;
   renamable?: boolean;
@@ -31,14 +32,56 @@ const menuEl = ref<HTMLElement | null>(null);
 const listEl = ref<HTMLElement | null>(null);
 const activeIndex = ref(0);
 const moved = ref(false);
+const hidden = ref(new Set<string>());
+const showHidden = ref(false);
+
+const storageKey = computed(() => `recon.hiddenDatabases.${props.hiddenKey}`);
+const hiddenCount = computed(() => props.items.filter((item) => hidden.value.has(item)).length);
+
+const displayed = computed(() =>
+  showHidden.value ? props.items : props.items.filter((item) => !hidden.value.has(item)),
+);
 
 const filtered = computed(() => {
   const needle = query.value.trim().toLowerCase();
-  return needle ? props.items.filter((item) => item.toLowerCase().includes(needle)) : props.items;
+  return needle ? displayed.value.filter((item) => item.toLowerCase().includes(needle)) : displayed.value;
 });
 
+function loadHidden() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(storageKey.value) ?? "[]");
+    hidden.value = new Set(Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : []);
+  } catch {
+    hidden.value = new Set();
+  }
+}
+
+function setHidden(name: string, value: boolean) {
+  const next = new Set(hidden.value);
+  if (value) {
+    next.add(name);
+  } else {
+    next.delete(name);
+  }
+  hidden.value = next;
+  if (next.size) {
+    localStorage.setItem(storageKey.value, JSON.stringify([...next]));
+  } else {
+    localStorage.removeItem(storageKey.value);
+  }
+  if (!hiddenCount.value) {
+    showHidden.value = false;
+  }
+}
+
+function toggleShowHidden() {
+  closeContextMenu();
+  showHidden.value = !showHidden.value;
+  searchInput.value?.focus();
+}
+
 function currentIndex() {
-  const index = props.items.indexOf(props.current);
+  const index = filtered.value.indexOf(props.current);
   return index >= 0 ? index : 0;
 }
 
@@ -96,8 +139,16 @@ function onDropdownPointerDown(event: PointerEvent) {
   }
 }
 
-function runAction(action: "drop" | "rename" | "copy" | "openTab", name: string) {
+function runAction(
+  action: "drop" | "rename" | "copy" | "openTab" | "hide" | "show",
+  name: string,
+) {
   closeContextMenu();
+  if (action === "hide" || action === "show") {
+    setHidden(name, action === "hide");
+    searchInput.value?.focus();
+    return;
+  }
   close();
   if (action === "drop") {
     emit("drop", name);
@@ -180,8 +231,10 @@ watch(isOpen, async (open) => {
     closeContextMenu();
     query.value = "";
     moved.value = false;
+    showHidden.value = false;
     return;
   }
+  loadHidden();
   moved.value = false;
   activeIndex.value = currentIndex();
   await nextTick();
@@ -260,6 +313,9 @@ watch(isOpen, async (open) => {
         <p v-if="!items.length" class="muted tiny database-menu-empty">
           No {{ label.toLowerCase() }}s.
         </p>
+        <p v-else-if="!displayed.length" class="muted tiny database-menu-empty">
+          All {{ label.toLowerCase() }}s are hidden.
+        </p>
         <p v-else-if="!filtered.length" class="muted tiny database-menu-empty">No matches.</p>
         <button
           v-for="(item, index) in filtered"
@@ -267,6 +323,7 @@ watch(isOpen, async (open) => {
           class="overflow-menu-item database-menu-item"
           :class="{
             active: item === current,
+            'is-hidden': hidden.has(item),
             highlighted:
               item !== current && (contextMenu ? contextMenu.name === item : index === activeIndex),
           }"
@@ -280,6 +337,15 @@ watch(isOpen, async (open) => {
           {{ item }}
         </button>
       </div>
+      <button
+        v-if="hiddenCount"
+        class="database-menu-hidden-toggle"
+        type="button"
+        @mousedown.prevent
+        @click="toggleShowHidden"
+      >
+        {{ showHidden ? `Hide hidden ${label.toLowerCase()}s` : `Show hidden ${label.toLowerCase()}s (${hiddenCount})` }}
+      </button>
       <div
         v-if="contextMenu"
         class="overflow-menu-dropdown database-context-menu"
@@ -303,6 +369,14 @@ watch(isOpen, async (open) => {
           @click="runAction('copy', contextMenu.name)"
         >
           Copy name
+        </button>
+        <button
+          class="overflow-menu-item"
+          type="button"
+          role="menuitem"
+          @click="runAction(hidden.has(contextMenu.name) ? 'show' : 'hide', contextMenu.name)"
+        >
+          {{ hidden.has(contextMenu.name) ? "Show in list" : "Hide from list" }}
         </button>
         <template v-if="renamable || droppable">
           <div class="overflow-menu-divider" role="separator" />
