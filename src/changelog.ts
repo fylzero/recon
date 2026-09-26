@@ -12,6 +12,9 @@ export const CHANGELOG: ChangelogRelease[] = [
       "Foreign key columns show an arrow next to each value. Click it to open the referenced table showing just that record, and clear the filter from the toolbar to see every row again.",
       "Hovering a foreign key column's header shows the table and column it points to.",
       "History moved from the top bar to a History tab next to Tables and SQL, and now shows only that connection's queries. Pause and Clear apply to the current connection, and deleting a connection removes its history.",
+      "Export a whole database to a .sql file with the Export button in the connection toolbar, or right-click a table and choose Export table. Choose structure, data, or both, whether to drop existing tables first, and gzip compression, which is on by default.",
+      "Cmd+click tables in the sidebar to select several, or Shift+click to select a range, then right-click any of them to export just those tables.",
+      "Import runs a .sql or .sql.gz file against the current database and shows its progress. It reads dumps from mysqldump and pg_dump's plain format, including COPY data, as well as Recon's own exports.",
     ],
   },
   {

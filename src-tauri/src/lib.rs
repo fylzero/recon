@@ -6,12 +6,14 @@ mod models;
 mod persist;
 mod query_log;
 mod secrets;
+mod transfer_commands;
 mod window_state;
 
 use commands::AppState;
 use db::{ResultStore, SessionStore};
 use std::sync::Mutex;
 use tauri::Manager;
+use transfer_commands::TransferStore;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -36,6 +38,7 @@ pub fn run() {
             });
             app.manage(SessionStore::default());
             app.manage(ResultStore::default());
+            app.manage(TransferStore::default());
             if let (Some(window), Some(bounds)) = (app.get_webview_window("main"), bounds) {
                 window_state::apply(&window, &bounds);
             }
@@ -90,6 +93,9 @@ pub fn run() {
             db_commands::fetch_rows,
             db_commands::close_results,
             db_commands::cancel_query,
+            transfer_commands::export_sql,
+            transfer_commands::import_sql,
+            transfer_commands::cancel_transfer,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

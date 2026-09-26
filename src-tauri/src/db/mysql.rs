@@ -131,7 +131,7 @@ pub fn cell(row: &MySqlRow, index: usize) -> CellValue {
     }
 }
 
-fn literal(value: &str) -> String {
+pub fn literal(value: &str) -> String {
     format!("'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
 }
 

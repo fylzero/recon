@@ -539,7 +539,7 @@ pub async fn list_tables(app: AppHandle, connection_id: String, namespace: Strin
     with_session(&app, &connection_id, move |session| tables_in(session, namespace)).await
 }
 
-async fn tables_in(session: Arc<Session>, namespace: &str) -> Result<Vec<TableInfo>, String> {
+pub async fn tables_in(session: Arc<Session>, namespace: &str) -> Result<Vec<TableInfo>, String> {
     let sql = dialect(session.driver).tables_sql(namespace);
     let output = pool_run(&session, &sql, usize::MAX, QueryOrigin::Schema).await?;
     Ok(output

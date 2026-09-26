@@ -1,5 +1,7 @@
+pub mod dump;
 pub mod mysql;
 pub mod postgres;
+pub mod sql_split;
 pub mod sqlite;
 pub mod ssh;
 
@@ -76,7 +78,7 @@ impl CellValue {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -810,6 +812,18 @@ impl Pool {
             Pool::Sqlite(pool) => apply_in_transaction!(pool, statements),
         }
     }
+
+    /**
+     * A connection taken out of the pool for good, so session settings and
+     * open transactions from imports and exports never leak back into it.
+     */
+    pub async fn detached(&self) -> Result<Conn, String> {
+        Ok(match self {
+            Pool::MySql(pool) => Conn::MySql(pool.acquire().await.map_err(describe_error)?.detach()),
+            Pool::Postgres(pool) => Conn::Postgres(pool.acquire().await.map_err(describe_error)?.detach()),
+            Pool::Sqlite(pool) => Conn::Sqlite(pool.acquire().await.map_err(describe_error)?.detach()),
+        })
+    }
 }
 
 pub enum Conn {
@@ -830,6 +844,17 @@ impl Conn {
             Conn::Postgres(conn) => postgres::run(conn, sql, limit, cancel).await,
             Conn::Sqlite(conn) => sqlite::run(conn, sql, limit, cancel).await,
         }
+    }
+
+    /// Runs `sql` and discards any rows it returns.
+    pub async fn execute(&mut self, sql: &str) -> Result<u64, String> {
+        let query = sqlx::raw_sql(sql);
+        match self {
+            Conn::MySql(conn) => Executor::execute(conn, query).await.map(|done| done.rows_affected()),
+            Conn::Postgres(conn) => Executor::execute(conn, query).await.map(|done| done.rows_affected()),
+            Conn::Sqlite(conn) => Executor::execute(conn, query).await.map(|done| done.rows_affected()),
+        }
+        .map_err(describe_error)
     }
 
     pub async fn close(self) {

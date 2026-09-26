@@ -5,6 +5,9 @@ import type {
   BrowseResult,
   ConnectionEntry,
   ConnectionGroup,
+  ExportRequest,
+  ExportResult,
+  ImportResult,
   NamespaceList,
   PreferencesPatch,
   QueryLogEntry,
@@ -210,4 +213,16 @@ export function closeResults(resultIds: string[]) {
 
 export function cancelQuery(connectionId: string) {
   return invoke<void>("cancel_query", { connectionId });
+}
+
+export function exportSql(connectionId: string, transferId: string, request: ExportRequest) {
+  return invoke<ExportResult>("export_sql", { connectionId, transferId, request });
+}
+
+export function importSql(connectionId: string, transferId: string, namespace: string, path: string) {
+  return invoke<ImportResult>("import_sql", { connectionId, transferId, namespace, path });
+}
+
+export function cancelTransfer(transferId: string) {
+  return invoke<void>("cancel_transfer", { transferId });
 }

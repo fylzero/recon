@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { SQLNamespace } from "@codemirror/lang-sql";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { confirm } from "@tauri-apps/plugin-dialog";
+import { confirm, open as openFile } from "@tauri-apps/plugin-dialog";
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
 import * as api from "../api";
 import { SIDEBAR_MAX, SIDEBAR_MIN, useApp } from "../composables/useApp";
@@ -11,6 +11,8 @@ import { driverLabel, type CellEdit, type SessionInfo, type TableInfo, type Tabl
 import ConnectionViewTabs, { type ConnectionViewTab } from "./ConnectionViewTabs.vue";
 import DatabaseSwitcher from "./DatabaseSwitcher.vue";
 import DriverIcon from "./DriverIcon.vue";
+import ExportDialog from "./ExportDialog.vue";
+import ImportDialog from "./ImportDialog.vue";
 import Modal from "./Modal.vue";
 import QueryEditor from "./QueryEditor.vue";
 import QueryHistory from "./QueryHistory.vue";
@@ -68,6 +70,12 @@ const nameError = ref("");
 const nameBusy = ref(false);
 const nameInput = ref<HTMLInputElement | null>(null);
 const sidebarEl = ref<HTMLElement | null>(null);
+const selectedTables = ref(new Set<string>());
+const tableMenu = ref<{ x: number; y: number; tables: string[] } | null>(null);
+const tableMenuEl = ref<HTMLElement | null>(null);
+const exportDialog = ref<{ tables: string[] | null } | null>(null);
+const importPath = ref<string | null>(null);
+let selectionAnchor = "";
 const editors = new Map<string, InstanceType<typeof QueryEditor>>();
 const tableViews = new Map<string, InstanceType<typeof TableView>>();
 
@@ -129,6 +137,17 @@ const filteredTables = computed(() => {
     ? tables.value.filter((table) => table.name.toLowerCase().includes(needle))
     : tables.value;
 });
+
+const tableMenuExportLabel = computed(() => {
+  const chosen = tableMenu.value?.tables ?? [];
+  if (chosen.length !== 1) {
+    return `Export ${chosen.length.toLocaleString()} tables…`;
+  }
+  const kind = tables.value.find((table) => table.name === chosen[0])?.kind;
+  return kind === "view" ? "Export view…" : "Export table…";
+});
+
+const canTransfer = computed(() => Boolean(namespace.value || driver.value === "sqlite") && !lost.value);
 
 const subtitle = computed(() => {
   const connection = entry.value;
@@ -215,6 +234,143 @@ function openTable(table: TableInfo) {
   }
   activeTableTabId.value = id;
 }
+
+function activeTableName() {
+  const tab = tabs.value.find((item) => item.id === activeTableTabId.value);
+  return tab?.kind === "table" && tab.namespace === namespace.value ? tab.table : null;
+}
+
+/**
+ * Finder-style selection: a plain click opens the table and selects only it,
+ * Cmd+click toggles a table without opening it, and Shift+click selects the
+ * visible range from the last clicked table.
+ */
+function onTableClick(event: MouseEvent, table: TableInfo) {
+  if (event.metaKey || event.ctrlKey) {
+    const next = new Set(selectedTables.value);
+    const active = activeTableName();
+    if (!next.size && !selectionAnchor && active && active !== table.name) {
+      next.add(active);
+    }
+    if (next.has(table.name)) {
+      next.delete(table.name);
+    } else {
+      next.add(table.name);
+    }
+    selectedTables.value = next;
+    selectionAnchor = table.name;
+    return;
+  }
+  const names = filteredTables.value.map((item) => item.name);
+  const from = names.indexOf(selectionAnchor || activeTableName() || "");
+  if (event.shiftKey && from >= 0) {
+    const to = names.indexOf(table.name);
+    selectedTables.value = new Set(names.slice(Math.min(from, to), Math.max(from, to) + 1));
+    return;
+  }
+  selectedTables.value = new Set([table.name]);
+  selectionAnchor = table.name;
+  openTable(table);
+}
+
+function onTableMenuKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") {
+    event.stopImmediatePropagation();
+    event.preventDefault();
+    closeTableMenu();
+  }
+}
+
+function onTableMenuPointerDown(event: PointerEvent) {
+  if (!(event.target instanceof Element && event.target.closest(".table-context-menu"))) {
+    closeTableMenu();
+  }
+}
+
+function closeTableMenu() {
+  tableMenu.value = null;
+  document.removeEventListener("keydown", onTableMenuKeydown, true);
+  document.removeEventListener("pointerdown", onTableMenuPointerDown, true);
+  window.removeEventListener("blur", closeTableMenu);
+  window.removeEventListener("resize", closeTableMenu);
+}
+
+/** Right-clicking outside the selection selects just that table, as in Finder. */
+function openTableMenu(event: MouseEvent, table: TableInfo) {
+  event.preventDefault();
+  if (!selectedTables.value.has(table.name)) {
+    selectedTables.value = new Set([table.name]);
+    selectionAnchor = table.name;
+  }
+  const chosen = tables.value.map((item) => item.name).filter((name) => selectedTables.value.has(name));
+  closeTableMenu();
+  tableMenu.value = { x: event.clientX, y: event.clientY, tables: chosen };
+  document.addEventListener("keydown", onTableMenuKeydown, true);
+  document.addEventListener("pointerdown", onTableMenuPointerDown, true);
+  window.addEventListener("blur", closeTableMenu);
+  window.addEventListener("resize", closeTableMenu);
+  void nextTick(() => {
+    const menu = tableMenuEl.value;
+    const current = tableMenu.value;
+    if (!menu || !current) {
+      return;
+    }
+    const rect = menu.getBoundingClientRect();
+    tableMenu.value = {
+      ...current,
+      x: Math.max(4, Math.min(current.x, window.innerWidth - rect.width - 4)),
+      y: Math.max(4, Math.min(current.y, window.innerHeight - rect.height - 4)),
+    };
+  });
+}
+
+function runTableAction(action: "open" | "query" | "copy" | "export") {
+  const chosen = tableMenu.value?.tables ?? [];
+  closeTableMenu();
+  const table = tables.value.find((item) => item.name === chosen[0]);
+  if (!table) {
+    return;
+  }
+  if (action === "open") {
+    openTable(table);
+  } else if (action === "query") {
+    queryTable(table);
+  } else if (action === "copy") {
+    void copyNamespaceName(table.name);
+  } else {
+    exportDialog.value = { tables: chosen };
+  }
+}
+
+async function startImport() {
+  const path = await openFile({
+    title: `Import into “${namespace.value}”`,
+    multiple: false,
+    directory: false,
+    filters: [{ name: "SQL", extensions: ["sql", "gz"] }],
+  });
+  if (typeof path === "string") {
+    importPath.value = path;
+  }
+}
+
+function onImported() {
+  void refreshAll();
+  void tableViews.get(activeTableTabId.value)?.refresh();
+}
+
+watch(namespace, () => {
+  selectedTables.value = new Set();
+  selectionAnchor = "";
+  closeTableMenu();
+});
+
+watch(tables, (list) => {
+  const names = new Set(list.map((table) => table.name));
+  if ([...selectedTables.value].some((name) => !names.has(name))) {
+    selectedTables.value = new Set([...selectedTables.value].filter((name) => names.has(name)));
+  }
+});
 
 function setTableFilter(id: string, filter: CellEdit[] | undefined) {
   tabs.value = tabs.value.map((tab) => (tab.id === id && tab.kind === "table" ? { ...tab, filter } : tab));
@@ -844,6 +1000,7 @@ onUnmounted(() => {
   window.removeEventListener("focus", onWindowFocus);
   stopLost?.();
   stopRestored?.();
+  closeTableMenu();
   unregisterCloser();
   setLiveTitle(props.sessionId, "");
   void api.disconnect(props.sessionId).catch(() => undefined);
@@ -955,6 +1112,32 @@ onUnmounted(() => {
               Save
             </button>
           </div>
+          <div class="db-toolbar-transfer">
+            <button
+              class="ghost tiny"
+              type="button"
+              :disabled="!canTransfer"
+              :title="`Run a .sql or .sql.gz file against “${namespace}”`"
+              @click="startImport"
+            >
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M8 2.5v7.5M4.8 6.8 8 10l3.2-3.2M2.5 11.5v1a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-1" />
+              </svg>
+              Import
+            </button>
+            <button
+              class="ghost tiny"
+              type="button"
+              :disabled="!canTransfer"
+              :title="`Export “${namespace}” to a .sql file`"
+              @click="exportDialog = { tables: null }"
+            >
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M8 10V2.5M4.8 5.7 8 2.5l3.2 3.2M2.5 11.5v1a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-1" />
+              </svg>
+              Export
+            </button>
+          </div>
         </div>
       </header>
       <div v-if="lost" class="connection-lost" role="alert">
@@ -974,7 +1157,13 @@ onUnmounted(() => {
           <div class="db-filter">
             <input v-model="filter" type="search" placeholder="Filter tables" spellcheck="false" />
           </div>
-          <div class="db-table-list" role="listbox" :aria-label="`Tables in ${namespace}`">
+          <div
+            class="db-table-list"
+            role="listbox"
+            aria-multiselectable="true"
+            :aria-label="`Tables in ${namespace}`"
+            @scroll="closeTableMenu"
+          >
             <p v-if="tablesLoading && !tables.length" class="muted tiny db-list-hint">
               <span class="spinner" aria-hidden="true" /> Loading tables…
             </p>
@@ -989,9 +1178,10 @@ onUnmounted(() => {
               class="db-table"
               type="button"
               role="option"
-              :aria-selected="activeTableTabId === `table:${namespace}.${table.name}`"
+              :aria-selected="selectedTables.has(table.name) || activeTableTabId === `table:${namespace}.${table.name}`"
               :class="{
                 active: activeTableTabId === `table:${namespace}.${table.name}`,
+                selected: selectedTables.has(table.name),
                 view: table.kind === 'view',
                 dirty: dirtyTabs.has(`table:${namespace}.${table.name}`),
               }"
@@ -1002,8 +1192,9 @@ onUnmounted(() => {
                     ? `${table.name} (view)`
                     : table.name
               "
-              @click="openTable(table)"
-              @dblclick="queryTable(table)"
+              @click="onTableClick($event, table)"
+              @dblclick="!$event.metaKey && !$event.shiftKey && queryTable(table)"
+              @contextmenu="openTableMenu($event, table)"
             >
               <svg v-if="table.kind === 'view'" viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8 12.1 12.5 8 12.5 1.5 8 1.5 8Z" />
@@ -1158,6 +1349,51 @@ onUnmounted(() => {
           </button>
         </template>
       </Modal>
+      <Teleport to="body">
+        <div
+          v-if="tableMenu"
+          ref="tableMenuEl"
+          class="overflow-menu-dropdown table-context-menu"
+          role="menu"
+          :aria-label="tableMenu.tables.length === 1 ? `${tableMenu.tables[0]} actions` : 'Selected tables actions'"
+          :style="{ left: `${tableMenu.x}px`, top: `${tableMenu.y}px` }"
+          @contextmenu.prevent
+        >
+          <template v-if="tableMenu.tables.length === 1">
+            <button class="overflow-menu-item" type="button" role="menuitem" @click="runTableAction('open')">
+              Open
+            </button>
+            <button class="overflow-menu-item" type="button" role="menuitem" @click="runTableAction('query')">
+              Query
+            </button>
+            <button class="overflow-menu-item" type="button" role="menuitem" @click="runTableAction('copy')">
+              Copy name
+            </button>
+            <div class="overflow-menu-divider" role="separator" />
+          </template>
+          <button class="overflow-menu-item" type="button" role="menuitem" @click="runTableAction('export')">
+            {{ tableMenuExportLabel }}
+          </button>
+        </div>
+      </Teleport>
+      <ExportDialog
+        v-if="exportDialog"
+        :connection-id="sessionId"
+        :namespace="namespace"
+        :namespace-label="namespaceLabel"
+        :tables="exportDialog.tables"
+        :table-count="tables.length"
+        @close="exportDialog = null"
+      />
+      <ImportDialog
+        v-if="importPath"
+        :connection-id="sessionId"
+        :namespace="namespace"
+        :namespace-label="namespaceLabel"
+        :path="importPath"
+        @imported="onImported"
+        @close="importPath = null"
+      />
     </template>
   </div>
 </template>

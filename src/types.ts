@@ -255,6 +255,45 @@ export interface StatementResult {
   error: string | null;
 }
 
+export interface ExportRequest {
+  namespace: string;
+  /** Every table and view in the namespace when null. */
+  tables: string[] | null;
+  path: string;
+  gzip: boolean;
+  structure: boolean;
+  data: boolean;
+  dropTables: boolean;
+}
+
+export interface ExportResult {
+  tables: number;
+  rows: number;
+  skipped: string[];
+  bytes: number;
+  path: string;
+}
+
+export interface ExportProgress {
+  transferId: string;
+  table: string;
+  index: number;
+  total: number;
+  rows: number;
+}
+
+export interface ImportResult {
+  statements: number;
+  durationMs: number;
+}
+
+export interface ImportProgress {
+  transferId: string;
+  statements: number;
+  bytes: number;
+  totalBytes: number;
+}
+
 export type QueryOrigin = "editor" | "browse" | "schema" | "edit";
 
 export interface QueryLogEntry {

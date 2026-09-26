@@ -2114,6 +2114,97 @@ button.link-button:hover:not(:disabled) {
   padding: 0.15rem 0.6rem;
 }
 
+.db-toolbar-transfer {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+  margin: -0.2rem 0 -0.2rem auto;
+}
+
+.db-toolbar-actions + .db-toolbar-transfer {
+  margin-left: 0.35rem;
+  padding-left: 0.6rem;
+  border-left: 1px solid var(--border);
+}
+
+.db-toolbar-transfer button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.15rem 0.55rem;
+}
+
+.db-toolbar-transfer svg {
+  width: 0.85rem;
+  height: 0.85rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.transfer-summary,
+.transfer-file {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.transfer-file {
+  font-weight: 600;
+}
+
+.transfer-options {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.transfer-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.transfer-bar {
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--chip);
+}
+
+.transfer-bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.15s ease;
+}
+
+.transfer-status {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.transfer-status-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transfer-error {
+  max-height: 12rem;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .db-toolbar-driver {
   flex-shrink: 0;
   padding: 0.05rem 0.4rem;
@@ -2286,11 +2377,17 @@ button.link-button:hover:not(:disabled) {
   background: var(--bg-hover);
 }
 
-.database-context-menu {
+.database-context-menu,
+.table-context-menu {
   position: fixed;
   right: auto;
   z-index: 13;
   min-width: 10rem;
+}
+
+.table-context-menu {
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .database-menu-empty {
@@ -2384,6 +2481,8 @@ button.view-tab.active:hover:not(:disabled) {
   min-height: 0;
   overflow: auto;
   padding: 0 0.35rem 0.5rem;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .db-list-hint {
@@ -2427,7 +2526,9 @@ button.view-tab.active:hover:not(:disabled) {
 }
 
 .db-table.active,
-.db-table.active:hover:not(:disabled) {
+.db-table.active:hover:not(:disabled),
+.db-table.selected,
+.db-table.selected:hover:not(:disabled) {
   background: var(--bg-active);
 }
 
