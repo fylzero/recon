@@ -12,6 +12,7 @@ import type {
   PreferencesPatch,
   QueryLogEntry,
   RowValues,
+  SavedQuery,
   SaveRequest,
   SchemaColumn,
   SessionInfo,
@@ -64,6 +65,14 @@ export function removeConnection(connectionId: string) {
 
 export function reorderConnections(groupId: string | null, connectionIds: string[]) {
   return invoke<void>("reorder_connections", { groupId, connectionIds });
+}
+
+export function saveQuery(query: SavedQuery) {
+  return invoke<SavedQuery>("save_query", { query });
+}
+
+export function deleteSavedQuery(queryId: string) {
+  return invoke<void>("delete_saved_query", { queryId });
 }
 
 export function hasSavedPassword(connectionId: string) {

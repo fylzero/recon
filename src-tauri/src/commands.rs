@@ -6,7 +6,7 @@ use tauri::{AppHandle, State};
 
 use crate::models::{
     sanitize_color, sanitize_font_family, sanitize_font_size, sanitize_list_font_family, AppData,
-    ConnectionEntry, ConnectionGroup, Driver, PreferencesPatch, SshAuth, SshTunnel,
+    ConnectionEntry, ConnectionGroup, Driver, PreferencesPatch, SavedQuery, SshAuth, SshTunnel,
     DEFAULT_EDITOR_FONT_SIZE, DEFAULT_GRID_FONT_SIZE, DEFAULT_LIST_FONT_SIZE, DEFAULT_SSH_PORT,
     MAX_AUTO_COLUMN_WIDTH_MAX, MAX_AUTO_COLUMN_WIDTH_MIN, PAGE_SIZE_MAX, PAGE_SIZE_MIN,
     QUERY_ROW_LIMIT_MAX, QUERY_ROW_LIMIT_MIN, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
@@ -196,7 +196,25 @@ fn sanitize_app_data(mut data: AppData) -> Result<AppData, String> {
         }
         group.connections = next;
     }
+    let saved = std::mem::take(&mut data.saved_queries);
+    data.saved_queries = saved
+        .into_iter()
+        .filter(|query| data.find_connection(&query.connection_id).is_some())
+        .map(sanitize_saved_query)
+        .collect();
     Ok(data)
+}
+
+fn sanitize_saved_query(mut query: SavedQuery) -> SavedQuery {
+    if query.id.trim().is_empty() {
+        query.id = uuid::Uuid::new_v4().to_string();
+    }
+    query.name = query.name.trim().to_string();
+    if query.name.is_empty() {
+        query.name = "Untitled query".into();
+    }
+    query.description = query.description.trim().to_string();
+    query
 }
 
 fn reorder_by_ids<T>(
@@ -285,6 +303,12 @@ pub fn delete_group(app: AppHandle, state: State<AppState>, group_id: String) ->
         .position(|group| group.id == group_id)
         .ok_or_else(|| "Group not found".to_string())?;
     let group = data.groups.remove(index);
+    data.saved_queries.retain(|query| {
+        !group
+            .connections
+            .iter()
+            .any(|entry| entry.id == query.connection_id)
+    });
     persist::save(&app, &data)?;
     drop(data);
     for entry in group.connections {
@@ -387,6 +411,7 @@ pub fn remove_connection(
         let mut data = lock(&state)?;
         let removed = take_connection(&mut data, &connection_id)
             .ok_or_else(|| "Connection not found".to_string())?;
+        data.saved_queries.retain(|query| query.connection_id != connection_id);
         persist::save(&app, &data)?;
         removed
     };
@@ -404,6 +429,37 @@ pub fn reorder_connections(
     let mut data = lock(&state)?;
     let list = connection_list_mut(&mut data, group_id.as_deref())?;
     reorder_by_ids(list, connection_ids, |entry| &entry.id, "Connection")?;
+    persist::save(&app, &data)
+}
+
+#[tauri::command]
+pub fn save_query(
+    app: AppHandle,
+    state: State<AppState>,
+    query: SavedQuery,
+) -> Result<SavedQuery, String> {
+    let mut query = sanitize_saved_query(query);
+    query.updated_at = query_log::now_ms();
+    let mut data = lock(&state)?;
+    if data.find_connection(&query.connection_id).is_none() {
+        return Err("Connection not found".into());
+    }
+    match data.saved_queries.iter_mut().find(|item| item.id == query.id) {
+        Some(existing) => *existing = query.clone(),
+        None => data.saved_queries.push(query.clone()),
+    }
+    persist::save(&app, &data)?;
+    Ok(query)
+}
+
+#[tauri::command]
+pub fn delete_saved_query(
+    app: AppHandle,
+    state: State<AppState>,
+    query_id: String,
+) -> Result<(), String> {
+    let mut data = lock(&state)?;
+    data.saved_queries.retain(|query| query.id != query_id);
     persist::save(&app, &data)
 }
 
@@ -660,5 +716,29 @@ mod tests {
         find_group_mut(&mut data, "g1").unwrap().connections.push(taken);
         assert_eq!(connection_location(&data, "c1"), Some((Some("g1".into()), 0)));
         assert!(data.connections.is_empty());
+    }
+
+    #[test]
+    fn sanitizes_saved_queries_and_drops_orphans() {
+        let mut data = AppData::default();
+        let mut conn = sanitize_connection(entry(Driver::Mysql)).unwrap();
+        conn.id = "c1".into();
+        data.connections.push(conn);
+        let query = |connection_id: &str, name: &str| SavedQuery {
+            id: String::new(),
+            connection_id: connection_id.into(),
+            name: name.into(),
+            description: "  counts users \n".into(),
+            sql: "SELECT 1;".into(),
+            updated_at: 0,
+        };
+        data.saved_queries = vec![query("c1", "  "), query("gone", "Orphan")];
+        let data = sanitize_app_data(data).unwrap();
+        assert_eq!(data.saved_queries.len(), 1);
+        let saved = &data.saved_queries[0];
+        assert!(!saved.id.is_empty());
+        assert_eq!(saved.name, "Untitled query");
+        assert_eq!(saved.description, "counts users");
+        assert_eq!(saved.sql, "SELECT 1;");
     }
 }

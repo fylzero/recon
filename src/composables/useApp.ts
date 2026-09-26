@@ -5,6 +5,7 @@ import type {
   ConnectionEntry,
   ConnectionGroup,
   PreferencesPatch,
+  SavedQuery,
   WindowState,
 } from "../types";
 import {
@@ -25,6 +26,7 @@ export const DEFAULT_MAX_AUTO_COLUMN_WIDTH = 480;
 
 const groups = ref<ConnectionGroup[]>([]);
 const standaloneConnections = ref<ConnectionEntry[]>([]);
+const savedQueries = ref<SavedQuery[]>([]);
 const error = ref("");
 const loaded = ref(false);
 const editorFontFamily = ref(DEFAULT_CODE_FONT);
@@ -60,6 +62,7 @@ export function useApp() {
   function applyState(data: AppData) {
     groups.value = data.groups;
     standaloneConnections.value = data.connections ?? [];
+    savedQueries.value = data.savedQueries ?? [];
     editorFontFamily.value = sanitizeFontFamily(data.editorFontFamily ?? DEFAULT_CODE_FONT);
     editorFontSize.value = clampFontSize(
       data.editorFontSize ?? DEFAULT_EDITOR_FONT_SIZE,
@@ -156,7 +159,11 @@ export function useApp() {
 
   async function deleteGroup(groupId: string) {
     await api.deleteGroup(groupId);
+    const removed = new Set(
+      groups.value.find((group) => group.id === groupId)?.connections.map((item) => item.id),
+    );
     groups.value = groups.value.filter((group) => group.id !== groupId);
+    savedQueries.value = savedQueries.value.filter((query) => !removed.has(query.connectionId));
   }
 
   function toggleGroup(groupId: string) {
@@ -267,6 +274,21 @@ export function useApp() {
   async function removeConnection(connectionId: string) {
     await api.removeConnection(connectionId);
     removeLocally(connectionId);
+    savedQueries.value = savedQueries.value.filter((query) => query.connectionId !== connectionId);
+  }
+
+  async function saveQuery(query: SavedQuery) {
+    const saved = await api.saveQuery(query);
+    const exists = savedQueries.value.some((item) => item.id === saved.id);
+    savedQueries.value = exists
+      ? savedQueries.value.map((item) => (item.id === saved.id ? saved : item))
+      : [...savedQueries.value, saved];
+    return saved;
+  }
+
+  async function deleteSavedQuery(queryId: string) {
+    await api.deleteSavedQuery(queryId);
+    savedQueries.value = savedQueries.value.filter((query) => query.id !== queryId);
   }
 
   async function reorderConnections(groupId: string | null, connectionIds: string[]) {
@@ -297,6 +319,7 @@ export function useApp() {
   return {
     groups,
     standaloneConnections,
+    savedQueries,
     error,
     loaded,
     editorFontFamily,
@@ -329,5 +352,7 @@ export function useApp() {
     saveConnection,
     removeConnection,
     reorderConnections,
+    saveQuery,
+    deleteSavedQuery,
   };
 }

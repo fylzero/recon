@@ -2714,6 +2714,160 @@ button.view-tab.active:hover:not(:disabled) {
   color: var(--accent);
 }
 
+.subtab.saved .subtab-icon,
+.saved-tab .subtab-icon {
+  color: var(--purple);
+}
+
+.saved-tab {
+  gap: 0.4rem;
+  padding-right: 0.45rem;
+  margin-right: 0.35rem;
+  background: color-mix(in srgb, var(--purple) 9%, transparent);
+  color: color-mix(in srgb, var(--purple) 70%, var(--text));
+}
+
+.saved-tab:hover {
+  background: color-mix(in srgb, var(--purple) 14%, transparent);
+  color: var(--text);
+}
+
+.saved-tab.active {
+  border-color: color-mix(in srgb, var(--purple) 45%, var(--border));
+  background: color-mix(in srgb, var(--purple) 10%, var(--bg));
+  box-shadow: inset 0 2px 0 var(--purple);
+}
+
+.saved-tab .file-count-badge {
+  background: color-mix(in srgb, var(--purple) 26%, var(--chip));
+}
+
+.subtab input.subtab-rename {
+  box-sizing: border-box;
+  width: auto;
+  min-width: 3rem;
+  max-width: 11rem;
+  height: 1.45em;
+  margin: 0 -0.25rem;
+  padding: 0 0.2rem;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: #0d1016;
+  color: var(--text);
+  font: inherit;
+  line-height: 1;
+}
+
+.subtab input.subtab-rename:focus {
+  outline: none;
+}
+
+.saved-queries {
+  flex: 1;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+.saved-queries-list {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 17rem;
+  min-height: 0;
+  padding-top: 0.5rem;
+  border-right: 1px solid var(--border);
+  background: var(--bg-sidebar);
+}
+
+.saved-query-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  width: 100%;
+  padding: 0.4rem 0.55rem;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--list-font-family);
+  font-size: var(--list-font-size);
+  text-align: left;
+}
+
+.saved-query-item:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.saved-query-item.active,
+.saved-query-item.active:hover:not(:disabled) {
+  background: var(--bg-active);
+}
+
+.saved-query-item-name,
+.saved-query-item-preview {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.saved-query-item-preview {
+  font-size: 11.5px;
+}
+
+.saved-query-detail {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.saved-query-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  min-height: 0;
+  overflow: auto;
+  padding: 0.85rem 1rem 1rem;
+}
+
+.saved-query-description {
+  min-height: 4.5rem;
+}
+
+.saved-query-sql-label {
+  flex: 1;
+  min-height: 8rem;
+}
+
+.saved-query-sql {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  overflow: auto;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #0d1016;
+  font-family: var(--editor-font-family);
+  font-size: var(--editor-font-size);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.save-query-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.save-query-form p {
+  margin: 0;
+}
+
 .subtab-add {
   display: inline-flex;
   flex: 0 0 auto;

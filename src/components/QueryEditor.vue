@@ -26,10 +26,12 @@ const props = defineProps<{
   schema: SQLNamespace;
   storageKey: string;
   active: boolean;
+  savedSql?: string | null;
 }>();
 
 const emit = defineEmits<{
   executed: [statements: string[]];
+  modified: [modified: boolean];
 }>();
 
 const host = ref<HTMLDivElement | null>(null);
@@ -44,6 +46,7 @@ const lastRunMs = ref<number | null>(null);
 const language = new Compartment();
 let view: EditorView | null = null;
 let saveTimer: number | undefined;
+let modified = false;
 
 const current = computed(() => results.value[activeResult.value] ?? null);
 const statementCount = computed(() => results.value.length);
@@ -124,6 +127,14 @@ function persistDoc(text: string) {
       /* storage full; the editor text stays in memory */
     }
   }, 400);
+}
+
+function checkModified(text: string) {
+  const next = props.savedSql != null && text !== props.savedSql;
+  if (next !== modified) {
+    modified = next;
+    emit("modified", next);
+  }
 }
 
 function statementsToRun(all: boolean) {
@@ -291,6 +302,15 @@ function insertText(text: string) {
   view.focus();
 }
 
+function getText() {
+  return view?.state.doc.toString() ?? "";
+}
+
+watch(
+  () => props.savedSql,
+  () => checkModified(getText()),
+);
+
 watch([() => props.schema, dialect], () => {
   view?.dispatch({ effects: language.reconfigure(languageExtension()) });
 });
@@ -327,12 +347,15 @@ onMounted(() => {
         placeholder("Write SQL here. ⌘↵ runs the statement under the cursor."),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
-            persistDoc(update.state.doc.toString());
+            const text = update.state.doc.toString();
+            persistDoc(text);
+            checkModified(text);
           }
         }),
       ],
     }),
   });
+  checkModified(getText());
   if (props.active) {
     focus();
   }
@@ -352,7 +375,7 @@ onUnmounted(() => {
   void releaseResults(results.value);
 });
 
-defineExpose({ insertText, focus, run });
+defineExpose({ insertText, getText, focus, run });
 </script>
 
 <template>

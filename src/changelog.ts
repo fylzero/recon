@@ -17,6 +17,10 @@ export const CHANGELOG: ChangelogRelease[] = [
       "Import runs a .sql or .sql.gz file against the current database and shows its progress. It reads dumps from mysqldump and pg_dump's plain format, including COPY data, as well as Recon's own exports.",
       "New records skip auto-increment columns, which show auto until you save. The database then assigns the next id, and it appears in the grid. Double-click the cell to set an id yourself, or press Backspace to go back to auto.",
       "On PostgreSQL, ids you set yourself also work for GENERATED ALWAYS identity columns, and the column's sequence moves past them so later automatic ids don't collide.",
+      "Double-click a query tab, or right-click it and choose Rename, to rename it.",
+      "Right-click a query tab and choose Save query, or press Cmd+S in the SQL tab, to save it with a name and an optional description. Saved queries belong to their connection and are stored in settings.json.",
+      "Saved queries appear in a Saved queries tab pinned at the start of the SQL tabs. Pick one to see its SQL, edit its name or description, or open or run it in a tab. Double-click one to open it, or right-click it to delete it.",
+      "A tab opened from a saved query shows a bookmark icon, and it's marked as changed when its SQL no longer matches the saved version. Cmd+S saves the changes, and renaming the tab renames the saved query.",
     ],
   },
   {

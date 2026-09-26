@@ -241,11 +241,28 @@ pub struct ConnectionGroup {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SavedQuery {
+    #[serde(default)]
+    pub id: String,
+    pub connection_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub sql: String,
+    #[serde(default)]
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppData {
     #[serde(default)]
     pub groups: Vec<ConnectionGroup>,
     #[serde(default)]
     pub connections: Vec<ConnectionEntry>,
+    #[serde(default)]
+    pub saved_queries: Vec<SavedQuery>,
     #[serde(default = "default_code_font")]
     pub editor_font_family: String,
     #[serde(default = "default_editor_font_size")]
@@ -275,6 +292,7 @@ impl Default for AppData {
         Self {
             groups: Vec::new(),
             connections: Vec::new(),
+            saved_queries: Vec::new(),
             editor_font_family: default_code_font(),
             editor_font_size: default_editor_font_size(),
             grid_font_family: default_code_font(),

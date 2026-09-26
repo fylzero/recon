@@ -58,6 +58,8 @@ pub fn run() {
             commands::save_connection,
             commands::remove_connection,
             commands::reorder_connections,
+            commands::save_query,
+            commands::delete_saved_query,
             commands::has_saved_password,
             commands::has_saved_ssh_secret,
             commands::list_ssh_keys,

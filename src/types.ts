@@ -64,9 +64,19 @@ export const MIN_WINDOW_HEIGHT = 640;
 export const DEFAULT_WINDOW_WIDTH = 1280;
 export const DEFAULT_WINDOW_HEIGHT = 800;
 
+export interface SavedQuery {
+  id: string;
+  connectionId: string;
+  name: string;
+  description: string;
+  sql: string;
+  updatedAt: number;
+}
+
 export interface AppData {
   groups: ConnectionGroup[];
   connections?: ConnectionEntry[];
+  savedQueries?: SavedQuery[];
   editorFontFamily?: string;
   editorFontSize?: number;
   gridFontFamily?: string;

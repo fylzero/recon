@@ -2,12 +2,19 @@
 import type { SQLNamespace } from "@codemirror/lang-sql";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { confirm, open as openFile } from "@tauri-apps/plugin-dialog";
-import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch, type Ref } from "vue";
 import * as api from "../api";
 import { SIDEBAR_MAX, SIDEBAR_MIN, useApp } from "../composables/useApp";
 import { useConnectionForm } from "../composables/useConnectionForm";
 import { registerInnerTabCloser, setLiveTitle, useTabs } from "../composables/useTabs";
-import { driverLabel, type CellEdit, type SessionInfo, type TableInfo, type TableLink } from "../types";
+import {
+  driverLabel,
+  type CellEdit,
+  type SavedQuery,
+  type SessionInfo,
+  type TableInfo,
+  type TableLink,
+} from "../types";
 import ConnectionViewTabs, { type ConnectionViewTab } from "./ConnectionViewTabs.vue";
 import DatabaseSwitcher from "./DatabaseSwitcher.vue";
 import DriverIcon from "./DriverIcon.vue";
@@ -16,6 +23,7 @@ import ImportDialog from "./ImportDialog.vue";
 import Modal from "./Modal.vue";
 import QueryEditor from "./QueryEditor.vue";
 import QueryHistory from "./QueryHistory.vue";
+import SavedQueries from "./SavedQueries.vue";
 import TableView from "./TableView.vue";
 
 type PaneTab =
@@ -27,7 +35,11 @@ type PaneTab =
       tableKind: "table" | "view";
       filter?: CellEdit[];
     }
-  | { id: string; kind: "query"; key: string; title: string };
+  | { id: string; kind: "query"; key: string; title: string; savedId?: string };
+
+type QueryTab = Extract<PaneTab, { kind: "query" }>;
+
+const SAVED_TAB_ID = "saved-queries";
 
 const props = defineProps<{
   connectionId: string;
@@ -36,7 +48,15 @@ const props = defineProps<{
   active: boolean;
 }>();
 
-const { findConnection, sidebarWidth, previewPreferences, savePreferences, showToast } = useApp();
+const {
+  findConnection,
+  sidebarWidth,
+  previewPreferences,
+  savePreferences,
+  showToast,
+  savedQueries,
+  saveQuery,
+} = useApp();
 const { openEditConnection } = useConnectionForm();
 const { openConnectionTab } = useTabs();
 
@@ -73,6 +93,18 @@ const sidebarEl = ref<HTMLElement | null>(null);
 const selectedTables = ref(new Set<string>());
 const tableMenu = ref<{ x: number; y: number; tables: string[] } | null>(null);
 const tableMenuEl = ref<HTMLElement | null>(null);
+const tabMenu = ref<{ x: number; y: number; tabId: string } | null>(null);
+const tabMenuEl = ref<HTMLElement | null>(null);
+const renamingTabId = ref("");
+const renameValue = ref("");
+const modifiedQueries = ref(new Set<string>());
+const selectedSavedId = ref("");
+const saveDialog = ref<{ tabId: string } | null>(null);
+const saveName = ref("");
+const saveDescription = ref("");
+const saveBusy = ref(false);
+const saveError = ref("");
+const saveNameInput = ref<HTMLInputElement | null>(null);
 const exportDialog = ref<{ tables: string[] | null } | null>(null);
 const importPath = ref<string | null>(null);
 let selectionAnchor = "";
@@ -117,6 +149,18 @@ watch(
 );
 
 const queryTabsKey = computed(() => `recon.queryTabs.${props.sessionId}`);
+
+const connectionSaved = computed(() =>
+  savedQueries.value.filter((query) => query.connectionId === props.connectionId),
+);
+const openSavedIds = computed(
+  () => new Set(tabs.value.flatMap((tab) => (tab.kind === "query" && tab.savedId ? [tab.savedId] : []))),
+);
+const showSavedTab = computed(() => view.value === "sql" && connectionSaved.value.length > 0);
+const menuTab = computed(() => {
+  const tab = tabs.value.find((item) => item.id === tabMenu.value?.tabId);
+  return tab?.kind === "query" ? tab : null;
+});
 
 const viewTabs = computed(() => {
   if (view.value === "history") {
@@ -178,13 +222,13 @@ function queryTitle() {
 
 function saveQueryTabs() {
   const saved = tabs.value.flatMap((tab) =>
-    tab.kind === "query" ? [{ key: tab.key, title: tab.title }] : [],
+    tab.kind === "query" ? [{ key: tab.key, title: tab.title, savedId: tab.savedId }] : [],
   );
   localStorage.setItem(queryTabsKey.value, JSON.stringify(saved));
 }
 
 function restoreQueryTabs() {
-  let saved: { key: string; title: string }[] = [];
+  let saved: { key: string; title: string; savedId?: unknown }[] = [];
   try {
     const parsed = JSON.parse(localStorage.getItem(queryTabsKey.value) ?? "[]");
     if (Array.isArray(parsed)) {
@@ -201,11 +245,13 @@ function restoreQueryTabs() {
     saved = [{ key: single, title: "Query 1" }, ...saved];
   }
   localStorage.removeItem(singleKey);
+  const savedIds = new Set(connectionSaved.value.map((query) => query.id));
   tabs.value = saved.map((item) => ({
     id: `query:${item.key}`,
     kind: "query",
     key: item.key,
     title: item.title,
+    savedId: typeof item.savedId === "string" && savedIds.has(item.savedId) ? item.savedId : undefined,
   }));
   activeQueryTabId.value = tabs.value[0]?.id ?? "";
   tabsRestored.value = true;
@@ -221,6 +267,179 @@ function openQueryTab(initialSql?: string) {
   saveQueryTabs();
   if (initialSql) {
     void nextTick(() => editors.get(tab.id)?.insertText(initialSql));
+  }
+}
+
+function savedFor(tab: PaneTab) {
+  if (tab.kind !== "query" || !tab.savedId) {
+    return null;
+  }
+  return connectionSaved.value.find((query) => query.id === tab.savedId) ?? null;
+}
+
+function openSavedQuery(query: SavedQuery, run = false) {
+  view.value = "sql";
+  let tab = tabs.value.find((item): item is QueryTab => item.kind === "query" && item.savedId === query.id);
+  if (!tab) {
+    const key = nextQueryKey();
+    try {
+      localStorage.setItem(`recon.query.${key}`, query.sql);
+    } catch {
+      showToast("Could not open the query because local storage is full.", "error");
+      return;
+    }
+    tab = { id: `query:${key}`, kind: "query", key, title: query.name, savedId: query.id };
+    tabs.value = [...tabs.value, tab];
+    saveQueryTabs();
+  }
+  const id = tab.id;
+  activeQueryTabId.value = id;
+  if (run) {
+    void nextTick(() => editors.get(id)?.run(true));
+  }
+}
+
+function setQueryModified(id: string, modified: boolean) {
+  if (modifiedQueries.value.has(id) === modified) {
+    return;
+  }
+  const next = new Set(modifiedQueries.value);
+  if (modified) {
+    next.add(id);
+  } else {
+    next.delete(id);
+  }
+  modifiedQueries.value = next;
+}
+
+function updateQueryTab(id: string, patch: Partial<QueryTab>) {
+  tabs.value = tabs.value.map((tab) => (tab.id === id && tab.kind === "query" ? { ...tab, ...patch } : tab));
+  saveQueryTabs();
+}
+
+watch(connectionSaved, (list) => {
+  const ids = new Set(list.map((query) => query.id));
+  const stale = tabs.value.filter(
+    (tab): tab is QueryTab => tab.kind === "query" && Boolean(tab.savedId) && !ids.has(tab.savedId!),
+  );
+  for (const tab of stale) {
+    updateQueryTab(tab.id, { savedId: undefined });
+    setQueryModified(tab.id, false);
+  }
+  if (!list.length && activeQueryTabId.value === SAVED_TAB_ID) {
+    const first = tabs.value.find((tab) => tab.kind === "query");
+    if (first) {
+      activeQueryTabId.value = first.id;
+    } else if (view.value === "sql") {
+      openQueryTab();
+    } else {
+      activeQueryTabId.value = "";
+    }
+  }
+});
+
+function startTabRename(tab: QueryTab) {
+  closeMenus();
+  selectTab(tab);
+  renameValue.value = tabTitle(tab);
+  renamingTabId.value = tab.id;
+  void nextTick(() => {
+    const input = document.querySelector<HTMLInputElement>(`[data-rename-tab="${CSS.escape(tab.id)}"]`);
+    input?.focus();
+    input?.select();
+  });
+}
+
+function cancelTabRename() {
+  renamingTabId.value = "";
+}
+
+async function commitTabRename() {
+  const tab = tabs.value.find((item): item is QueryTab => item.id === renamingTabId.value && item.kind === "query");
+  renamingTabId.value = "";
+  const name = renameValue.value.trim();
+  if (!tab || !name || name === tabTitle(tab)) {
+    return;
+  }
+  const saved = savedFor(tab);
+  updateQueryTab(tab.id, { title: name });
+  if (saved) {
+    try {
+      await saveQuery({ ...saved, name });
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  }
+}
+
+function openSaveDialog(tab: QueryTab) {
+  closeMenus();
+  saveName.value = tabTitle(tab);
+  saveDescription.value = "";
+  saveError.value = "";
+  saveDialog.value = { tabId: tab.id };
+  void nextTick(() => saveNameInput.value?.select());
+}
+
+function closeSaveDialog() {
+  if (!saveBusy.value) {
+    saveDialog.value = null;
+  }
+}
+
+async function submitSaveDialog() {
+  const dialog = saveDialog.value;
+  const name = saveName.value.trim();
+  if (!dialog || !name || saveBusy.value) {
+    return;
+  }
+  const sql = editors.get(dialog.tabId)?.getText() ?? "";
+  if (!sql.trim()) {
+    saveError.value = "Write some SQL in the tab before saving it.";
+    return;
+  }
+  saveBusy.value = true;
+  saveError.value = "";
+  try {
+    const saved = await saveQuery({
+      id: "",
+      connectionId: props.connectionId,
+      name,
+      description: saveDescription.value,
+      sql,
+      updatedAt: 0,
+    });
+    updateQueryTab(dialog.tabId, { title: saved.name, savedId: saved.id });
+    saveDialog.value = null;
+    showToast(`Saved “${saved.name}”`);
+  } catch (err) {
+    saveError.value = String(err);
+  } finally {
+    saveBusy.value = false;
+  }
+}
+
+async function saveQueryTab(tab: QueryTab) {
+  closeMenus();
+  const saved = savedFor(tab);
+  if (!saved) {
+    openSaveDialog(tab);
+    return;
+  }
+  const sql = editors.get(tab.id)?.getText() ?? saved.sql;
+  try {
+    await saveQuery({ ...saved, sql });
+    showToast(`Saved changes to “${saved.name}”`);
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+}
+
+function showInSaved(tab: QueryTab) {
+  closeMenus();
+  if (tab.savedId) {
+    selectedSavedId.value = tab.savedId;
+    activeQueryTabId.value = SAVED_TAB_ID;
   }
 }
 
@@ -273,26 +492,49 @@ function onTableClick(event: MouseEvent, table: TableInfo) {
   openTable(table);
 }
 
-function onTableMenuKeydown(event: KeyboardEvent) {
+function onMenuKeydown(event: KeyboardEvent) {
   if (event.key === "Escape") {
     event.stopImmediatePropagation();
     event.preventDefault();
-    closeTableMenu();
+    closeMenus();
   }
 }
 
-function onTableMenuPointerDown(event: PointerEvent) {
+function onMenuPointerDown(event: PointerEvent) {
   if (!(event.target instanceof Element && event.target.closest(".table-context-menu"))) {
-    closeTableMenu();
+    closeMenus();
   }
 }
 
-function closeTableMenu() {
+function closeMenus() {
   tableMenu.value = null;
-  document.removeEventListener("keydown", onTableMenuKeydown, true);
-  document.removeEventListener("pointerdown", onTableMenuPointerDown, true);
-  window.removeEventListener("blur", closeTableMenu);
-  window.removeEventListener("resize", closeTableMenu);
+  tabMenu.value = null;
+  document.removeEventListener("keydown", onMenuKeydown, true);
+  document.removeEventListener("pointerdown", onMenuPointerDown, true);
+  window.removeEventListener("blur", closeMenus);
+  window.removeEventListener("resize", closeMenus);
+}
+
+function listenForMenuDismiss() {
+  document.addEventListener("keydown", onMenuKeydown, true);
+  document.addEventListener("pointerdown", onMenuPointerDown, true);
+  window.addEventListener("blur", closeMenus);
+  window.addEventListener("resize", closeMenus);
+}
+
+function fitMenu<T extends { x: number; y: number }>(menu: Ref<T | null>, el: Ref<HTMLElement | null>) {
+  void nextTick(() => {
+    const current = menu.value;
+    if (!el.value || !current) {
+      return;
+    }
+    const rect = el.value.getBoundingClientRect();
+    menu.value = {
+      ...current,
+      x: Math.max(4, Math.min(current.x, window.innerWidth - rect.width - 4)),
+      y: Math.max(4, Math.min(current.y, window.innerHeight - rect.height - 4)),
+    };
+  });
 }
 
 /** Right-clicking outside the selection selects just that table, as in Finder. */
@@ -303,30 +545,26 @@ function openTableMenu(event: MouseEvent, table: TableInfo) {
     selectionAnchor = table.name;
   }
   const chosen = tables.value.map((item) => item.name).filter((name) => selectedTables.value.has(name));
-  closeTableMenu();
+  closeMenus();
   tableMenu.value = { x: event.clientX, y: event.clientY, tables: chosen };
-  document.addEventListener("keydown", onTableMenuKeydown, true);
-  document.addEventListener("pointerdown", onTableMenuPointerDown, true);
-  window.addEventListener("blur", closeTableMenu);
-  window.addEventListener("resize", closeTableMenu);
-  void nextTick(() => {
-    const menu = tableMenuEl.value;
-    const current = tableMenu.value;
-    if (!menu || !current) {
-      return;
-    }
-    const rect = menu.getBoundingClientRect();
-    tableMenu.value = {
-      ...current,
-      x: Math.max(4, Math.min(current.x, window.innerWidth - rect.width - 4)),
-      y: Math.max(4, Math.min(current.y, window.innerHeight - rect.height - 4)),
-    };
-  });
+  listenForMenuDismiss();
+  fitMenu(tableMenu, tableMenuEl);
+}
+
+function openTabMenu(event: MouseEvent, tab: PaneTab) {
+  if (tab.kind !== "query") {
+    return;
+  }
+  event.preventDefault();
+  closeMenus();
+  tabMenu.value = { x: event.clientX, y: event.clientY, tabId: tab.id };
+  listenForMenuDismiss();
+  fitMenu(tabMenu, tabMenuEl);
 }
 
 function runTableAction(action: "open" | "query" | "copy" | "export") {
   const chosen = tableMenu.value?.tables ?? [];
-  closeTableMenu();
+  closeMenus();
   const table = tables.value.find((item) => item.name === chosen[0]);
   if (!table) {
     return;
@@ -362,7 +600,7 @@ function onImported() {
 watch(namespace, () => {
   selectedTables.value = new Set();
   selectionAnchor = "";
-  closeTableMenu();
+  closeMenus();
 });
 
 watch(tables, (list) => {
@@ -410,7 +648,12 @@ function selectTab(tab: PaneTab) {
 
 function selectView(next: ConnectionViewTab) {
   view.value = next;
-  if (next === "sql" && !tabs.value.some((tab) => tab.kind === "query")) {
+  if (next !== "sql" || tabs.value.some((tab) => tab.kind === "query")) {
+    return;
+  }
+  if (connectionSaved.value.length) {
+    activeQueryTabId.value = SAVED_TAB_ID;
+  } else {
     openQueryTab();
   }
 }
@@ -495,11 +738,20 @@ function onWindowKeydown(event: KeyboardEvent) {
     return;
   }
   event.preventDefault();
+  if (saveDialog.value) {
+    void submitSaveDialog();
+    return;
+  }
+  const tab = tabs.value.find((item) => item.id === activeQueryTabId.value);
+  if (view.value === "sql" && tab?.kind === "query") {
+    void saveQueryTab(tab);
+    return;
+  }
   void saveAll();
 }
 
-async function confirmCloseTab(id: string, table: string) {
-  const ok = await confirm(`Discard unsaved changes to “${table}”?`, {
+async function confirmCloseTab(id: string, name: string) {
+  const ok = await confirm(`Discard unsaved changes to “${name}”?`, {
     title: "Unsaved changes",
     kind: "warning",
     okLabel: "Discard",
@@ -514,6 +766,10 @@ function closeTab(id: string) {
   const tab = tabs.value.find((item) => item.id === id);
   if (tab?.kind === "table" && dirtyTabs.value.has(id)) {
     void confirmCloseTab(id, tab.table);
+    return;
+  }
+  if (tab?.kind === "query" && modifiedQueries.value.has(id)) {
+    void confirmCloseTab(id, tabTitle(tab));
     return;
   }
   removeTab(id);
@@ -532,9 +788,13 @@ function removeTab(id: string) {
   if (tab.kind === "query") {
     localStorage.removeItem(`recon.query.${tab.key}`);
     editors.delete(id);
+    setQueryModified(id, false);
     saveQueryTabs();
+    if (renamingTabId.value === id) {
+      renamingTabId.value = "";
+    }
     if (activeQueryTabId.value === id) {
-      activeQueryTabId.value = next;
+      activeQueryTabId.value = next || (connectionSaved.value.length ? SAVED_TAB_ID : "");
     }
   } else if (activeTableTabId.value === id) {
     activeTableTabId.value = next;
@@ -542,6 +802,9 @@ function removeTab(id: string) {
 }
 
 function closeActivePaneTab() {
+  if (showSavedTab.value && activeTabId.value === SAVED_TAB_ID) {
+    return true;
+  }
   if (!viewTabs.value.some((tab) => tab.id === activeTabId.value)) {
     return false;
   }
@@ -551,7 +814,7 @@ function closeActivePaneTab() {
 
 function tabTitle(tab: PaneTab) {
   if (tab.kind === "query") {
-    return tab.title;
+    return savedFor(tab)?.name ?? tab.title;
   }
   return tab.namespace === namespace.value ? tab.table : `${tab.namespace}.${tab.table}`;
 }
@@ -1000,7 +1263,7 @@ onUnmounted(() => {
   window.removeEventListener("focus", onWindowFocus);
   stopLost?.();
   stopRestored?.();
-  closeTableMenu();
+  closeMenus();
   unregisterCloser();
   setLiveTitle(props.sessionId, "");
   void api.disconnect(props.sessionId).catch(() => undefined);
@@ -1162,7 +1425,7 @@ onUnmounted(() => {
             role="listbox"
             aria-multiselectable="true"
             :aria-label="`Tables in ${namespace}`"
-            @scroll="closeTableMenu"
+            @scroll="closeMenus"
           >
             <p v-if="tablesLoading && !tables.length" class="muted tiny db-list-hint">
               <span class="spinner" aria-hidden="true" /> Loading tables…
@@ -1230,31 +1493,79 @@ onUnmounted(() => {
         <section v-show="view !== 'history'" class="db-main">
           <div v-if="viewTabs.length || view === 'sql'" class="subtab-bar" role="tablist">
             <div
+              v-if="showSavedTab"
+              class="subtab saved-tab"
+              :class="{ active: activeTabId === SAVED_TAB_ID }"
+              role="tab"
+              :aria-selected="activeTabId === SAVED_TAB_ID"
+              title="Saved queries for this connection"
+              @click="activeQueryTabId = SAVED_TAB_ID"
+            >
+              <svg class="subtab-icon" viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M4 2.5h8a.5.5 0 0 1 .5.5v10.5L8 10.75 3.5 13.5V3a.5.5 0 0 1 .5-.5Z" />
+              </svg>
+              <span class="subtab-title">Saved queries</span>
+              <span class="file-count-badge">{{ connectionSaved.length.toLocaleString() }}</span>
+            </div>
+            <div
               v-for="tab in viewTabs"
               :key="tab.id"
               class="subtab"
-              :class="{ active: activeTabId === tab.id, query: tab.kind === 'query', dirty: dirtyTabs.has(tab.id) }"
+              :class="{
+                active: activeTabId === tab.id,
+                query: tab.kind === 'query',
+                saved: Boolean(savedFor(tab)),
+                dirty: dirtyTabs.has(tab.id) || modifiedQueries.has(tab.id),
+              }"
               role="tab"
               :aria-selected="activeTabId === tab.id"
-              :title="tab.kind === 'table' ? `${tab.namespace}.${tab.table}` : tab.title"
+              :title="
+                tab.kind === 'table'
+                  ? `${tab.namespace}.${tab.table}`
+                  : modifiedQueries.has(tab.id)
+                    ? `${tabTitle(tab)} (unsaved changes)`
+                    : tabTitle(tab)
+              "
               @click="selectTab(tab)"
+              @dblclick="tab.kind === 'query' && startTabRename(tab)"
+              @contextmenu="openTabMenu($event, tab)"
               @auxclick.middle="closeTab(tab.id)"
             >
-              <svg v-if="tab.kind === 'query'" class="subtab-icon" viewBox="0 0 16 16" aria-hidden="true">
+              <svg v-if="savedFor(tab)" class="subtab-icon" viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M4 2.5h8a.5.5 0 0 1 .5.5v10.5L8 10.75 3.5 13.5V3a.5.5 0 0 1 .5-.5Z" />
+              </svg>
+              <svg v-else-if="tab.kind === 'query'" class="subtab-icon" viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M5 4 1.5 8 5 12M11 4l3.5 4L11 12" />
               </svg>
               <svg v-else class="subtab-icon" viewBox="0 0 16 16" aria-hidden="true">
                 <rect x="2" y="3" width="12" height="10" rx="1.5" />
                 <path d="M2 6.5h12M6.5 6.5V13" />
               </svg>
-              <span class="subtab-title">{{ tabTitle(tab) }}</span>
+              <input
+                v-if="renamingTabId === tab.id"
+                v-model="renameValue"
+                class="subtab-rename"
+                type="text"
+                autocomplete="off"
+                spellcheck="false"
+                :data-rename-tab="tab.id"
+                :size="Math.max(renameValue.length, 4)"
+                :aria-label="`Rename ${tabTitle(tab)}`"
+                @click.stop
+                @dblclick.stop
+                @keydown.enter.prevent="commitTabRename"
+                @keydown.esc.stop.prevent="cancelTabRename"
+                @blur="commitTabRename"
+              />
+              <span v-else class="subtab-title">{{ tabTitle(tab) }}</span>
               <button
                 class="subtab-close"
                 type="button"
                 :aria-label="`Close ${tabTitle(tab)}`"
                 @click.stop="closeTab(tab.id)"
+                @dblclick.stop
               >
-                <span v-if="dirtyTabs.has(tab.id)" class="dirty-dot" aria-hidden="true" />
+                <span v-if="dirtyTabs.has(tab.id) || modifiedQueries.has(tab.id)" class="dirty-dot" aria-hidden="true" />
                 <span class="subtab-close-icon">×</span>
               </button>
             </div>
@@ -1269,10 +1580,19 @@ onUnmounted(() => {
               +
             </button>
           </div>
-          <div v-if="!viewTabs.length" class="db-empty muted">
+          <div v-if="!viewTabs.length && !(showSavedTab && activeTabId === SAVED_TAB_ID)" class="db-empty muted">
             <p v-if="view === 'sql'">No open queries. Use + to start one.</p>
             <p v-else>Pick a table on the left, or double-click one to query it.</p>
           </div>
+          <SavedQueries
+            v-if="connectionSaved.length"
+            v-show="showSavedTab && activeTabId === SAVED_TAB_ID"
+            v-model:selected-id="selectedSavedId"
+            :queries="connectionSaved"
+            :open-ids="openSavedIds"
+            @open="openSavedQuery($event)"
+            @run="openSavedQuery($event, true)"
+          />
           <div
             v-for="tab in tabs"
             v-show="activeTabId === tab.id"
@@ -1301,7 +1621,9 @@ onUnmounted(() => {
               :schema="schema"
               :storage-key="tab.key"
               :active="active && view === 'sql' && activeQueryTabId === tab.id"
+              :saved-sql="savedFor(tab)?.sql ?? null"
               @executed="onExecuted"
+              @modified="setQueryModified(tab.id, $event)"
             />
           </div>
         </section>
@@ -1375,7 +1697,81 @@ onUnmounted(() => {
             {{ tableMenuExportLabel }}
           </button>
         </div>
+        <div
+          v-if="tabMenu && menuTab"
+          ref="tabMenuEl"
+          class="overflow-menu-dropdown table-context-menu"
+          role="menu"
+          :aria-label="`${tabTitle(menuTab)} actions`"
+          :style="{ left: `${tabMenu.x}px`, top: `${tabMenu.y}px` }"
+          @contextmenu.prevent
+        >
+          <button class="overflow-menu-item" type="button" role="menuitem" @click="startTabRename(menuTab)">
+            Rename
+          </button>
+          <button
+            v-if="!savedFor(menuTab)"
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            @click="openSaveDialog(menuTab)"
+          >
+            Save query…
+          </button>
+          <template v-else>
+            <button
+              class="overflow-menu-item"
+              type="button"
+              role="menuitem"
+              :disabled="!modifiedQueries.has(menuTab.id)"
+              @click="saveQueryTab(menuTab)"
+            >
+              Save changes
+            </button>
+            <button class="overflow-menu-item" type="button" role="menuitem" @click="openSaveDialog(menuTab)">
+              Save as new query…
+            </button>
+            <button class="overflow-menu-item" type="button" role="menuitem" @click="showInSaved(menuTab)">
+              Show in Saved queries
+            </button>
+          </template>
+        </div>
       </Teleport>
+      <Modal v-if="saveDialog" title="Save query" @close="closeSaveDialog">
+        <form class="save-query-form" @submit.prevent="submitSaveDialog">
+          <label class="modal-label">
+            <span class="muted tiny">Name</span>
+            <input
+              ref="saveNameInput"
+              v-model="saveName"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              :disabled="saveBusy"
+            />
+          </label>
+          <label class="modal-label">
+            <span class="muted tiny">Description (optional)</span>
+            <textarea
+              v-model="saveDescription"
+              placeholder="What this query does, or when to use it"
+              :disabled="saveBusy"
+              @keydown.meta.enter.prevent="submitSaveDialog"
+            />
+          </label>
+          <p class="muted tiny">
+            Saved queries belong to this connection and appear in the Saved queries tab.
+          </p>
+          <p v-if="saveError" class="settings-error">{{ saveError }}</p>
+        </form>
+        <template #actions>
+          <button class="ghost" type="button" :disabled="saveBusy" @click="closeSaveDialog">Cancel</button>
+          <button class="primary" type="button" :disabled="!saveName.trim() || saveBusy" @click="submitSaveDialog">
+            <span v-if="saveBusy" class="spinner" aria-hidden="true" />
+            {{ saveBusy ? "Saving…" : "Save" }}
+          </button>
+        </template>
+      </Modal>
       <ExportDialog
         v-if="exportDialog"
         :connection-id="sessionId"
