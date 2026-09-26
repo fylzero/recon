@@ -600,7 +600,9 @@ async fn structure_of(session: Arc<Session>, namespace: &str, table: &str) -> Re
             }
         })
         .collect();
-    Ok(TableStructure { columns, indexes })
+    let foreign_keys_sql = dialect.foreign_keys_sql(namespace, table);
+    let foreign_keys = db::foreign_keys(&pool_run(&session, &foreign_keys_sql, usize::MAX, QueryOrigin::Schema).await?);
+    Ok(TableStructure { columns, indexes, foreign_keys })
 }
 
 #[tauri::command]
@@ -639,6 +641,7 @@ pub async fn browse_table(
 async fn browse(session: Arc<Session>, request: &BrowseRequest) -> Result<BrowseResult, String> {
     let dialect = dialect(session.driver);
     let table = dialect.qualified(&request.namespace, &request.table);
+    let filter = db::filter_sql(session.driver, &request.filter);
     let order = match request.order_by.as_deref().filter(|column| !column.is_empty()) {
         Some(column) => format!(
             " ORDER BY {} {}",
@@ -649,14 +652,14 @@ async fn browse(session: Arc<Session>, request: &BrowseRequest) -> Result<Browse
     };
     let limit = request.limit.clamp(1, BROWSE_LIMIT_MAX);
     let sql = format!(
-        "SELECT * FROM {table}{order} LIMIT {limit} OFFSET {}",
+        "SELECT * FROM {table}{filter}{order} LIMIT {limit} OFFSET {}",
         request.offset
     );
     let started = Instant::now();
     let output = pool_run(&session, &sql, limit as usize, QueryOrigin::Browse).await?;
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let total = if request.count {
-        pool_run(&session, &format!("SELECT COUNT(*) FROM {table}"), 1, QueryOrigin::Browse)
+        pool_run(&session, &format!("SELECT COUNT(*) FROM {table}{filter}"), 1, QueryOrigin::Browse)
             .await
             .ok()
             .and_then(|count| count.rows.first()?.first()?.as_i64())

@@ -1,17 +1,20 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import * as api from "../api";
-import { isNumericColumn } from "../cells";
 import { useApp } from "../composables/useApp";
+import { cellDisplay, isNumericColumn } from "../cells";
 import type {
   BrowseResult,
   Cell,
+  CellEdit,
   ColumnMeta,
   Driver,
   EditValue,
+  ForeignKey,
   RowValues,
   SaveRequest,
   SortDirection,
+  TableLink,
   TableStructure as Structure,
 } from "../types";
 import DataGrid, { type CellPosition } from "./DataGrid.vue";
@@ -41,10 +44,13 @@ const props = defineProps<{
   kind: "table" | "view";
   driver: Driver;
   active: boolean;
+  filter?: CellEdit[];
 }>();
 
 const emit = defineEmits<{
   changes: [rows: number];
+  follow: [link: TableLink];
+  clearFilter: [];
 }>();
 
 const { pageSize, showToast } = useApp();
@@ -93,6 +99,33 @@ const nullable = computed(
   () => new Map((structure.value?.columns ?? []).map((column) => [column.name, column.nullable])),
 );
 const editable = computed(() => props.kind === "table" && keyIndexes.value.length > 0);
+const foreignKeyByColumn = computed(() => {
+  const byColumn = new Map<string, ForeignKey>();
+  for (const key of structure.value?.foreignKeys ?? []) {
+    for (const column of key.columns) {
+      if (!byColumn.has(column)) {
+        byColumn.set(column, key);
+      }
+    }
+  }
+  return byColumn;
+});
+const links = computed(() =>
+  columns.value.map((column) => {
+    const key = foreignKeyByColumn.value.get(column.name);
+    if (!key) {
+      return null;
+    }
+    const table = key.refNamespace && key.refNamespace !== props.namespace
+      ? `${key.refNamespace}.${key.refTable}`
+      : key.refTable;
+    return `${table}.${key.refColumns[key.columns.indexOf(column.name)]}`;
+  }),
+);
+const filterKey = computed(() => JSON.stringify(props.filter ?? []));
+const filterLabel = computed(() =>
+  (props.filter ?? []).map((cell) => `${cell.column} = ${cellDisplay(cell.value)}`).join(" and "),
+);
 function rowKey(row: RowValues | undefined): Cell[] | null {
   if (!row || !keyIndexes.value.length) {
     return null;
@@ -200,6 +233,7 @@ async function loadData(count = false, scrollToTop = true) {
       orderBy: sortColumn.value,
       orderDir: sortColumn.value ? sortDir.value : null,
       count,
+      filter: props.filter ?? [],
     });
     if (id !== requestId) {
       return;
@@ -264,6 +298,24 @@ function onSort(column: string) {
   }
   page.value = 0;
   void loadData();
+}
+
+function onFollow(row: number, col: number) {
+  const key = foreignKeyByColumn.value.get(columns.value[col]?.name ?? "");
+  const values = displayRows.value[row];
+  if (!key || !values) {
+    return;
+  }
+  const filter: CellEdit[] = [];
+  for (const [index, column] of key.columns.entries()) {
+    const value = values[columnIndex.value.get(column) ?? -1];
+    if (value === null || value === undefined || typeof value === "object") {
+      showToast(`${column} is empty, so this row doesn't point to a record in ${key.refTable}.`, "error");
+      return;
+    }
+    filter.push({ column: key.refColumns[index], value });
+  }
+  emit("follow", { namespace: key.refNamespace || props.namespace, table: key.refTable, filter });
 }
 
 function parseInput(text: string, reference: Cell, column: ColumnMeta): Cell {
@@ -545,6 +597,12 @@ watch(pageSize, () => {
   void loadData();
 });
 
+watch(filterKey, () => {
+  mode.value = "data";
+  page.value = 0;
+  void loadData(true);
+});
+
 watch(
   () =>
     [...pendingByRow.value.values()].filter((cells) => !isNewKey(cells[0].key)).length +
@@ -615,6 +673,18 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         </svg>
         {{ mode === "data" ? "New record" : mode === "structure" ? "New column" : "New index" }}
       </button>
+      <span v-if="filterLabel && mode === 'data'" class="table-filter" :title="`Showing rows where ${filterLabel}`">
+        <span class="table-filter-label">{{ filterLabel }}</span>
+        <button
+          class="table-filter-clear"
+          type="button"
+          title="Show all rows"
+          aria-label="Clear filter and show all rows"
+          @click="emit('clearFilter')"
+        >
+          ×
+        </button>
+      </span>
       <div class="pane-toolbar-end">
         <span v-if="loading || loadingStructure" class="spinner" aria-label="Loading" />
         <template v-if="mode === 'data'">
@@ -680,10 +750,12 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         :new-row-start="rows.length"
         :creatable="canInsert"
         :modified="modified"
+        :links="links"
         @sort="onSort"
         @edit="onEdit"
         @set-null="onSetNull"
         @create="createRecord"
+        @follow="onFollow"
       />
     </div>
     <div v-show="mode !== 'data'" class="table-view-body">

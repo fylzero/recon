@@ -383,6 +383,17 @@ impl Dialect for MysqlDialect {
         )
     }
 
+    fn foreign_keys_sql(&self, namespace: &str, table: &str) -> String {
+        format!(
+            "SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_SCHEMA, REFERENCED_TABLE_NAME, \
+             REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE \
+             WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} AND REFERENCED_TABLE_NAME IS NOT NULL \
+             ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION",
+            literal(namespace),
+            literal(table)
+        )
+    }
+
     fn quote_ident(&self, ident: &str) -> String {
         quote_backtick(ident)
     }

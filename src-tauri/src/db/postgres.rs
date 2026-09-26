@@ -214,6 +214,24 @@ impl Dialect for PostgresDialect {
         )
     }
 
+    fn foreign_keys_sql(&self, namespace: &str, table: &str) -> String {
+        format!(
+            "SELECT con.conname, a.attname, rn.nspname, rc.relname, ra.attname \
+             FROM pg_catalog.pg_constraint con \
+             JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             JOIN pg_catalog.pg_class rc ON rc.oid = con.confrelid \
+             JOIN pg_catalog.pg_namespace rn ON rn.oid = rc.relnamespace \
+             CROSS JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY AS k(attnum, refnum, ord) \
+             JOIN pg_catalog.pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum \
+             JOIN pg_catalog.pg_attribute ra ON ra.attrelid = con.confrelid AND ra.attnum = k.refnum \
+             WHERE con.contype = 'f' AND n.nspname = {} AND c.relname = {} \
+             ORDER BY con.conname, k.ord",
+            quote_literal(namespace),
+            quote_literal(table)
+        )
+    }
+
     fn quote_ident(&self, ident: &str) -> String {
         quote_double(ident)
     }

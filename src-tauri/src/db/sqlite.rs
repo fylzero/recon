@@ -167,6 +167,18 @@ impl Dialect for SqliteDialect {
         )
     }
 
+    /** A key written as `REFERENCES t` has no `to` column and points at t's primary key. */
+    fn foreign_keys_sql(&self, namespace: &str, table: &str) -> String {
+        let schema = quote_literal(namespace);
+        format!(
+            "SELECT fk.id, fk.\"from\", {schema}, fk.\"table\", \
+             COALESCE(fk.\"to\", (SELECT p.name FROM pragma_table_info(fk.\"table\", {schema}) AS p \
+                                  WHERE p.pk = fk.seq + 1)) \
+             FROM pragma_foreign_key_list({}, {schema}) AS fk ORDER BY fk.id, fk.seq",
+            quote_literal(table)
+        )
+    }
+
     fn quote_ident(&self, ident: &str) -> String {
         quote_double(ident)
     }

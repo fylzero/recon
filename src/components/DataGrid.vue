@@ -34,6 +34,8 @@ const props = defineProps<{
   newRowStart?: number;
   creatable?: boolean;
   modified?: Map<number, Set<number>>;
+  /** Per column, the record a value points to (such as `users.id`), or null for plain columns. */
+  links?: (string | null)[];
 }>();
 
 const emit = defineEmits<{
@@ -42,6 +44,7 @@ const emit = defineEmits<{
   edit: [row: number, col: number, text: string];
   setNull: [cells: CellPosition[]];
   create: [];
+  follow: [row: number, col: number];
 }>();
 
 const { gridFontSize, maxAutoColumnWidth, showToast } = useApp();
@@ -217,6 +220,21 @@ function isEditing(row: number, col: number) {
 
 function isModified(row: number, col: number) {
   return Boolean(props.modified?.get(row)?.has(col));
+}
+
+function linkTarget(value: RowValues[number] | undefined, col: number) {
+  return value === null || value === undefined || isBytes(value) ? null : (props.links?.[col] ?? null);
+}
+
+function follow(row: number, col: number) {
+  commitEdit();
+  emit("follow", row, col);
+}
+
+function headerTitle(column: ColumnMeta, index: number) {
+  const base = `${column.name} · ${column.typeName.toLowerCase()}`;
+  const target = props.links?.[index];
+  return target ? `${base} → ${target}` : base;
 }
 
 function canEdit(row: number, col: number) {
@@ -575,7 +593,7 @@ defineExpose({ scrollToTop, commitEdit, editCell });
           sorted: sortColumn === column.name,
         }"
         role="columnheader"
-        :title="`${column.name} · ${column.typeName.toLowerCase()}`"
+        :title="headerTitle(column, index)"
         @click="onHeaderClick($event, column)"
       >
         <span class="grid-header-name">{{ column.name }}</span>
@@ -618,10 +636,11 @@ defineExpose({ scrollToTop, commitEdit, editCell });
               focused: isFocused(item.index, col),
               modified: isModified(item.index, col),
               editing: isEditing(item.index, col),
+              linked: !isEditing(item.index, col) && Boolean(linkTarget(value, col)),
             }"
             :title="isEditing(item.index, col) ? undefined : cellTitle(value)"
             @mousedown.prevent="selectCell($event, item.index, col)"
-            @dblclick="startEdit(item.index, col)"
+            @dblclick.stop="startEdit(item.index, col)"
           >
             <textarea
               v-if="isEditing(item.index, col)"
@@ -639,6 +658,23 @@ defineExpose({ scrollToTop, commitEdit, editCell });
               @mousedown.stop
               @dblclick.stop
             />
+            <template v-else-if="linkTarget(value, col)">
+              <span class="grid-cell-text">{{ cellDisplay(value) }}</span>
+              <button
+                class="grid-link"
+                type="button"
+                tabindex="-1"
+                :title="`Open ${linkTarget(value, col)} = ${cellDisplay(value)}`"
+                :aria-label="`Open ${linkTarget(value, col)} = ${cellDisplay(value)}`"
+                @mousedown.stop.prevent
+                @dblclick.stop
+                @click.stop="follow(item.index, col)"
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M3 8h9.5M8.5 4l4 4-4 4" />
+                </svg>
+              </button>
+            </template>
             <template v-else>{{ cellDisplay(value) }}</template>
           </div>
         </template>

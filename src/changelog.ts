@@ -6,6 +6,14 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "0.3.0",
+    date: "September 25, 2026",
+    notes: [
+      "Foreign key columns show an arrow next to each value. Click it to open the referenced table showing just that record, and clear the filter from the toolbar to see every row again.",
+      "Hovering a foreign key column's header shows the table and column it points to.",
+    ],
+  },
+  {
     version: "0.2.1",
     date: "September 25, 2026",
     notes: [

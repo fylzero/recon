@@ -7,7 +7,7 @@ import * as api from "../api";
 import { SIDEBAR_MAX, SIDEBAR_MIN, useApp } from "../composables/useApp";
 import { useConnectionForm } from "../composables/useConnectionForm";
 import { registerInnerTabCloser, setLiveTitle, useTabs } from "../composables/useTabs";
-import { driverLabel, type SessionInfo, type TableInfo } from "../types";
+import { driverLabel, type CellEdit, type SessionInfo, type TableInfo, type TableLink } from "../types";
 import ConnectionViewTabs, { type ConnectionViewTab } from "./ConnectionViewTabs.vue";
 import DatabaseSwitcher from "./DatabaseSwitcher.vue";
 import DriverIcon from "./DriverIcon.vue";
@@ -16,7 +16,14 @@ import QueryEditor from "./QueryEditor.vue";
 import TableView from "./TableView.vue";
 
 type PaneTab =
-  | { id: string; kind: "table"; namespace: string; table: string; tableKind: "table" | "view" }
+  | {
+      id: string;
+      kind: "table";
+      namespace: string;
+      table: string;
+      tableKind: "table" | "view";
+      filter?: CellEdit[];
+    }
   | { id: string; kind: "query"; key: string; title: string };
 
 const props = defineProps<{
@@ -199,6 +206,34 @@ function openTable(table: TableInfo) {
       { id, kind: "table", namespace: namespace.value, table: table.name, tableKind: table.kind },
     ];
   }
+  activeTableTabId.value = id;
+}
+
+function setTableFilter(id: string, filter: CellEdit[] | undefined) {
+  tabs.value = tabs.value.map((tab) => (tab.id === id && tab.kind === "table" ? { ...tab, filter } : tab));
+}
+
+function followLink(link: TableLink) {
+  const id = `table:${link.namespace}.${link.table}`;
+  if (tabs.value.some((tab) => tab.id === id)) {
+    setTableFilter(id, link.filter);
+  } else {
+    const known = link.namespace === namespace.value
+      ? tables.value.find((table) => table.name === link.table)
+      : undefined;
+    tabs.value = [
+      ...tabs.value,
+      {
+        id,
+        kind: "table",
+        namespace: link.namespace,
+        table: link.table,
+        tableKind: known?.kind ?? "table",
+        filter: link.filter,
+      },
+    ];
+  }
+  view.value = "tables";
   activeTableTabId.value = id;
 }
 
@@ -1048,9 +1083,12 @@ onUnmounted(() => {
               :table="tab.table"
               :kind="tab.tableKind"
               :driver="driver"
+              :filter="tab.filter"
               :ref="(instance) => setTableViewRef(tab.id, instance)"
               :active="active && view === 'tables' && activeTableTabId === tab.id"
               @changes="setTabChanges(tab.id, $event)"
+              @follow="followLink"
+              @clear-filter="setTableFilter(tab.id, undefined)"
             />
             <QueryEditor
               v-else

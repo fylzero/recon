@@ -143,11 +143,49 @@ pub struct IndexInfo {
     pub primary: bool,
 }
 
+/** `columns[i]` references `ref_columns[i]`; composite keys have several. */
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignKey {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub ref_namespace: String,
+    pub ref_table: String,
+    pub ref_columns: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableStructure {
     pub columns: Vec<ColumnDetail>,
     pub indexes: Vec<IndexInfo>,
+    pub foreign_keys: Vec<ForeignKey>,
+}
+
+/** Rows arrive ordered by constraint, then by position within it. */
+pub fn foreign_keys(output: &RawOutput) -> Vec<ForeignKey> {
+    let mut keys: Vec<ForeignKey> = Vec::new();
+    for row in output.text_rows() {
+        let name = text_at(&row, 0);
+        let (column, ref_column) = (text_at(&row, 1), text_at(&row, 4));
+        if column.is_empty() || ref_column.is_empty() {
+            continue;
+        }
+        match keys.last_mut() {
+            Some(key) if key.name == name => {
+                key.columns.push(column);
+                key.ref_columns.push(ref_column);
+            }
+            _ => keys.push(ForeignKey {
+                name,
+                columns: vec![column],
+                ref_namespace: text_at(&row, 2),
+                ref_table: text_at(&row, 3),
+                ref_columns: vec![ref_column],
+            }),
+        }
+    }
+    keys
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -191,6 +229,34 @@ pub struct BrowseRequest {
     pub order_dir: Option<SortDirection>,
     #[serde(default)]
     pub count: bool,
+    /// Rows must match every column, as in `WHERE a = 1 AND b = 'x'`.
+    #[serde(default)]
+    pub filter: Vec<CellEdit>,
+}
+
+/** The WHERE clause for a browse filter, with values inlined as escaped literals. */
+pub fn filter_sql(driver: Driver, filter: &[CellEdit]) -> String {
+    if filter.is_empty() {
+        return String::new();
+    }
+    let dialect = dialect(driver);
+    let conditions: Vec<String> = filter
+        .iter()
+        .map(|cell| {
+            let column = dialect.quote_ident(&cell.column);
+            let value = match (&cell.value, driver) {
+                (EditValue::Null, _) => return format!("{column} IS NULL"),
+                (value, Driver::Postgres) => value.postgres_literal(),
+                (EditValue::Bool(value), _) => i64::from(*value).to_string(),
+                (EditValue::Int(value), _) => value.to_string(),
+                (EditValue::Float(value), _) => value.to_string(),
+                (EditValue::Text(text), Driver::Mysql) => quote_literal(&text.replace('\\', "\\\\")),
+                (EditValue::Text(text), Driver::Sqlite) => quote_literal(text),
+            };
+            format!("{column} = {value}")
+        })
+        .collect();
+    format!(" WHERE {}", conditions.join(" AND "))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -673,6 +739,8 @@ pub trait Dialect: Sync {
     /// Rows of name, columns, unique, primary, definition, index type, comment, constraint.
     fn index_definitions_sql(&self, namespace: &str, table: &str) -> String;
     fn schema_columns_sql(&self, namespace: &str) -> String;
+    /// Rows of constraint, column, referenced namespace, table, and column, in key order.
+    fn foreign_keys_sql(&self, namespace: &str, table: &str) -> String;
     fn quote_ident(&self, ident: &str) -> String;
     fn use_namespace_sql(&self, namespace: &str) -> Option<String>;
     fn create_namespace_sql(&self, namespace: &str) -> Option<String>;
@@ -1753,6 +1821,70 @@ mod tests {
         pool.apply(&statements[..1]).await.unwrap();
         let saved = pool.run("SELECT name, score FROM users WHERE id = 1", 1).await.unwrap();
         assert_eq!(saved.rows[0], vec![CellValue::Text("ada'".into()), CellValue::Int(42)]);
+    }
+
+    #[test]
+    fn builds_browse_filters_for_each_driver() {
+        let filter: Vec<CellEdit> = serde_json::from_value(serde_json::json!([
+            { "column": "id", "value": 7 },
+            { "column": "code", "value": "o'b\\c" },
+            { "column": "gone", "value": null },
+        ]))
+        .unwrap();
+        assert_eq!(
+            filter_sql(Driver::Mysql, &filter),
+            " WHERE `id` = 7 AND `code` = 'o''b\\\\c' AND `gone` IS NULL"
+        );
+        assert_eq!(
+            filter_sql(Driver::Sqlite, &filter),
+            " WHERE \"id\" = 7 AND \"code\" = 'o''b\\c' AND \"gone\" IS NULL"
+        );
+        assert_eq!(
+            filter_sql(Driver::Postgres, &filter),
+            " WHERE \"id\" = E'7' AND \"code\" = E'o''b\\\\c' AND \"gone\" IS NULL"
+        );
+        assert_eq!(filter_sql(Driver::Mysql, &[]), "");
+    }
+
+    #[tokio::test]
+    async fn reads_sqlite_foreign_keys_and_follows_them() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let pool = Pool::Sqlite(pool);
+        for sql in [
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)",
+            "CREATE TABLE slots (day TEXT, hour INT, PRIMARY KEY (day, hour))",
+            "CREATE TABLE posts (id INTEGER PRIMARY KEY, author INT REFERENCES users, \
+             editor INT REFERENCES users(id), day TEXT, hour INT, \
+             FOREIGN KEY (day, hour) REFERENCES slots (day, hour))",
+            "INSERT INTO users VALUES (1, 'ada'), (2, 'bob')",
+        ] {
+            pool.run(sql, 0).await.unwrap();
+        }
+        let sql = dialect(Driver::Sqlite).foreign_keys_sql("main", "posts");
+        let mut keys = foreign_keys(&pool.run(&sql, 100).await.unwrap());
+        keys.sort_by(|a, b| a.columns.cmp(&b.columns));
+        let summary: Vec<_> = keys
+            .iter()
+            .map(|key| (key.columns.join(","), key.ref_namespace.as_str(), key.ref_table.as_str(), key.ref_columns.join(",")))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("author".into(), "main", "users", "id".into()),
+                ("day,hour".into(), "main", "slots", "day,hour".into()),
+                ("editor".into(), "main", "users", "id".into()),
+            ]
+        );
+        let filter = vec![CellEdit { column: "id".into(), value: EditValue::Int(2) }];
+        let found = pool
+            .run(&format!("SELECT name FROM \"main\".\"users\"{}", filter_sql(Driver::Sqlite, &filter)), 10)
+            .await
+            .unwrap();
+        assert_eq!(found.rows, vec![vec![CellValue::Text("bob".into())]]);
     }
 
     #[test]

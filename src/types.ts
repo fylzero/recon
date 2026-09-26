@@ -138,9 +138,19 @@ export interface IndexInfo {
   primary: boolean;
 }
 
+/* `columns[i]` references `refColumns[i]`; composite keys have several. */
+export interface ForeignKey {
+  name: string;
+  columns: string[];
+  refNamespace: string;
+  refTable: string;
+  refColumns: string[];
+}
+
 export interface TableStructure {
   columns: ColumnDetail[];
   indexes: IndexInfo[];
+  foreignKeys: ForeignKey[];
 }
 
 export interface SchemaColumn {
@@ -158,6 +168,14 @@ export interface BrowseRequest {
   orderBy?: string | null;
   orderDir?: SortDirection | null;
   count: boolean;
+  filter?: CellEdit[];
+}
+
+/* Opens `table` showing only rows where every filter column equals its value. */
+export interface TableLink {
+  namespace: string;
+  table: string;
+  filter: CellEdit[];
 }
 
 export interface BrowseResult {

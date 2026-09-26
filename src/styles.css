@@ -2668,6 +2668,42 @@ button.view-tab.active:hover:not(:disabled) {
   font-weight: 600;
 }
 
+.table-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  min-width: 0;
+  max-width: 22rem;
+  padding: 0.1rem 0.15rem 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: var(--chip);
+  color: #7ee0c7;
+  font-family: var(--grid-font-family);
+  font-size: 0.78rem;
+}
+
+.table-filter-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.table-filter-clear {
+  flex: 0 0 auto;
+  padding: 0 0.35rem;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  line-height: 1.3;
+}
+
+.table-filter-clear:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+}
+
 .pane-toolbar-end {
   display: flex;
   align-items: center;
@@ -2919,6 +2955,55 @@ button.view-tab.active:hover:not(:disabled) {
 .grid-cell.editing {
   padding: 0;
   box-shadow: none;
+}
+
+.grid-cell.linked {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding-right: 0.25rem;
+}
+
+.grid-cell-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.grid-link {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: calc(var(--grid-row-height) - 6px);
+  height: calc(var(--grid-row-height) - 6px);
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0.55;
+}
+
+.grid-row:hover .grid-link,
+.grid-cell.focused .grid-link {
+  opacity: 1;
+}
+
+.grid-link:hover:not(:disabled) {
+  background: var(--chip);
+  color: #7ee0c7;
+}
+
+.grid-link svg {
+  width: 0.8rem;
+  height: 0.8rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .grid-editor {
