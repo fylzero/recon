@@ -59,6 +59,7 @@ const { updateReady, availableVersion, showPrompt } = useUpdater();
         </svg>
         <DriverIcon v-else class="tab-icon" :driver="findConnection(tab.id)?.connection.driver" />
         <span class="tab-title">{{ tab.title }}</span>
+        <span v-if="tab.badge" class="repo-label tab-badge" :title="tab.badge">{{ tab.badge }}</span>
         <button
           v-if="tab.closable"
           class="tab-close"

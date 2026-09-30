@@ -1,5 +1,6 @@
 import { computed, ref } from "vue";
 import { useRouter } from "vue-router";
+import { DEFAULT_HEADER_COLOR } from "../color";
 import { useApp } from "./useApp";
 
 export const CONNECTIONS_TAB_ID = "connections";
@@ -14,6 +15,7 @@ type UtilityPanel = "settings" | "changelog";
 export interface AppTab {
   id: string;
   title: string;
+  badge?: string;
   closable: boolean;
   accentColor?: string;
 }
@@ -71,11 +73,16 @@ export function useTabs() {
     { id: CONNECTIONS_TAB_ID, title: "Connections", closable: false },
     ...connectionTabs.value.map((tab) => {
       const match = findConnection(tab.connectionId);
+      const title = liveTitles.value[tab.id] || tab.title;
+      const name = match?.connection.name.trim();
       return {
         id: tab.id,
-        title: liveTitles.value[tab.id] || tab.title,
+        title,
+        badge: match?.group && name && name !== title ? name : undefined,
         closable: true,
-        accentColor: match?.connection.headerColor || match?.group?.headerColor,
+        accentColor: match?.group
+          ? match.group.headerColor || DEFAULT_HEADER_COLOR
+          : match?.connection.headerColor || undefined,
       };
     }),
     ...(settingsTabOpen.value ? [{ id: SETTINGS_TAB_ID, title: "Settings", closable: true }] : []),

@@ -6,13 +6,17 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
-    version: "1.1.1",
+    version: "1.2.0",
     date: "September 30, 2026",
     notes: [
-      "With a table name focused in the sidebar, typing goes into Filter tables, including the first character.",
-      "The card shown when a connection fails is wider, so its buttons no longer wrap their labels onto two lines.",
       "⌘F now finds text in the rows already loaded in a table or query result, highlighting every matching cell. Enter and ⇧Enter, or ⌘G and ⇧⌘G, move between matches, ⌘E searches for the selected cell's value, and Esc closes find.",
       "Filters moved to ⇧⌘F.",
+      "The filter panel has Copy and Paste buttons, so you can copy a table's filters and paste them into another tab. Pasted filters are added to any filters already there, and an OR filter stays grouped so it matches the same rows.",
+      "If pasted filters use columns the table doesn't have, a message names those columns and those filters aren't applied.",
+      "With a table name focused in the sidebar, typing goes into Filter tables, including the first character.",
+      "The card shown when a connection fails is wider, so its buttons no longer wrap their labels onto two lines.",
+      "Tabs for connections in a group now use the group's color, even if the connection had its own color before you dragged it into the group.",
+      "A connected tab for a connection in a group shows the connection's saved name as a badge next to the database name when the two differ.",
     ],
   },
   {
