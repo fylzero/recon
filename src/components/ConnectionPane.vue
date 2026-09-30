@@ -124,6 +124,10 @@ const tables = ref<TableInfo[]>([]);
 const tablesLoading = ref(false);
 const tablesError = ref("");
 const filter = ref("");
+const tableFilterInput = ref<HTMLInputElement | null>(null);
+const tableListEl = ref<HTMLElement | null>(null);
+/** Set while a sidebar table name is the thing the user is acting on, even if the webview left keyboard focus on the grid. */
+let tableTyping = false;
 const schema = shallowRef<SQLNamespace>({});
 const tabs = ref<PaneTab[]>([]);
 const view = ref<ConnectionViewTab>("tables");
@@ -907,6 +911,68 @@ watch(activeTableTabId, (id) => {
   }
   scheduleSaveTableTabs();
 });
+
+function armTableTyping() {
+  tableTyping = true;
+}
+
+function onTableTypingPointerDown(event: PointerEvent) {
+  const target = event.target;
+  if (!(target instanceof Node) || !tableListEl.value?.contains(target)) {
+    tableTyping = false;
+    return;
+  }
+  if (target instanceof Element && target.closest(".db-table")) {
+    tableTyping = true;
+  }
+}
+
+/**
+ * A table name is a button, and clicking it often leaves keyboard focus on the
+ * grid. While the name is the active target, send typing to Filter tables.
+ */
+function onTableTypingKeydown(event: KeyboardEvent) {
+  if (!props.active || !tableTyping || view.value !== "tables") {
+    return;
+  }
+  if (event.metaKey || event.ctrlKey || event.altKey || event.isComposing) {
+    return;
+  }
+  if (document.querySelector(".modal-layer, [role='menu']")) {
+    return;
+  }
+  const target = event.target;
+  if (target instanceof HTMLElement && target.closest("input, textarea, select, [contenteditable]")) {
+    return;
+  }
+  if (event.key === "Tab" || event.key === "Escape" || event.key === "Enter" || event.key.startsWith("Arrow")) {
+    if (!(target instanceof Node) || !tableListEl.value?.contains(target)) {
+      tableTyping = false;
+    }
+    return;
+  }
+  const character = event.key.length === 1;
+  const backspace = event.key === "Backspace" && filter.value.length > 0;
+  if (!character && !backspace) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  const next = backspace ? filter.value.slice(0, -1) : filter.value + event.key;
+  filter.value = next;
+  const input = tableFilterInput.value;
+  if (!input) {
+    return;
+  }
+  input.value = next;
+  void nextTick(() => {
+    if (!tableTyping || view.value !== "tables") {
+      return;
+    }
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(input.value.length, input.value.length);
+  });
+}
 
 function activeTableName() {
   const tab = tabs.value.find((item) => item.id === activeTableTabId.value);
@@ -2300,6 +2366,8 @@ function flushTableTabs() {
 
 onMounted(() => {
   window.addEventListener("keydown", onWindowKeydown, true);
+  window.addEventListener("keydown", onTableTypingKeydown, true);
+  document.addEventListener("pointerdown", onTableTypingPointerDown, true);
   window.addEventListener("focus", onWindowFocus);
   window.addEventListener("beforeunload", flushTableTabs);
   void listen<ConnectionEvent>("connection-lost", (event) => onConnectionLost(event.payload)).then(
@@ -2324,6 +2392,8 @@ const unregisterCloser = registerInnerTabCloser(props.sessionId, closeActivePane
 
 onUnmounted(() => {
   window.removeEventListener("keydown", onWindowKeydown, true);
+  window.removeEventListener("keydown", onTableTypingKeydown, true);
+  document.removeEventListener("pointerdown", onTableTypingPointerDown, true);
   window.removeEventListener("focus", onWindowFocus);
   window.removeEventListener("beforeunload", flushTableTabs);
   stopLost?.();
@@ -2517,9 +2587,16 @@ onUnmounted(() => {
       <div class="db-body">
         <aside v-show="view === 'tables'" ref="sidebarEl" class="db-sidebar" :style="{ width: `${sidebarWidth}px` }">
           <div class="db-filter">
-            <input v-model="filter" type="search" placeholder="Filter tables" spellcheck="false" />
+            <input
+              ref="tableFilterInput"
+              v-model="filter"
+              type="search"
+              placeholder="Filter tables"
+              spellcheck="false"
+            />
           </div>
           <div
+            ref="tableListEl"
             class="db-table-list"
             role="listbox"
             aria-multiselectable="true"
@@ -2554,6 +2631,8 @@ onUnmounted(() => {
                     ? `${table.name} (view) · double-click to open in a new tab`
                     : `${table.name} · double-click to open in a new tab`
               "
+              @mousedown="armTableTyping"
+              @focus="armTableTyping"
               @click="onTableClick($event, table)"
               @dblclick="onTableDblclick($event, table)"
               @contextmenu="openTableMenu($event, table)"

@@ -6,6 +6,13 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.1.1",
+    date: "September 30, 2026",
+    notes: [
+      "With a table name focused in the sidebar, typing goes into Filter tables, including the first character.",
+    ],
+  },
+  {
     version: "1.1.0",
     date: "September 29, 2026",
     notes: [
