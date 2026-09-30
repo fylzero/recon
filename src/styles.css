@@ -2014,7 +2014,7 @@ button.link-button:hover:not(:disabled) {
 }
 
 .connect-card {
-  width: min(26rem, 100%);
+  width: min(34rem, 100%);
   padding: 1.1rem 1.2rem 1.15rem;
   border: 1px solid var(--border);
   border-radius: 12px;

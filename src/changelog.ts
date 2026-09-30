@@ -10,6 +10,7 @@ export const CHANGELOG: ChangelogRelease[] = [
     date: "September 30, 2026",
     notes: [
       "With a table name focused in the sidebar, typing goes into Filter tables, including the first character.",
+      "The card shown when a connection fails is wider, so its buttons no longer wrap their labels onto two lines.",
     ],
   },
   {
