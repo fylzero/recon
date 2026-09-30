@@ -11,6 +11,7 @@ import { useVirtualizer } from "@tanstack/vue-virtual";
 import {
   cellCopyText,
   cellDisplay,
+  cellText,
   cellTitle,
   initialColumnWidth,
   isBytes,
@@ -40,6 +41,10 @@ const props = defineProps<{
   links?: (string | null)[];
   /** Emits `cellMenu` and `headerMenu` on right-click instead of showing the default menu. */
   contextMenus?: boolean;
+  /** Cells that match the find bar, by row. */
+  matches?: Map<number, Set<number>>;
+  /** The match find is on. The grid selects it and scrolls it into view. */
+  currentMatch?: CellPosition | null;
 }>();
 
 const emit = defineEmits<{
@@ -241,6 +246,28 @@ function isEditing(row: number, col: number) {
 function isModified(row: number, col: number) {
   return Boolean(props.modified?.get(row)?.has(col));
 }
+
+function isMatch(row: number, col: number) {
+  return Boolean(props.matches?.get(row)?.has(col));
+}
+
+function isCurrentMatch(row: number, col: number) {
+  return props.currentMatch?.row === row && props.currentMatch?.col === col;
+}
+
+watch(
+  () => (props.currentMatch ? `${props.currentMatch.row}:${props.currentMatch.col}` : ""),
+  () => {
+    const match = props.currentMatch;
+    if (!match) {
+      return;
+    }
+    commitEdit();
+    anchor.value = { ...match };
+    focus.value = { ...match };
+    scrollCellIntoView(match);
+  },
+);
 
 function linkTarget(value: RowValues[number] | undefined, col: number) {
   return value === null || value === undefined || isBytes(value) ? null : (props.links?.[col] ?? null);
@@ -618,7 +645,17 @@ function scrollToTop() {
   });
 }
 
-defineExpose({ scrollToTop, commitEdit, editCell });
+/** The focused cell and its full text, or null when no loaded cell is focused. */
+function focusedCell(): { position: CellPosition; text: string } | null {
+  const position = focus.value;
+  const value = position ? props.rows[position.row]?.[position.col] : undefined;
+  if (!position || value === undefined) {
+    return null;
+  }
+  return { position: { ...position }, text: cellText(value) };
+}
+
+defineExpose({ scrollToTop, commitEdit, editCell, focusedCell });
 </script>
 
 <template>
@@ -692,6 +729,8 @@ defineExpose({ scrollToTop, commitEdit, editCell });
               selected: isSelected(item.index, col),
               focused: isFocused(item.index, col),
               modified: isModified(item.index, col),
+              match: isMatch(item.index, col),
+              'current-match': isCurrentMatch(item.index, col),
               editing: isEditing(item.index, col),
               linked: !isEditing(item.index, col) && Boolean(linkTarget(value, col)),
             }"

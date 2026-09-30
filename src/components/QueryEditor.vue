@@ -12,7 +12,9 @@ import { useApp } from "../composables/useApp";
 import { splitStatements, statementAt } from "../sql";
 import { exportSqlFile } from "../transfer";
 import type { Driver, RowValues, StatementResult } from "../types";
+import { useGridFind } from "../composables/useGridFind";
 import DataGrid from "./DataGrid.vue";
+import GridFind from "./GridFind.vue";
 
 const FETCH_BLOCK = 500;
 const EDITOR_MIN = 80;
@@ -56,6 +58,43 @@ let modified = false;
 
 const current = computed(() => results.value[activeResult.value] ?? null);
 const statementCount = computed(() => results.value.length);
+const grid = ref<InstanceType<typeof DataGrid> | null>(null);
+const find = useGridFind(() => current.value?.rows ?? []);
+const findable = computed(() => Boolean(current.value?.result.columns.length && !current.value.result.error));
+
+function gridElement() {
+  return grid.value?.$el as HTMLElement | undefined;
+}
+
+function closeFind() {
+  find.close();
+  gridElement()?.focus({ preventScroll: true });
+}
+
+/** Runs after CodeMirror, which keeps ⌘F, ⌘G, and ⌘E for itself while the editor has focus. */
+function onWindowKeydown(event: KeyboardEvent) {
+  if (!props.active || event.defaultPrevented || !(event.metaKey || event.ctrlKey) || event.altKey) {
+    return;
+  }
+  const target = event.target;
+  if (target instanceof Node && host.value?.contains(target)) {
+    return;
+  }
+  const key = event.key.toLowerCase();
+  if (key === "f" && !event.shiftKey && findable.value) {
+    event.preventDefault();
+    find.show(grid.value?.focusedCell()?.position);
+  } else if (key === "g" && find.open.value && findable.value) {
+    event.preventDefault();
+    find.step(event.shiftKey ? -1 : 1);
+  } else if (key === "e" && !event.shiftKey && target instanceof Node && gridElement()?.contains(target)) {
+    event.preventDefault();
+    const cell = grid.value?.focusedCell();
+    if (cell) {
+      find.search(cell.text, cell.position);
+    }
+  }
+}
 
 const dialect = computed(() => {
   if (props.driver === "postgres") {
@@ -430,9 +469,11 @@ onMounted(() => {
   if (props.active) {
     focus();
   }
+  window.addEventListener("keydown", onWindowKeydown);
 });
 
 onUnmounted(() => {
+  window.removeEventListener("keydown", onWindowKeydown);
   window.clearTimeout(saveTimer);
   if (view) {
     try {
@@ -543,9 +584,13 @@ defineExpose({ insertText, getText, focus, run });
           <pre class="muted">{{ current.result.sql }}</pre>
         </div>
         <template v-else>
+          <GridFind v-if="find.open.value" :find="find" @close="closeFind" />
           <DataGrid
+            ref="grid"
             :columns="current.result.columns"
             :rows="current.rows"
+            :matches="find.byRow.value"
+            :current-match="find.current.value"
             @need-rows="(start, end) => current && loadRows(current, start, end)"
           />
           <div class="pane-status muted tiny">

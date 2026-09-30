@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
+import { useGridFind } from "../composables/useGridFind";
 import { useOverflowMenu } from "../composables/useOverflowMenu";
 import { placeAtPoint, useDismiss, type PopoverPosition } from "../composables/usePopover";
 import { isBytes, isNumericColumn } from "../cells";
@@ -57,6 +58,7 @@ import DataGrid, { type CellPosition } from "./DataGrid.vue";
 import FilterPanel from "./FilterPanel.vue";
 import FilterPopover from "./FilterPopover.vue";
 import FilterSummary from "./FilterSummary.vue";
+import GridFind from "./GridFind.vue";
 import Modal from "./Modal.vue";
 import TableStructure from "./TableStructure.vue";
 
@@ -333,6 +335,7 @@ const displayRows = computed(() =>
     return next;
   }),
 );
+const find = useGridFind(() => displayRows.value);
 const modified = computed(() => {
   const cells = new Map<number, Set<number>>();
   pageEdits.value.forEach((edits, index) => {
@@ -1017,9 +1020,26 @@ function onWindowKeydown(event: KeyboardEvent) {
     refresh();
     return;
   }
-  if (key === "f" && !event.shiftKey) {
+  if (key === "f") {
     event.preventDefault();
-    openPanel(true);
+    if (event.shiftKey) {
+      openPanel(true);
+    } else {
+      openFind();
+    }
+    return;
+  }
+  if (key === "g" && find.open.value && mode.value === "data") {
+    event.preventDefault();
+    find.step(event.shiftKey ? -1 : 1);
+    return;
+  }
+  if (key === "e" && !event.shiftKey && mode.value === "data" && inGrid(event.target)) {
+    event.preventDefault();
+    const cell = grid.value?.focusedCell();
+    if (cell) {
+      find.search(cell.text, cell.position);
+    }
     return;
   }
   if (key !== "z" || kind.value !== "table") {
@@ -1125,6 +1145,24 @@ function openPanel(focus: boolean) {
   }
 }
 
+function gridElement() {
+  return grid.value?.$el as HTMLElement | undefined;
+}
+
+function inGrid(target: EventTarget | null) {
+  return target instanceof Element && !target.closest("textarea") && Boolean(gridElement()?.contains(target));
+}
+
+function openFind() {
+  mode.value = "data";
+  find.show(grid.value?.focusedCell()?.position);
+}
+
+function closeFind() {
+  find.close();
+  gridElement()?.focus({ preventScroll: true });
+}
+
 function collapsePanel() {
   const hasBlank = conditionCount.value !== allConditions(props.view.filter).length;
   emit("update:view", hasBlank ? { panelOpen: false, filter: dropBlankConditions(props.view.filter) } : { panelOpen: false });
@@ -1132,7 +1170,7 @@ function collapsePanel() {
     if (autoApplyFilters.value && !compiled.value.pending) {
       applyFilter();
     }
-    (grid.value?.$el as HTMLElement | undefined)?.focus({ preventScroll: true });
+    gridElement()?.focus({ preventScroll: true });
   });
 }
 
@@ -1409,8 +1447,8 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         type="button"
         :aria-pressed="view.panelOpen && mode === 'data'"
         :aria-label="filterActive ? `Filter: ${filterSummaryText || 'rows'}` : 'Filter rows'"
-        aria-keyshortcuts="Meta+F"
-        :title="summaryVisible ? undefined : view.panelOpen && mode === 'data' ? 'Hide filters (⌘F)' : 'Filter rows (⌘F)'"
+        aria-keyshortcuts="Meta+Shift+F"
+        :title="summaryVisible ? undefined : view.panelOpen && mode === 'data' ? 'Hide filters (⇧⌘F)' : 'Filter rows (⇧⌘F)'"
         @click="togglePanel"
         @mouseenter="showSummaryPopover"
         @mouseleave="hideSummaryPopover"
@@ -1551,6 +1589,12 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
     <div v-else-if="view.panelOpen && mode === 'data' && loadingStructure" class="filter-panel-loading muted tiny">
       <span class="spinner" aria-hidden="true" /> Loading columns…
     </div>
+    <GridFind
+      v-if="find.open.value && mode === 'data'"
+      :find="find"
+      :scope="onlyOnePage ? undefined : 'on this page'"
+      @close="closeFind"
+    />
 
     <div
       v-show="mode === 'data'"
@@ -1578,6 +1622,8 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
           :creatable="canInsert"
           :modified="modified"
           :links="links"
+          :matches="find.byRow.value"
+          :current-match="find.current.value"
           context-menus
           @sort="onSort"
           @edit="onEdit"
@@ -1739,7 +1785,7 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
       :preview="filterPreview"
       :count="filterCount"
       :anchor="summaryAnchor"
-      :hint="filterError || 'Click to edit filters (⌘F)'"
+      :hint="filterError || 'Click to edit filters (⇧⌘F)'"
     />
     <Modal v-if="customRefresh" title="Auto refresh" @close="customRefresh = false">
       <form @submit.prevent="applyCustomRefresh" @keydown.enter.prevent="applyCustomRefresh">

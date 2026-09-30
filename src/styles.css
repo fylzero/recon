@@ -3940,6 +3940,64 @@ input[type="search"].column-picker-search {
   padding: 0.4rem 0.45rem;
 }
 
+.grid-find {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex: 0 0 auto;
+  padding: 0.3rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  background: #10141a;
+}
+
+.grid-find-icon {
+  flex: 0 0 auto;
+  width: 0.85rem;
+  height: 0.85rem;
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+
+input[type="search"].grid-find-input {
+  flex: 0 1 18rem;
+  min-width: 8rem;
+  height: 1.6rem;
+  padding: 0 0.5rem;
+  font-size: 12px;
+}
+
+.grid-find-status {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin: 0 0.25rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+button.grid-find-button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.6rem;
+  padding: 0.2rem 0.35rem;
+}
+
+button.grid-find-button .button-icon {
+  width: 0.9rem;
+  height: 0.9rem;
+}
+
+button.grid-find-close {
+  margin-left: auto;
+  font-size: 15px;
+  line-height: 1;
+}
+
 .table-view-body.stale {
   opacity: 0.6;
   transition: opacity 0.15s ease 0.15s;
@@ -4283,6 +4341,16 @@ input[type="search"].column-picker-search {
 .grid-cell.modified {
   background-image: linear-gradient(rgba(230, 192, 123, 0.16), rgba(230, 192, 123, 0.16));
   color: #f3d9a4;
+}
+
+.grid-cell.match {
+  background-color: rgba(240, 163, 107, 0.2);
+}
+
+.grid-cell.current-match {
+  background-color: rgba(240, 163, 107, 0.42);
+  box-shadow: inset 0 0 0 1px #f0a36b;
+  color: #fff3e8;
 }
 
 .grid-cell.editing {

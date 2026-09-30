@@ -11,6 +11,8 @@ export const CHANGELOG: ChangelogRelease[] = [
     notes: [
       "With a table name focused in the sidebar, typing goes into Filter tables, including the first character.",
       "The card shown when a connection fails is wider, so its buttons no longer wrap their labels onto two lines.",
+      "⌘F now finds text in the rows already loaded in a table or query result, highlighting every matching cell. Enter and ⇧Enter, or ⌘G and ⇧⌘G, move between matches, ⌘E searches for the selected cell's value, and Esc closes find.",
+      "Filters moved to ⇧⌘F.",
     ],
   },
   {
