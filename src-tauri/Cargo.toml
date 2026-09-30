@@ -1,6 +1,6 @@
 [package]
 name = "Recon"
-version = "1.1.0"
+version = "1.2.0"
 description = "A local-first database client"
 authors = ["RazorKode LLC"]
 license = "MIT"
@@ -34,6 +34,7 @@ keyring = { version = "3", features = ["apple-native"] }
 futures-util = "0.3"
 flate2 = "1"
 russh = { version = "0.63", default-features = false, features = ["ring", "rsa", "flate2"] }
+tauri-plugin-clipboard-manager = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -3365,6 +3365,22 @@ button.view-tab.active:hover:not(:disabled) {
   margin-left: auto;
 }
 
+.filter-clip-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.filter-clip-button svg {
+  width: 0.8rem;
+  height: 0.8rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .filter-resize {
   position: absolute;
   right: 0;

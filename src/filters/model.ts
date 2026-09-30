@@ -403,3 +403,59 @@ export function sanitizeFilter(value: unknown): FilterGroup {
   const node = sanitizeNode(value, 0);
   return node?.kind === "group" ? node : emptyGroup();
 }
+
+const CLIPBOARD_TAG = "recon.filter";
+const CLIPBOARD_VERSION = 1;
+
+type PortableNode =
+  | Omit<FilterCondition, "id">
+  | (Omit<FilterGroup, "id" | "children"> & { children: PortableNode[] });
+
+function portable(node: FilterNode): PortableNode {
+  if (node.kind === "condition") {
+    return { kind: "condition", column: node.column, operator: node.operator, value: node.value, enabled: node.enabled };
+  }
+  return { kind: "group", match: node.match, enabled: node.enabled, children: node.children.map(portable) };
+}
+
+/** The text Copy filters puts on the clipboard. Ids are left out so every paste gets its own. */
+export function filterToClipboard(root: FilterGroup): string {
+  const payload = { format: CLIPBOARD_TAG, version: CLIPBOARD_VERSION, filter: portable(dropBlankConditions(root)) };
+  return JSON.stringify(payload, null, 2);
+}
+
+/** Reads a filter copied with `filterToClipboard`, or returns null when the text isn't one. */
+export function filterFromClipboard(text: string): FilterGroup | null {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(text.trim());
+  } catch {
+    return null;
+  }
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  const input = payload as Record<string, unknown>;
+  if (input.format !== CLIPBOARD_TAG || typeof input.version !== "number" || input.version > CLIPBOARD_VERSION) {
+    return null;
+  }
+  const filter = input.filter as Record<string, unknown> | null;
+  if (!filter || filter.kind !== "group") {
+    return null;
+  }
+  return cloneNode(dropBlankConditions(sanitizeFilter(filter)));
+}
+
+/** Children that can sit directly in an AND group without changing what `group` matches. */
+function andParts(group: FilterGroup): FilterNode[] {
+  return group.enabled && (group.match === "all" || group.children.length < 2) ? group.children : [group];
+}
+
+/** Combines two filters so rows must match both, keeping an OR filter intact by nesting it. */
+export function mergeFilters(base: FilterGroup, added: FilterGroup): FilterGroup {
+  const kept = dropBlankConditions(base);
+  if (!kept.children.length) {
+    return { ...added, id: kept.id };
+  }
+  return { ...kept, match: "all", enabled: true, children: [...andParts(kept), ...andParts(added)] };
+}

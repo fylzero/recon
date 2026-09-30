@@ -509,7 +509,7 @@ fn compile_condition(
         .columns
         .get(column)
         .copied()
-        .ok_or_else(|| FilterError::new(id, format!("The column “{column}” no longer exists in this table.")))?;
+        .ok_or_else(|| FilterError::new(id, format!("This table has no column named “{column}”.")))?;
     if !allowed(class.kind, op) {
         return Err(FilterError::new(id, format!("“{}” can't be used with {column}.", op.label())));
     }
@@ -938,7 +938,7 @@ mod tests {
         let missing = serde_json::json!({ "kind": "condition", "id": "c1", "column": "id; DROP TABLE x", "op": "isNull" });
         let err = error(Driver::Postgres, &columns, missing);
         assert_eq!(err.id.as_deref(), Some("c1"));
-        assert!(err.message.contains("no longer exists"), "{}", err.message);
+        assert!(err.message.contains("has no column named"), "{}", err.message);
     }
 
     #[test]

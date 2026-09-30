@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
+import { readText as readClipboard, writeText as writeClipboard } from "@tauri-apps/plugin-clipboard-manager";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
 import { useGridFind } from "../composables/useGridFind";
@@ -20,7 +21,10 @@ import {
   appendChild,
   dropBlankConditions,
   emptyGroup,
+  filterFromClipboard,
+  filterToClipboard,
   hasConditions,
+  mergeFilters,
   AUTO_REFRESH_PRESETS,
   MAX_CONDITIONS,
   MAX_TAB_PAGE_SIZE,
@@ -1186,6 +1190,77 @@ function clearFilters() {
   emit("update:view", { filter: emptyGroup(), origin: "user" });
 }
 
+const canPasteFilters = ref(false);
+
+/** The filter on the clipboard, or null when it holds anything else or can't be read. */
+async function clipboardFilter() {
+  try {
+    const pasted = filterFromClipboard(await readClipboard());
+    return pasted && allConditions(pasted).length ? pasted : null;
+  } catch {
+    return null;
+  }
+}
+
+async function checkClipboard() {
+  canPasteFilters.value = Boolean(await clipboardFilter());
+}
+
+function onWindowFocus() {
+  if (props.view.panelOpen) {
+    void checkClipboard();
+  }
+}
+
+watch(
+  () => props.view.panelOpen,
+  (open) => {
+    if (open) {
+      void checkClipboard();
+    }
+  },
+  { immediate: true },
+);
+
+onMounted(() => window.addEventListener("focus", onWindowFocus));
+onBeforeUnmount(() => window.removeEventListener("focus", onWindowFocus));
+
+async function copyFilters() {
+  const count = allConditions(dropBlankConditions(props.view.filter)).length;
+  try {
+    await writeClipboard(filterToClipboard(props.view.filter));
+    canPasteFilters.value = true;
+    showToast(`Copied ${count} ${count === 1 ? "filter" : "filters"}`);
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+}
+
+async function pasteFilters() {
+  const pasted = await clipboardFilter();
+  canPasteFilters.value = Boolean(pasted);
+  if (!pasted) {
+    showToast("The clipboard no longer has filters copied from Recon.", "error");
+    return;
+  }
+  const added = allConditions(pasted);
+  const next = mergeFilters(props.view.filter, pasted);
+  if (allConditions(next).length > MAX_CONDITIONS) {
+    showToast(`Filters can have at most ${MAX_CONDITIONS} conditions.`, "error");
+    return;
+  }
+  emit("update:view", { filter: next, origin: "user" });
+  const missing = new Set(added.filter((node) => columnMap.value && !columnMap.value.has(node.column)).map((node) => node.column));
+  const summary = `Pasted ${added.length} ${added.length === 1 ? "filter" : "filters"}`;
+  if (missing.size) {
+    const names = [...missing].map((name) => `“${name}”`).join(", ");
+    showToast(`${summary}. This table has no ${missing.size === 1 ? "column" : "columns"} ${names}, so those filters aren't applied.`, "error");
+  } else {
+    showToast(summary);
+  }
+  void nextTick(() => panel.value?.reveal(pasted.children[0]?.id ?? next.id));
+}
+
 function suggest(column: string, search: string) {
   const key = `${column}\u0000${search.trim().toLowerCase()}`;
   let request = suggestionCache.get(key);
@@ -1585,6 +1660,10 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
       @collapse="collapsePanel"
       @clear="clearFilters"
       @show-sql="showSql"
+      :can-paste="canPasteFilters"
+      @copy="copyFilters"
+      @paste="pasteFilters"
+      @check-clipboard="checkClipboard"
     />
     <div v-else-if="view.panelOpen && mode === 'data' && loadingStructure" class="filter-panel-loading muted tiny">
       <span class="spinner" aria-hidden="true" /> Loading columns…

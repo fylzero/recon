@@ -7,6 +7,7 @@ import {
   conditions,
   emptyGroup,
   findNode,
+  hasConditions,
   insertAfter,
   MAX_CONDITIONS,
   newCondition,
@@ -34,6 +35,8 @@ const props = defineProps<{
   /** Edits made since the last Apply, when filters don't apply automatically. */
   unapplied: boolean;
   suggest?: (column: string, search: string) => Promise<string[]>;
+  /** The clipboard holds filters copied from Recon. */
+  canPaste: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -42,6 +45,9 @@ const emit = defineEmits<{
   collapse: [];
   clear: [];
   showSql: [];
+  copy: [];
+  paste: [];
+  checkClipboard: [];
 }>();
 
 const MIN_HEIGHT = 76;
@@ -263,7 +269,7 @@ defineExpose({ focus, add, reveal });
       />
       <p v-if="error" class="filter-error-banner" role="alert">{{ error }}</p>
     </div>
-    <footer class="filter-panel-footer">
+    <footer class="filter-panel-footer" @pointerenter="emit('checkClipboard')">
       <button
         class="ghost tiny"
         type="button"
@@ -293,6 +299,36 @@ defineExpose({ focus, add, reveal });
           @click="emit('apply')"
         >
           Apply
+        </button>
+        <button
+          class="ghost tiny filter-clip-button"
+          type="button"
+          :disabled="!hasConditions(root)"
+          title="Copy these filters to the clipboard to paste into another tab or share"
+          @click="emit('copy')"
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" />
+            <path d="M10.5 5.5V4A1.5 1.5 0 0 0 9 2.5H4A1.5 1.5 0 0 0 2.5 4v5A1.5 1.5 0 0 0 4 10.5h1.5" />
+          </svg>
+          Copy
+        </button>
+        <button
+          class="ghost tiny filter-clip-button"
+          type="button"
+          :disabled="!canPaste"
+          :title="
+            canPaste
+              ? 'Paste filters copied from another tab. They\'re added to any filters already here.'
+              : 'Copy filters from a tab first, then paste them here'
+          "
+          @click="emit('paste')"
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M5.5 3H4.5a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1h-1" />
+            <rect x="5.5" y="2" width="5" height="2.5" rx="0.75" />
+          </svg>
+          Paste
         </button>
         <button class="ghost tiny" type="button" title="Show the SQL these filters run" @click="emit('showSql')">
           Show SQL

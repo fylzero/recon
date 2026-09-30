@@ -431,7 +431,7 @@ export function compileFilter(
         node.id,
         options.columnsError
           ? `The table's columns couldn't be loaded: ${options.columnsError}`
-          : `The column “${node.column}” no longer exists in this table.`,
+          : `This table has no column named “${node.column}”.`,
       );
       return null;
     }
