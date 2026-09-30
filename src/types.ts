@@ -176,6 +176,26 @@ export interface SchemaColumn {
   column: string;
 }
 
+export interface DiagramColumn {
+  name: string;
+  dataType: string;
+  primaryKey: boolean;
+}
+
+export interface DiagramTable {
+  name: string;
+  columns: DiagramColumn[];
+}
+
+export interface DiagramForeignKey extends ForeignKey {
+  table: string;
+}
+
+export interface SchemaDiagram {
+  tables: DiagramTable[];
+  foreignKeys: DiagramForeignKey[];
+}
+
 export type SortDirection = "asc" | "desc";
 
 export interface BrowseRequest {

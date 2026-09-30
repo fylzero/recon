@@ -394,6 +394,25 @@ impl Dialect for MysqlDialect {
         )
     }
 
+    fn diagram_columns_sql(&self, namespace: &str) -> String {
+        format!(
+            "SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, CASE WHEN COLUMN_KEY = 'PRI' THEN 1 ELSE 0 END \
+             FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {} \
+             ORDER BY TABLE_NAME, ORDINAL_POSITION",
+            literal(namespace)
+        )
+    }
+
+    fn schema_foreign_keys_sql(&self, namespace: &str) -> String {
+        format!(
+            "SELECT TABLE_NAME, CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_SCHEMA, REFERENCED_TABLE_NAME, \
+             REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE \
+             WHERE TABLE_SCHEMA = {} AND REFERENCED_TABLE_NAME IS NOT NULL \
+             ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION",
+            literal(namespace)
+        )
+    }
+
     fn quote_ident(&self, ident: &str) -> String {
         quote_backtick(ident)
     }

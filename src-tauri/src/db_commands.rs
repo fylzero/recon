@@ -14,7 +14,7 @@ use crate::db::{
     self, dialect, first_text, text_at, BrowseRequest, BrowseResult, CellValue, ColumnDetail,
     ColumnMeta, EditValue, IndexInfo, NamespaceList, Pool, PooledConn, RawOutput, ResultStore, RowInsert,
     RowValues, SaveRequest,
-    SchemaColumn, Session, SessionStore, TableInfo, TableStructure,
+    SchemaColumn, SchemaDiagram, Session, SessionStore, TableInfo, TableStructure,
 };
 use crate::models::{ConnectionEntry, Driver};
 use crate::query_log::{self, QueryOrigin, QueryRecord};
@@ -680,6 +680,25 @@ async fn columns_in(session: Arc<Session>, namespace: &str) -> Result<Vec<Schema
             column: text_at(&row, 1),
         })
         .collect())
+}
+
+#[tauri::command]
+pub async fn schema_diagram(
+    app: AppHandle,
+    connection_id: String,
+    namespace: String,
+) -> Result<SchemaDiagram, String> {
+    let namespace = namespace.as_str();
+    with_session(&app, &connection_id, move |session| diagram_of(session, namespace)).await
+}
+
+async fn diagram_of(session: Arc<Session>, namespace: &str) -> Result<SchemaDiagram, String> {
+    let dialect = dialect(session.driver);
+    let columns_sql = dialect.diagram_columns_sql(namespace);
+    let tables = db::diagram_tables(&pool_run(&session, &columns_sql, usize::MAX, QueryOrigin::Schema).await?);
+    let keys_sql = dialect.schema_foreign_keys_sql(namespace);
+    let foreign_keys = db::schema_foreign_keys(&pool_run(&session, &keys_sql, usize::MAX, QueryOrigin::Schema).await?);
+    Ok(SchemaDiagram { tables, foreign_keys })
 }
 
 #[tauri::command]

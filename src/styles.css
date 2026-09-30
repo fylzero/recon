@@ -833,6 +833,233 @@ button.toast.error:hover:not(:disabled) {
   margin: 0;
 }
 
+.diagram-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.diagram-toolbar {
+  flex-wrap: wrap;
+  row-gap: 0.45rem;
+}
+
+.diagram-toolbar-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+.diagram-summary {
+  white-space: nowrap;
+}
+
+input[type="search"].diagram-search {
+  width: 11rem;
+  height: 1.6rem;
+  padding: 0 0.5rem;
+  font-size: 12px;
+}
+
+.diagram-zoom button {
+  min-width: 2rem;
+  padding: 0.28rem 0.5rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.diagram-viewport {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+  background-color: #0d1016;
+  background-image: radial-gradient(circle, #1f2530 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+.diagram-viewport.panning {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.diagram-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 2rem;
+  text-align: center;
+}
+
+.diagram-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+}
+
+.diagram-edges {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.diagram-edge {
+  fill: none;
+  stroke: #4a5568;
+  stroke-width: 1.5;
+  pointer-events: stroke;
+  transition: opacity 0.12s ease;
+}
+
+.diagram-edge.lit {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.diagram-edge.dim {
+  opacity: 0.2;
+}
+
+.diagram-arrow {
+  fill: #4a5568;
+}
+
+.diagram-arrow.lit {
+  fill: var(--accent);
+}
+
+.diagram-table {
+  position: absolute;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-raised);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 0.3);
+  font-family: var(--font-code);
+  font-size: 11.5px;
+  transition: opacity 0.12s ease, border-color 0.12s ease;
+}
+
+.diagram-table.focus {
+  border-color: var(--accent);
+}
+
+.diagram-table.lit {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 4px 14px rgb(0 0 0 / 0.3);
+}
+
+.diagram-table.match {
+  border-color: var(--warn);
+  box-shadow: 0 0 0 1px var(--warn), 0 4px 14px rgb(0 0 0 / 0.3);
+}
+
+.diagram-table.dim {
+  opacity: 0.35;
+}
+
+.diagram-table-name {
+  flex: 0 0 30px;
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  height: 30px;
+  padding: 0 0.65rem;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: #1f2531;
+  box-shadow: none;
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.diagram-table-name:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.diagram-table.focus .diagram-table-name {
+  background: #183a37;
+}
+
+.diagram-row {
+  flex: 0 0 22px;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  height: 22px;
+  padding: 0 0.55rem 0 0.35rem;
+  white-space: nowrap;
+}
+
+.diagram-key {
+  flex: 0 0 1.4rem;
+  font-size: 9.5px;
+  font-weight: 700;
+  text-align: center;
+  color: transparent;
+}
+
+.diagram-key.pk {
+  color: var(--warn);
+}
+
+.diagram-key.fk {
+  color: var(--filter-blue);
+}
+
+.diagram-key.pk.fk {
+  color: var(--purple);
+}
+
+.diagram-column {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+
+.diagram-type {
+  flex: 1 1 auto;
+  min-width: 2rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: right;
+  color: var(--muted);
+}
+
+.diagram-more {
+  box-sizing: border-box;
+  flex: 0 0 22px;
+  height: 22px;
+  padding: 0 0.65rem;
+  line-height: 22px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
 .history-paused-banner {
   position: sticky;
   top: 0;

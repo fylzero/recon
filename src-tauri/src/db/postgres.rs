@@ -234,6 +234,38 @@ impl Dialect for PostgresDialect {
         )
     }
 
+    fn diagram_columns_sql(&self, namespace: &str) -> String {
+        format!(
+            "SELECT c.relname, a.attname, format_type(a.atttypid, a.atttypmod), \
+             EXISTS (SELECT 1 FROM pg_catalog.pg_index i \
+                     WHERE i.indrelid = a.attrelid AND i.indisprimary AND a.attnum = ANY(i.indkey)) \
+             FROM pg_catalog.pg_attribute a \
+             JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = {} AND c.relkind IN ('r', 'p', 'v', 'm', 'f') \
+             AND a.attnum > 0 AND NOT a.attisdropped \
+             ORDER BY c.relname, a.attnum",
+            quote_literal(namespace)
+        )
+    }
+
+    fn schema_foreign_keys_sql(&self, namespace: &str) -> String {
+        format!(
+            "SELECT c.relname, con.conname, a.attname, rn.nspname, rc.relname, ra.attname \
+             FROM pg_catalog.pg_constraint con \
+             JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             JOIN pg_catalog.pg_class rc ON rc.oid = con.confrelid \
+             JOIN pg_catalog.pg_namespace rn ON rn.oid = rc.relnamespace \
+             CROSS JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY AS k(attnum, refnum, ord) \
+             JOIN pg_catalog.pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum \
+             JOIN pg_catalog.pg_attribute ra ON ra.attrelid = con.confrelid AND ra.attnum = k.refnum \
+             WHERE con.contype = 'f' AND n.nspname = {} \
+             ORDER BY c.relname, con.conname, k.ord",
+            quote_literal(namespace)
+        )
+    }
+
     fn quote_ident(&self, ident: &str) -> String {
         quote_double(ident)
     }

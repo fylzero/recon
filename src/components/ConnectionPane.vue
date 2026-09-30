@@ -38,6 +38,7 @@ import ImportDialog from "./ImportDialog.vue";
 import Modal from "./Modal.vue";
 import QueryEditor from "./QueryEditor.vue";
 import QueryHistory from "./QueryHistory.vue";
+import SchemaDiagram, { type DiagramScope } from "./SchemaDiagram.vue";
 import RestoreDialog from "./RestoreDialog.vue";
 import SavedQueries from "./SavedQueries.vue";
 import SplitWorkspace from "./SplitWorkspace.vue";
@@ -131,6 +132,8 @@ let tableTyping = false;
 const schema = shallowRef<SQLNamespace>({});
 const tabs = ref<PaneTab[]>([]);
 const view = ref<ConnectionViewTab>("tables");
+const diagramOpened = ref(false);
+const diagramScope = ref<DiagramScope>("schema");
 const workspace = ref<TableWorkspace>(emptyWorkspace());
 const activeQueryTabId = ref("");
 const tabsRestored = ref(false);
@@ -167,6 +170,9 @@ const activeTableTabId = computed({
   },
 });
 const selectedTables = ref(new Set<string>());
+const selectedTableNames = computed(() =>
+  tables.value.map((table) => table.name).filter((name) => selectedTables.value.has(name)),
+);
 const tableMenu = ref<{ x: number; y: number; tables: string[] } | null>(null);
 const tableMenuEl = ref<HTMLElement | null>(null);
 const tabMenu = ref<{ x: number; y: number; tabId: string } | null>(null);
@@ -282,13 +288,13 @@ const tableTitleSuffix = computed(() => {
 
 const queryTabs = computed(() => tabs.value.filter((tab): tab is QueryTab => tab.kind === "query"));
 const viewTabs = computed(() => {
-  if (view.value === "history") {
+  if (view.value === "history" || view.value === "diagram") {
     return [];
   }
   return tabs.value.filter((tab) => (view.value === "sql" ? tab.kind === "query" : tab.kind === "table"));
 });
 const activeTabId = computed(() => {
-  if (view.value === "history") {
+  if (view.value === "history" || view.value === "diagram") {
     return "";
   }
   return view.value === "sql" ? activeQueryTabId.value : activeTableTabId.value;
@@ -1089,7 +1095,7 @@ function openTabMenu(event: MouseEvent, tab: PaneTab) {
   fitMenu(tabMenu, tabMenuEl);
 }
 
-function runTableAction(action: "open" | "openNew" | "openSide" | "query" | "copy" | "export") {
+function runTableAction(action: "open" | "openNew" | "openSide" | "query" | "copy" | "diagram" | "export") {
   const chosen = tableMenu.value?.tables ?? [];
   const table = tables.value.find((item) => item.name === chosen[0]);
   if (action === "openSide" && table) {
@@ -1097,6 +1103,11 @@ function runTableAction(action: "open" | "openNew" | "openSide" | "query" | "cop
     return;
   }
   closeMenus();
+  if (action === "diagram") {
+    diagramScope.value = "selection";
+    selectView("diagram");
+    return;
+  }
   if (!table) {
     return;
   }
@@ -1705,6 +1716,9 @@ function applyTabDrop(tabId: string, target: { paneId: string; afterId?: string;
 
 function selectView(next: ConnectionViewTab) {
   view.value = next;
+  if (next === "diagram") {
+    diagramOpened.value = true;
+  }
   if (next !== "sql" || tabs.value.some((tab) => tab.kind === "query")) {
     return;
   }
@@ -2285,6 +2299,12 @@ function onExecuted(statements: string[]) {
   }
 }
 
+function openFromDiagram(name: string) {
+  const table = tables.value.find((item) => item.name === name) ?? { name, kind: "table" as const };
+  view.value = "tables";
+  openTable(table);
+}
+
 function queryTable(table: TableInfo) {
   const quote = driver.value === "mysql" ? "`" : '"';
   const name = `${quote}${table.name.split(quote).join(quote + quote)}${quote}`;
@@ -2668,7 +2688,17 @@ onUnmounted(() => {
           :connection-id="connectionId"
           :connection-name="entry?.name ?? ''"
         />
-        <section v-show="view !== 'history'" class="db-main">
+        <SchemaDiagram
+          v-if="diagramOpened"
+          v-show="view === 'diagram'"
+          v-model:scope="diagramScope"
+          :connection-id="sessionId"
+          :namespace="namespace"
+          :selected="selectedTableNames"
+          :active="active && view === 'diagram'"
+          @open="openFromDiagram"
+        />
+        <section v-show="view !== 'history' && view !== 'diagram'" class="db-main">
           <div
             v-if="view === 'sql' && (viewTabs.length || showSavedTab)"
             ref="subtabBar"
@@ -2948,6 +2978,9 @@ onUnmounted(() => {
             </button>
             <div class="overflow-menu-divider" role="separator" />
           </template>
+          <button class="overflow-menu-item" type="button" role="menuitem" @click="runTableAction('diagram')">
+            Show diagram
+          </button>
           <button class="overflow-menu-item" type="button" role="menuitem" @click="runTableAction('export')">
             {{ tableMenuExportLabel }}
           </button>

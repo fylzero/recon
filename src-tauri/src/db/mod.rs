@@ -196,6 +196,84 @@ pub fn foreign_keys(output: &RawOutput) -> Vec<ForeignKey> {
     keys
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagramColumn {
+    pub name: String,
+    pub data_type: String,
+    pub primary_key: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagramTable {
+    pub name: String,
+    pub columns: Vec<DiagramColumn>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaForeignKey {
+    pub table: String,
+    #[serde(flatten)]
+    pub key: ForeignKey,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaDiagram {
+    pub tables: Vec<DiagramTable>,
+    pub foreign_keys: Vec<SchemaForeignKey>,
+}
+
+/** Rows arrive ordered by table, then by column position. */
+pub fn diagram_tables(output: &RawOutput) -> Vec<DiagramTable> {
+    let mut tables: Vec<DiagramTable> = Vec::new();
+    for row in &output.rows {
+        let text = texts(row);
+        let (table, column) = (text_at(&text, 0), text_at(&text, 1));
+        let column = DiagramColumn {
+            name: column,
+            data_type: text_at(&text, 2),
+            primary_key: row.get(3).is_some_and(CellValue::is_truthy),
+        };
+        match tables.last_mut() {
+            Some(last) if last.name == table => last.columns.push(column),
+            _ => tables.push(DiagramTable { name: table, columns: vec![column] }),
+        }
+    }
+    tables
+}
+
+/** Like `foreign_keys`, with the owning table as an extra leading column. */
+pub fn schema_foreign_keys(output: &RawOutput) -> Vec<SchemaForeignKey> {
+    let mut keys: Vec<SchemaForeignKey> = Vec::new();
+    for row in output.text_rows() {
+        let (table, name) = (text_at(&row, 0), text_at(&row, 1));
+        let (column, ref_column) = (text_at(&row, 2), text_at(&row, 5));
+        if column.is_empty() || ref_column.is_empty() {
+            continue;
+        }
+        match keys.last_mut() {
+            Some(last) if last.table == table && last.key.name == name => {
+                last.key.columns.push(column);
+                last.key.ref_columns.push(ref_column);
+            }
+            _ => keys.push(SchemaForeignKey {
+                table,
+                key: ForeignKey {
+                    name,
+                    columns: vec![column],
+                    ref_namespace: text_at(&row, 3),
+                    ref_table: text_at(&row, 4),
+                    ref_columns: vec![ref_column],
+                },
+            }),
+        }
+    }
+    keys
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaColumn {
@@ -731,6 +809,10 @@ pub trait Dialect: Sync {
     fn schema_columns_sql(&self, namespace: &str) -> String;
     /// Rows of constraint, column, referenced namespace, table, and column, in key order.
     fn foreign_keys_sql(&self, namespace: &str, table: &str) -> String;
+    /// Rows of table, column, data type, and primary-key flag for every table, in column order.
+    fn diagram_columns_sql(&self, namespace: &str) -> String;
+    /// Rows of `foreign_keys_sql` for every table, each led by the owning table.
+    fn schema_foreign_keys_sql(&self, namespace: &str) -> String;
     fn quote_ident(&self, ident: &str) -> String;
     fn use_namespace_sql(&self, namespace: &str) -> Option<String>;
     fn create_namespace_sql(&self, namespace: &str) -> Option<String>;
@@ -2145,6 +2227,54 @@ mod tests {
         statement.append(filter::compile(&ctx, &follow).unwrap().unwrap());
         let found = pool.run_statement(&statement, 10).await.unwrap();
         assert_eq!(found.rows, vec![vec![CellValue::Text("bob".into())]]);
+    }
+
+    #[tokio::test]
+    async fn reads_sqlite_schema_diagram() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let pool = Pool::Sqlite(pool);
+        for sql in [
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)",
+            "CREATE TABLE slots (day TEXT, hour INT, PRIMARY KEY (day, hour))",
+            "CREATE TABLE posts (id INTEGER PRIMARY KEY, author INT REFERENCES users, \
+             day TEXT, hour INT, FOREIGN KEY (day, hour) REFERENCES slots (day, hour))",
+            "CREATE TABLE comments (id INTEGER PRIMARY KEY, post INT REFERENCES posts(id), \
+             author INT REFERENCES users(id))",
+        ] {
+            pool.run(sql, 0).await.unwrap();
+        }
+        let dialect = dialect(Driver::Sqlite);
+        let tables = diagram_tables(&pool.run(&dialect.diagram_columns_sql("main"), 1000).await.unwrap());
+        let names: Vec<_> = tables.iter().map(|table| table.name.as_str()).collect();
+        assert_eq!(names, vec!["comments", "posts", "slots", "users"]);
+        let slots = &tables[2];
+        assert_eq!(
+            slots.columns.iter().map(|column| (column.name.as_str(), column.primary_key)).collect::<Vec<_>>(),
+            vec![("day", true), ("hour", true)]
+        );
+        assert_eq!(tables[3].columns[1].data_type, "TEXT");
+
+        let mut keys = schema_foreign_keys(&pool.run(&dialect.schema_foreign_keys_sql("main"), 1000).await.unwrap());
+        keys.sort_by(|a, b| (&a.table, &a.key.columns).cmp(&(&b.table, &b.key.columns)));
+        let summary: Vec<_> = keys
+            .iter()
+            .map(|key| {
+                (key.table.as_str(), key.key.columns.join(","), key.key.ref_table.as_str(), key.key.ref_columns.join(","))
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("comments", "author".into(), "users", "id".into()),
+                ("comments", "post".into(), "posts", "id".into()),
+                ("posts", "author".into(), "users", "id".into()),
+                ("posts", "day,hour".into(), "slots", "day,hour".into()),
+            ]
+        );
     }
 
     #[test]

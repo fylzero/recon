@@ -1,5 +1,5 @@
 <script lang="ts">
-export type ConnectionViewTab = "tables" | "sql" | "history";
+export type ConnectionViewTab = "tables" | "sql" | "diagram" | "history";
 </script>
 
 <script setup lang="ts">
@@ -43,6 +43,21 @@ const emit = defineEmits<{
         <path d="M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5" />
       </svg>
       SQL
+    </button>
+    <button
+      class="view-tab"
+      :class="{ active: active === 'diagram' }"
+      type="button"
+      role="tab"
+      :aria-selected="active === 'diagram'"
+      @click="emit('select', 'diagram')"
+    >
+      <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="2.5" y="3.5" width="7" height="6" rx="1" />
+        <rect x="14.5" y="14.5" width="7" height="6" rx="1" />
+        <path d="M9.5 6.5h6.5a2 2 0 0 1 2 2v6" />
+      </svg>
+      Diagram
     </button>
     <button
       class="view-tab"

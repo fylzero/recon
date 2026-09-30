@@ -17,6 +17,9 @@ export const CHANGELOG: ChangelogRelease[] = [
       "The card shown when a connection fails is wider, so its buttons no longer wrap their labels onto two lines.",
       "Tabs for connections in a group now use the group's color, even if the connection had its own color before you dragged it into the group.",
       "A connected tab for a connection in a group shows the connection's saved name as a badge next to the database name when the two differ.",
+      "A new Diagram view shows tables as boxes linked by their foreign keys. It can show the whole schema or just the tables selected in the sidebar along with the tables they link to. To diagram a selection, right-click it and choose Show diagram. By default each box lists only key columns. Drag to pan, pinch or ⌘-scroll to zoom, and click a table's name to open it.",
+      "When the diagram shows a selection, turning off Neighbours leaves only the selected tables.",
+      "Hovering a table in the diagram highlights its foreign keys and the tables they connect, and fades the rest. Find table highlights matching tables, and Enter moves the view to the first match.",
     ],
   },
   {

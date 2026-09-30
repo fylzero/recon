@@ -16,6 +16,7 @@ import type {
   SavedQuery,
   SaveRequest,
   SchemaColumn,
+  SchemaDiagram,
   SessionInfo,
   StatementResult,
   TableInfo,
@@ -207,6 +208,10 @@ export function tableStructure(connectionId: string, namespace: string, table: s
 
 export function schemaColumns(connectionId: string, namespace: string) {
   return invoke<SchemaColumn[]>("schema_columns", { connectionId, namespace });
+}
+
+export function schemaDiagram(connectionId: string, namespace: string) {
+  return invoke<SchemaDiagram>("schema_diagram", { connectionId, namespace });
 }
 
 export function browseTable(connectionId: string, request: BrowseRequest) {

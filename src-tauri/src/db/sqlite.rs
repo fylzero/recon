@@ -229,6 +229,31 @@ impl Dialect for SqliteDialect {
         )
     }
 
+    fn diagram_columns_sql(&self, namespace: &str) -> String {
+        format!(
+            "SELECT m.name, p.name, p.type, p.pk > 0 FROM {}.sqlite_master AS m \
+             JOIN pragma_table_info(m.name, {}) AS p \
+             WHERE m.type IN ('table', 'view') AND m.name NOT LIKE 'sqlite\\_%' ESCAPE '\\' \
+             ORDER BY m.name, p.cid",
+            quote_double(namespace),
+            quote_literal(namespace)
+        )
+    }
+
+    fn schema_foreign_keys_sql(&self, namespace: &str) -> String {
+        let schema = quote_literal(namespace);
+        format!(
+            "SELECT m.name, fk.id, fk.\"from\", {schema}, fk.\"table\", \
+             COALESCE(fk.\"to\", (SELECT p.name FROM pragma_table_info(fk.\"table\", {schema}) AS p \
+                                  WHERE p.pk = fk.seq + 1)) \
+             FROM {}.sqlite_master AS m \
+             JOIN pragma_foreign_key_list(m.name, {schema}) AS fk \
+             WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite\\_%' ESCAPE '\\' \
+             ORDER BY m.name, fk.id, fk.seq",
+            quote_double(namespace)
+        )
+    }
+
     fn quote_ident(&self, ident: &str) -> String {
         quote_double(ident)
     }

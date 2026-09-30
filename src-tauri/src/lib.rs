@@ -91,6 +91,7 @@ pub fn run() {
             db_commands::list_tables,
             db_commands::table_structure,
             db_commands::schema_columns,
+            db_commands::schema_diagram,
             db_commands::browse_table,
             db_commands::count_rows,
             db_commands::cancel_browse,
