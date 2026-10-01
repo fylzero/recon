@@ -21,6 +21,8 @@ export const CHANGELOG: ChangelogRelease[] = [
       "The saved queries list shows just each query's name next to a query icon. Long names wrap, and you can drag the list's edge to resize it.",
       "Check for Updates moved from Settings to the top-right of the Change Log.",
       "Dragging a table tab along its own tab bar moves it, instead of showing a second copy at the drop spot while the original stays put. The tabs no longer jump when you drop it, and starting a drag no longer selects the tab's name.",
+      "Dropping a tab on a pane's left, right, or bottom edge now splits that pane on that side, where the preview showed. Before, the new pane could land somewhere else, such as on the right after dropping below the left pane. Panes side by side in a row or stacked in a column share it evenly, up to 3 across and 2 down. Closing a pane gives its space back to the panes beside it and leaves the rest of the layout alone.",
+      "The edge areas for splitting a pane are larger, and a corner goes to whichever edge you're closer to.",
     ],
   },
   {

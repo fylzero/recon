@@ -7,6 +7,8 @@ export const SPLIT_HANDLE = 6;
 export const THREE_PANE_LEFT = 0.55;
 /** How close to a pane edge a tab drag splits off a new pane. */
 export const DROP_EDGE_ZONE = 28;
+/** Share of a pane's width or height, from each edge, that splits the pane when a tab is dropped there. */
+export const DROP_EDGE_FRACTION = 0.3;
 
 export type SplitAxis = "x" | "y";
 export type SplitDirection = "right" | "down";
@@ -241,6 +243,140 @@ export function splitFocused(
   return next;
 }
 
+function replaceLeaf(node: SplitNode, paneId: string, replacement: SplitNode): SplitNode {
+  if (node.type === "leaf") {
+    return node.paneId === paneId ? replacement : node;
+  }
+  return {
+    ...node,
+    children: [replaceLeaf(node.children[0], paneId, replacement), replaceLeaf(node.children[1], paneId, replacement)],
+  };
+}
+
+/** Panes side by side in one run of same-axis splits, counting a differently split child as one. */
+function runLength(node: SplitNode, axis: SplitAxis): number {
+  return node.type === "split" && node.axis === axis ? runLength(node.children[0], axis) + runLength(node.children[1], axis) : 1;
+}
+
+/** Gives every member of the same-axis run rooted at `node` an equal share. */
+function balanceRun(node: SplitNode, axis: SplitAxis): SplitNode {
+  if (node.type === "leaf" || node.axis !== axis) {
+    return node;
+  }
+  const first = runLength(node.children[0], axis);
+  const second = runLength(node.children[1], axis);
+  return {
+    ...node,
+    sizes: [first / (first + second), second / (first + second)],
+    children: [balanceRun(node.children[0], axis), balanceRun(node.children[1], axis)],
+  };
+}
+
+function runContains(node: SplitNode, axis: SplitAxis, member: SplitNode): boolean {
+  if (node === member) {
+    return true;
+  }
+  return node.type === "split" && node.axis === axis && (runContains(node.children[0], axis, member) || runContains(node.children[1], axis, member));
+}
+
+/** Evens out the run of `axis` splits that `member` sits in, leaving other sizes alone. */
+function balanceAround(node: SplitNode, axis: SplitAxis, member: SplitNode): SplitNode {
+  if (node.type === "leaf") {
+    return node;
+  }
+  if (node.axis === axis && runContains(node, axis, member)) {
+    return balanceRun(node, axis);
+  }
+  return {
+    ...node,
+    children: [balanceAround(node.children[0], axis, member), balanceAround(node.children[1], axis, member)],
+  };
+}
+
+/** The layout without `paneId`, or null if nothing is left. The sibling takes its place and its run is evened out. */
+function removeLeaf(layout: SplitNode, paneId: string): SplitNode | null {
+  let collapsed: { sibling: SplitNode; axis: SplitAxis } | null = null;
+  const remove = (node: SplitNode): SplitNode | null => {
+    if (node.type === "leaf") {
+      return node.paneId === paneId ? null : node;
+    }
+    const first = remove(node.children[0]);
+    const second = remove(node.children[1]);
+    if (!first || !second) {
+      const sibling = first ?? second;
+      if (sibling) {
+        collapsed = { sibling, axis: node.axis };
+      }
+      return sibling;
+    }
+    return { ...node, children: [first, second] };
+  };
+  const next = remove(layout);
+  const done = collapsed as { sibling: SplitNode; axis: SplitAxis } | null;
+  return next && done ? balanceAround(next, done.axis, done.sibling) : next;
+}
+
+/** Panes across, and down, are capped to keep each one usable. */
+export const MAX_PANES_ACROSS = 3;
+export const MAX_PANES_DOWN = 2;
+
+function splitLayout(layout: SplitNode, targetId: string, newId: string, edge: DropEdge): SplitNode {
+  const axis: SplitAxis = edge === "left" || edge === "right" ? "x" : "y";
+  const target: SplitNode = { type: "leaf", paneId: targetId };
+  const added: SplitNode = { type: "leaf", paneId: newId };
+  const children: [SplitNode, SplitNode] = edge === "left" || edge === "up" ? [added, target] : [target, added];
+  return balanceAround(replaceLeaf(layout, targetId, { type: "split", axis, sizes: [0.5, 0.5], children }), axis, added);
+}
+
+/** Whether `targetId` can be split on `edge` within the pane limits and a host of this size. */
+export function checkSplitPaneAt(
+  ws: TableWorkspace,
+  targetId: string,
+  edge: DropEdge,
+  width: number,
+  height: number,
+): { ok: true } | { ok: false; reason: "max" | "span" | "size" } {
+  if (ws.panes.length >= MAX_PANES) {
+    return { ok: false, reason: "max" };
+  }
+  const layout = splitLayout(ws.layout, targetId, "\u0000new", edge);
+  const across = axisSpan(layout, "x");
+  const down = axisSpan(layout, "y");
+  if (across > MAX_PANES_ACROSS || down > MAX_PANES_DOWN) {
+    return { ok: false, reason: "span" };
+  }
+  if (width < across * MIN_PANE_WIDTH + (across - 1) * SPLIT_HANDLE || height < down * MIN_PANE_HEIGHT + (down - 1) * SPLIT_HANDLE) {
+    return { ok: false, reason: "size" };
+  }
+  return { ok: true };
+}
+
+/**
+ * Splits the pane `targetId` and puts `newPane` on its `edge` side. Panes in the
+ * same row or column share it evenly, and every other pane stays where it is.
+ */
+export function splitPaneAt(
+  ws: TableWorkspace,
+  targetId: string,
+  newPane: TablePane,
+  edge: DropEdge,
+): TableWorkspace | { error: "max" | "not-found" } {
+  if (ws.panes.length >= MAX_PANES) {
+    return { error: "max" };
+  }
+  if (!findPane(ws, targetId)) {
+    return { error: "not-found" };
+  }
+  const next = cloneWorkspace(ws);
+  next.panes.push(newPane);
+  next.layout = splitLayout(next.layout, targetId, newPane.id, edge);
+  if (next.panes.length === 2) {
+    next.twoPaneAxis = edge === "left" || edge === "right" ? "x" : "y";
+  }
+  next.focusedPaneId = newPane.id;
+  return next;
+}
+
 export function removePane(ws: TableWorkspace, paneId: string, mergeTabs = true): TableWorkspace {
   if (ws.panes.length <= 1) {
     return ws;
@@ -258,10 +394,12 @@ export function removePane(ws: TableWorkspace, paneId: string, mergeTabs = true)
     }
   }
   next.panes = next.panes.filter((pane) => pane.id !== paneId);
-  next.layout = buildLayout(
-    order.filter((id) => id !== paneId),
-    next.twoPaneAxis,
-  );
+  next.layout =
+    removeLeaf(next.layout, paneId) ??
+    buildLayout(
+      order.filter((id) => id !== paneId),
+      next.twoPaneAxis,
+    );
   next.focusedPaneId =
     neighbor && next.panes.some((pane) => pane.id === neighbor.id) ? neighbor.id : (next.panes[0]?.id ?? "");
   return next;
@@ -480,24 +618,31 @@ export function canSplit(
   return { ok: true };
 }
 
-export function dropEdge(rect: DOMRect, x: number, y: number, zone = DROP_EDGE_ZONE): DropEdge | null {
-  if (x > rect.right - zone) {
-    return "right";
+/**
+ * The allowed edge whose zone the point is deepest in, or null in the middle of the pane.
+ * Distances are scaled by each zone's size, so a corner splits along its diagonal.
+ */
+export function dropEdge(
+  rect: DOMRect,
+  x: number,
+  y: number,
+  edges: DropEdge[] = ["left", "right", "up", "down"],
+): DropEdge | null {
+  const zoneX = Math.max(DROP_EDGE_ZONE, rect.width * DROP_EDGE_FRACTION);
+  const zoneY = Math.max(DROP_EDGE_ZONE, rect.height * DROP_EDGE_FRACTION);
+  const depth: Record<DropEdge, number> = {
+    left: (x - rect.left) / zoneX,
+    right: (rect.right - x) / zoneX,
+    up: (y - rect.top) / zoneY,
+    down: (rect.bottom - y) / zoneY,
+  };
+  let best: DropEdge | null = null;
+  for (const edge of edges) {
+    if (depth[edge] < 1 && (!best || depth[edge] < depth[best])) {
+      best = edge;
+    }
   }
-  if (x < rect.left + zone) {
-    return "left";
-  }
-  if (y > rect.bottom - zone) {
-    return "down";
-  }
-  if (y < rect.top + zone) {
-    return "up";
-  }
-  return null;
-}
-
-export function edgeToDirection(edge: DropEdge): SplitDirection {
-  return edge === "down" || edge === "up" ? "down" : "right";
+  return best;
 }
 
 function restoreLayout(value: unknown, validPanes: Set<string>): SplitNode | null {

@@ -49,15 +49,17 @@ import {
   addTabToPane,
   canSplit,
   defaultSizesFor,
+  checkSplitPaneAt,
   DROP_EDGE_ZONE,
   dropEdge,
-  edgeToDirection,
   emptyPane,
   emptyWorkspace,
   findPane,
   focusedActiveTabId,
   focusPane,
   MAX_PANES,
+  MAX_PANES_ACROSS,
+  MAX_PANES_DOWN,
   mergeAllPanes,
   insertionIndex,
   moveTab,
@@ -68,6 +70,7 @@ import {
   removeTabFromWorkspace,
   restoreWorkspace,
   splitFocused,
+  splitPaneAt,
   tabStripDrop,
   updateSplitSizes,
   type DropEdge,
@@ -1285,12 +1288,34 @@ function selectTab(tab: PaneTab) {
   }
 }
 
-function splitToast(reason: "max" | "size") {
+function splitToast(reason: "max" | "size" | "span") {
   showToast(
     reason === "max"
       ? "The workspace can show 6 tables at once. Close a pane to split again."
-      : "This window is too small to add another table pane.",
+      : reason === "span"
+        ? `Panes can be up to ${MAX_PANES_ACROSS} across and ${MAX_PANES_DOWN} down.`
+        : "This window is too small to add another table pane.",
   );
+}
+
+/** Checks a split against the layout as it will be once `tabId` has left its pane. */
+function checkTabSplit(tabId: string, paneId: string, edge: DropEdge) {
+  const host = splitHost.value;
+  return checkSplitPaneAt(
+    removeTabFromWorkspace(workspace.value, tabId),
+    paneId,
+    edge,
+    host?.clientWidth ?? 0,
+    host?.clientHeight ?? 0,
+  );
+}
+
+function allowedEdge(tabId: string, paneId: string, edge: DropEdge | null) {
+  if (!edge) {
+    return null;
+  }
+  const check = checkTabSplit(tabId, paneId, edge);
+  return check.ok || check.reason !== "span" ? edge : null;
 }
 
 function ensureCanSplit(direction: SplitDirection): boolean {
@@ -1522,8 +1547,8 @@ function paneFromPoint(x: number, y: number): { paneId: string; edge?: DropEdge 
     return null;
   }
   const preview = node.closest<HTMLElement>("[data-drop-edge]");
-  if (preview?.dataset.paneId && preview.dataset.dropEdge) {
-    return { paneId: preview.dataset.paneId, edge: preview.dataset.dropEdge as DropEdge };
+  if (preview?.dataset.paneId) {
+    return { paneId: preview.dataset.paneId };
   }
   const frame = node.closest<HTMLElement>("[data-pane-id]");
   if (frame?.dataset.paneId) {
@@ -1640,7 +1665,7 @@ function paneFrame(paneId: string) {
 function paneOuterRect(frame: HTMLElement): DOMRect {
   const leaf = frame.closest(".split-leaf");
   const split = leaf?.parentElement?.parentElement;
-  if (split?.classList.contains("split-node") && split.querySelector(".split-leaf-preview")) {
+  if (split?.classList.contains("split-node") && split.querySelector(":scope > .split-child > .split-leaf-preview")) {
     return split.getBoundingClientRect();
   }
   return (leaf ?? frame).getBoundingClientRect();
@@ -1666,6 +1691,9 @@ function dropBesidePane(x: number, y: number, tabId: string) {
     }
     const edge: DropEdge = dx > dy ? (x < rect.left ? "left" : "right") : y < rect.top ? "up" : "down";
     const dist = Math.hypot(dx, dy);
+    if (!allowedEdge(tabId, paneId, edge)) {
+      continue;
+    }
     if (!best || dist < best.dist) {
       best = { paneId, edge, dist };
     }
@@ -1702,13 +1730,12 @@ function onTabPointerDown(event: PointerEvent, tabId: string) {
     }
     const { paneId } = hit;
     const frame = paneFrame(paneId);
-    const rect = frame?.getBoundingClientRect();
     let edge = hit.edge ?? null;
-    if (!edge && rect && canSplitPane(tabId, paneId)) {
-      const next = dropEdge(rect, move.clientX, move.clientY);
+    if (!edge && frame && canSplitPane(tabId, paneId)) {
       // The tab strip fills the pane's top edge, so splitting upward means dragging above the pane.
-      edge = next === "up" ? null : next;
+      edge = dropEdge(paneOuterRect(frame), move.clientX, move.clientY, ["left", "right", "down"]);
     }
+    edge = allowedEdge(tabId, paneId, edge);
     if (edge && canSplitPane(tabId, paneId)) {
       dropTarget.value = { paneId, edge };
       return;
@@ -1738,34 +1765,27 @@ function onTabPointerDown(event: PointerEvent, tabId: string) {
 
 function applyTabDrop(tabId: string, target: { paneId: string; afterId?: string; atStart?: boolean; edge?: DropEdge }) {
   if (target.edge) {
-    const direction = edgeToDirection(target.edge);
-    if (!ensureCanSplit(direction)) {
-      return;
-    }
     const source = paneForTab(workspace.value, tabId);
-    if (!source || (source.tabIds.length <= 1 && source.id === target.paneId && workspace.value.panes.length < 2)) {
+    if (!source || (source.tabIds.length <= 1 && source.id === target.paneId)) {
       return;
     }
-    let next = workspace.value;
-    if (source.id !== target.paneId || source.tabIds.length > 1) {
-      next = { ...next, focusedPaneId: target.paneId };
-      next = removeTabFromWorkspace(next, tabId);
-      if (!findPane(next, target.paneId)) {
-        next = focusPane(next, next.focusedPaneId);
-      } else {
-        next = focusPane(next, target.paneId);
-      }
-      const pane = emptyPane([tabId], tabId);
-      const result = splitFocused(next, pane, direction);
-      if ("error" in result) {
-        workspace.value = addTabToPane(workspace.value, workspace.value.focusedPaneId, tabId);
-      } else {
-        workspace.value = result;
-        flashPane(pane.id);
-      }
-      scheduleSaveTableTabs();
-      flashTab(tabId);
+    const check = checkTabSplit(tabId, target.paneId, target.edge);
+    if (!check.ok) {
+      splitToast(check.reason);
+      return;
     }
+    const pane = emptyPane([tabId], tabId);
+    const result = splitPaneAt(removeTabFromWorkspace(workspace.value, tabId), target.paneId, pane, target.edge);
+    if ("error" in result) {
+      if (result.error === "max") {
+        splitToast("max");
+      }
+      return;
+    }
+    workspace.value = result;
+    flashPane(pane.id);
+    scheduleSaveTableTabs();
+    flashTab(tabId);
     return;
   }
   workspace.value = moveTab(workspace.value, tabId, target.paneId, target.afterId, target.atStart);
