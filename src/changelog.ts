@@ -12,6 +12,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       "⌘-scroll zooms the diagram in smaller, smoother steps, so a mouse wheel no longer jumps between zoom levels.",
       "The diagram can't zoom out past 20%.",
       "Right-click a table in the diagram and choose Isolate to show only that table and the tables it links to. While isolated, an Isolated tab appears next to Whole schema and Selection. Click either of those to go back.",
+      "When the diagram shows a selection, the table list stays open beside it, so you can change the selection without leaving the diagram. Clicking a table there only selects it. ⌘-click and ⇧-click work as usual, and double-clicking opens the table.",
       "Saved queries show their name and description as plain text. To change a saved query's name, description, or SQL, right-click it and choose Edit, then click Save or press ⌘S.",
       "A saved query's SQL is highlighted the same way as in a query tab, both when viewing and when editing it.",
       "The saved queries list shows just each query's name next to a query icon. Long names wrap, and you can drag the list's edge to resize it.",

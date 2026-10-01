@@ -136,7 +136,7 @@ const emptyMessage = computed(() => {
     return "This schema has no tables.";
   }
   if (props.scope === "selection" && !props.selected.length) {
-    return "No tables selected. Select tables in the Tables view, or right-click one and choose Show diagram.";
+    return "No tables selected. Pick tables in the list on the left. ⌘-click adds more and ⇧-click selects a range.";
   }
   if (!layout.value?.nodes.length) {
     return "The selected tables aren't in this schema.";
@@ -436,7 +436,7 @@ function revealMatch() {
             role="tab"
             :class="{ active: !isolated && scope === 'selection' }"
             :aria-selected="!isolated && scope === 'selection'"
-            title="The tables selected in the Tables view"
+            title="The tables selected in the table list"
             @click="setScope('selection')"
           >
             Selection

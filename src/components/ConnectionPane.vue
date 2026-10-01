@@ -134,6 +134,9 @@ const tabs = ref<PaneTab[]>([]);
 const view = ref<ConnectionViewTab>("tables");
 const diagramOpened = ref(false);
 const diagramScope = ref<DiagramScope>("schema");
+/** The diagram is drawing the table list's selection, so the list stays beside it for picking tables. */
+const pickingForDiagram = computed(() => view.value === "diagram" && diagramScope.value === "selection");
+const tableListVisible = computed(() => view.value === "tables" || pickingForDiagram.value);
 const workspace = ref<TableWorkspace>(emptyWorkspace());
 const activeQueryTabId = ref("");
 const tabsRestored = ref(false);
@@ -257,6 +260,9 @@ function tableKey(tableNamespace: string, table: string) {
 }
 
 const activeTableKey = computed(() => {
+  if (pickingForDiagram.value) {
+    return "";
+  }
   const tab = tabs.value.find((item) => item.id === activeTableTabId.value);
   return tab?.kind === "table" ? tableKey(tab.namespace, tab.table) : "";
 });
@@ -818,6 +824,10 @@ function onTableDblclick(event: MouseEvent, table: TableInfo) {
   if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
     return;
   }
+  if (pickingForDiagram.value) {
+    openFromDiagram(table.name);
+    return;
+  }
   if (clickCreatedTab === table.name) {
     clickCreatedTab = "";
     return;
@@ -939,7 +949,7 @@ function onTableTypingPointerDown(event: PointerEvent) {
  * grid. While the name is the active target, send typing to Filter tables.
  */
 function onTableTypingKeydown(event: KeyboardEvent) {
-  if (!props.active || !tableTyping || view.value !== "tables") {
+  if (!props.active || !tableTyping || !tableListVisible.value) {
     return;
   }
   if (event.metaKey || event.ctrlKey || event.altKey || event.isComposing) {
@@ -973,7 +983,7 @@ function onTableTypingKeydown(event: KeyboardEvent) {
   }
   input.value = next;
   void nextTick(() => {
-    if (!tableTyping || view.value !== "tables") {
+    if (!tableTyping || !tableListVisible.value) {
       return;
     }
     input.focus({ preventScroll: true });
@@ -982,6 +992,9 @@ function onTableTypingKeydown(event: KeyboardEvent) {
 }
 
 function activeTableName() {
+  if (pickingForDiagram.value) {
+    return null;
+  }
   const tab = tabs.value.find((item) => item.id === activeTableTabId.value);
   return tab?.kind === "table" && tab.namespace === namespace.value ? tab.table : null;
 }
@@ -990,12 +1003,16 @@ function activeTableName() {
  * Finder-style selection: a plain click opens the table and selects only it,
  * Cmd+click toggles a table without opening it, and Shift+click selects the
  * visible range from the last clicked table. Option+click and double-click
- * open another tab on the table.
+ * open another tab on the table. While the diagram is drawing the selection,
+ * a plain click only selects and double-click leaves the diagram to open it.
  */
 function onTableClick(event: MouseEvent, table: TableInfo) {
   if (event.altKey) {
     selectedTables.value = new Set([table.name]);
     selectionAnchor = table.name;
+    if (pickingForDiagram.value) {
+      view.value = "tables";
+    }
     openTable(table, true);
     return;
   }
@@ -1023,6 +1040,10 @@ function onTableClick(event: MouseEvent, table: TableInfo) {
   }
   selectedTables.value = new Set([table.name]);
   selectionAnchor = table.name;
+  if (pickingForDiagram.value) {
+    clickCreatedTab = "";
+    return;
+  }
   const created = openTable(table);
   if (event.detail <= 1) {
     clickCreatedTab = created ? table.name : "";
@@ -2610,7 +2631,7 @@ onUnmounted(() => {
       </div>
       <ConnectionViewTabs :active="view" :table-count="tables.length" @select="selectView" />
       <div class="db-body">
-        <aside v-show="view === 'tables'" ref="sidebarEl" class="db-sidebar" :style="{ width: `${sidebarWidth}px` }">
+        <aside v-show="tableListVisible" ref="sidebarEl" class="db-sidebar" :style="{ width: `${sidebarWidth}px` }">
           <div class="db-filter">
             <input
               ref="tableFilterInput"
@@ -2680,7 +2701,7 @@ onUnmounted(() => {
           </div>
         </aside>
         <div
-          v-show="view === 'tables'"
+          v-show="tableListVisible"
           class="db-sidebar-resize"
           role="separator"
           aria-orientation="vertical"
