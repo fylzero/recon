@@ -3,7 +3,7 @@ export type DiagramScope = "schema" | "selection";
 </script>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import * as api from "../api";
 import type { SchemaDiagram } from "../types";
 import { layoutDiagram, scopeTables, type DiagramEdge, type DiagramNode } from "../diagram/graph";
@@ -22,9 +22,12 @@ const emit = defineEmits<{
 }>();
 
 const PAD = 40;
-const MIN_SCALE = 0.05;
+const MIN_SCALE = 0.2;
 const MAX_SCALE = 2;
 const DRAG_THRESHOLD = 3;
+const ZOOM_SENSITIVITY = 0.01;
+const ZOOM_STEP_MAX = 0.15;
+const ZOOM_EASE = 0.3;
 
 const diagram = ref<SchemaDiagram | null>(null);
 const loading = ref(false);
@@ -41,6 +44,11 @@ let request = 0;
 let needsFit = true;
 let drag: { pointerId: number; startX: number; startY: number; x: number; y: number; moved: boolean } | null = null;
 let dragged = false;
+let pendingZoom = 0;
+let zoomAnchor = { x: 0, y: 0 };
+let zoomFrame = 0;
+
+onBeforeUnmount(() => cancelAnimationFrame(zoomFrame));
 
 async function load() {
   const id = ++request;
@@ -224,10 +232,37 @@ function actualSize() {
   zoomBy(1 / view.value.scale);
 }
 
+function wheelPixels(event: WheelEvent) {
+  if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) {
+    return event.deltaY * 16;
+  }
+  if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+    return event.deltaY * (viewport.value?.clientHeight ?? 800);
+  }
+  return event.deltaY;
+}
+
+function stepZoom() {
+  const step = Math.abs(pendingZoom) < 0.002 ? pendingZoom : pendingZoom * ZOOM_EASE;
+  pendingZoom -= step;
+  zoomAt(Math.exp(step), zoomAnchor.x, zoomAnchor.y);
+  zoomFrame = pendingZoom ? requestAnimationFrame(stepZoom) : 0;
+}
+
+/**
+ * Mouse wheels report ~100px per notch while trackpad pinches report a few px per
+ * event, so each event is capped and the result eased in over a few frames.
+ */
 function onWheel(event: WheelEvent) {
   if (event.ctrlKey || event.metaKey) {
     const rect = viewport.value!.getBoundingClientRect();
-    zoomAt(Math.exp(-event.deltaY * 0.01), event.clientX - rect.left, event.clientY - rect.top);
+    const delta = Math.max(-ZOOM_STEP_MAX, Math.min(ZOOM_STEP_MAX, -wheelPixels(event) * ZOOM_SENSITIVITY));
+    const { scale } = view.value;
+    pendingZoom = Math.max(Math.log(MIN_SCALE / scale), Math.min(Math.log(MAX_SCALE / scale), pendingZoom + delta));
+    zoomAnchor = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    if (!zoomFrame) {
+      zoomFrame = requestAnimationFrame(stepZoom);
+    }
     return;
   }
   view.value = { ...view.value, x: view.value.x - event.deltaX, y: view.value.y - event.deltaY };

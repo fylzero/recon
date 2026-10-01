@@ -6,6 +6,14 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.2.1",
+    date: "September 30, 2026",
+    notes: [
+      "⌘-scroll zooms the diagram in smaller, smoother steps, so a mouse wheel no longer jumps between zoom levels.",
+      "The diagram can't zoom out past 20%.",
+    ],
+  },
+  {
     version: "1.2.0",
     date: "September 30, 2026",
     notes: [
