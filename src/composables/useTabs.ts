@@ -7,7 +7,7 @@ export const CONNECTIONS_TAB_ID = "connections";
 export const SETTINGS_TAB_ID = "settings";
 export const CHANGELOG_TAB_ID = "changelog";
 
-export const SETTINGS_SECTIONS = ["general", "window", "updates", "json"] as const;
+export const SETTINGS_SECTIONS = ["general", "window", "json"] as const;
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 
 type UtilityPanel = "settings" | "changelog";

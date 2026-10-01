@@ -14,6 +14,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       "Saved queries show their name and description as plain text. To change a saved query's name, description, or SQL, right-click it and choose Edit, then click Save or press ⌘S.",
       "A saved query's SQL is highlighted the same way as in a query tab, both when viewing and when editing it.",
       "The saved queries list shows just each query's name next to a query icon. Long names wrap, and you can drag the list's edge to resize it.",
+      "Check for Updates moved from Settings to the top-right of the Change Log.",
     ],
   },
   {
