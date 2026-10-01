@@ -11,12 +11,16 @@ export const CHANGELOG: ChangelogRelease[] = [
     notes: [
       "⌘-scroll zooms the diagram in smaller, smoother steps, so a mouse wheel no longer jumps between zoom levels.",
       "The diagram can't zoom out past 20%.",
-      "Right-click a table in the diagram and choose Isolate to show only that table and the tables it links to. While isolated, an Isolated tab appears next to Whole schema and Selection. Click either of those to go back.",
-      "When the diagram shows a selection, the table list stays open beside it, so you can change the selection without leaving the diagram. Clicking a table there only selects it. ⌘-click and ⇧-click work as usual, and double-clicking opens the table.",
+      "Right-click a table in the diagram and choose Isolate to select that table and the tables it links to, so the diagram shows only them. Choose Show whole schema from the same menu to go back.",
+      "The diagram's Neighbours switch is gone. A selection now shows exactly the selected tables. To bring in a table's links, right-click it in the diagram and choose Add linked tables. Show diagram on a single table in the sidebar shows it with the tables it links to.",
+      "The table list now appears beside the diagram too, so you can change the selection without leaving it. Clicking a table there only selects it, and in Whole schema the diagram also moves to that table. ⌘-click and ⇧-click work as usual, and double-clicking opens the table.",
+      "In the Tables and Diagram views, hide or show the table list with the new button to the left of the view tabs, or with ⌘B. Each view remembers whether the list is open.",
+      "Selected tables are highlighted in the diagram in Whole schema too, not just in Selection.",
       "Saved queries show their name and description as plain text. To change a saved query's name, description, or SQL, right-click it and choose Edit, then click Save or press ⌘S.",
       "A saved query's SQL is highlighted the same way as in a query tab, both when viewing and when editing it.",
       "The saved queries list shows just each query's name next to a query icon. Long names wrap, and you can drag the list's edge to resize it.",
       "Check for Updates moved from Settings to the top-right of the Change Log.",
+      "Dragging a table tab along its own tab bar moves it, instead of showing a second copy at the drop spot while the original stays put. The tabs no longer jump when you drop it, and starting a drag no longer selects the tab's name.",
     ],
   },
   {

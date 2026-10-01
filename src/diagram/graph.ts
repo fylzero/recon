@@ -28,7 +28,6 @@ export interface DiagramNode {
   height: number;
   rows: DiagramRow[];
   hidden: number;
-  focus: boolean;
 }
 
 export interface DiagramEdge {
@@ -121,7 +120,7 @@ export function layoutDiagram(
   diagram: SchemaDiagram,
   namespace: string,
   tables: Set<string>,
-  options: { keysOnly: boolean; focus?: Set<string> },
+  options: { keysOnly: boolean },
 ): DiagramLayout {
   const keys = diagram.foreignKeys.filter((key) => tables.has(key.table));
   const fkColumns = new Map<string, Map<string, string>>();
@@ -167,7 +166,6 @@ export function layoutDiagram(
       height: HEADER_HEIGHT + rows.length * ROW_HEIGHT + (hidden ? FOOTER_HEIGHT : 0) + BORDER * 2,
       rows,
       hidden,
-      focus: Boolean(options.focus?.has(table.name)),
     });
   }
 

@@ -2690,6 +2690,18 @@ button.link-button:hover:not(:disabled) {
   padding: 0 0.5rem;
 }
 
+.connection-view-tablist {
+  display: flex;
+  align-items: stretch;
+}
+
+.view-tab.view-tab-toggle,
+button.view-tab.view-tab-toggle:hover:not(:disabled),
+button.view-tab.view-tab-toggle:active {
+  padding: 0 0.5rem;
+  margin-right: 0.25rem;
+}
+
 .view-tab,
 button.view-tab:hover:not(:disabled),
 button.view-tab:active {
@@ -2947,6 +2959,7 @@ button.view-tab.active:hover:not(:disabled) {
   color: var(--muted);
   font-size: 12.5px;
   cursor: pointer;
+  -webkit-user-select: none;
   user-select: none;
 }
 
@@ -2999,7 +3012,8 @@ button.view-tab.active:hover:not(:disabled) {
 }
 
 .subtab:hover .subtab-close,
-.subtab.active .subtab-close {
+.subtab.active .subtab-close,
+.subtab.drop-preview .subtab-close {
   opacity: 1;
 }
 
@@ -3067,6 +3081,8 @@ button.view-tab.active:hover:not(:disabled) {
   color: var(--text);
   font: inherit;
   line-height: 1;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .subtab input.subtab-rename:focus {

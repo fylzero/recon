@@ -141,11 +141,12 @@ watch(
         />
         <span v-else class="subtab-title">{{ tab.title }}</span>
         <button
-          v-if="!tab.preview"
           class="subtab-close"
           type="button"
           :aria-label="`Close ${tab.title}`"
-          @click.stop="emit('close', tab.id)"
+          :aria-hidden="tab.preview || undefined"
+          :tabindex="tab.preview ? -1 : undefined"
+          @click.stop="!tab.preview && emit('close', tab.id)"
           @dblclick.stop
           @pointerdown.stop
         >

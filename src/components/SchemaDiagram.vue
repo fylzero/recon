@@ -18,6 +18,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   open: [table: string];
+  select: [tables: string[]];
   "update:scope": [scope: DiagramScope];
 }>();
 
@@ -33,10 +34,8 @@ const diagram = ref<SchemaDiagram | null>(null);
 const loading = ref(false);
 const error = ref("");
 const keysOnly = ref(true);
-const neighbours = ref(true);
 const search = ref("");
 const hovered = ref<string | null>(null);
-const isolated = ref<{ root: string; tables: Set<string> } | null>(null);
 const menu = ref<{ x: number; y: number; table: string } | null>(null);
 const menuEl = ref<HTMLElement | null>(null);
 const view = ref({ x: 0, y: 0, scale: 1 });
@@ -44,6 +43,7 @@ const viewport = ref<HTMLDivElement | null>(null);
 const panning = ref(false);
 const markerId = `diagram-arrow-${Math.random().toString(36).slice(2, 8)}`;
 let request = 0;
+let pendingIsolate = "";
 let needsFit = true;
 let drag: { pointerId: number; startX: number; startY: number; x: number; y: number; moved: boolean } | null = null;
 let dragged = false;
@@ -65,6 +65,9 @@ async function load() {
     if (id === request) {
       diagram.value = result;
       needsFit = true;
+      if (pendingIsolate) {
+        isolate(pendingIsolate);
+      }
     }
   } catch (err) {
     if (id === request) {
@@ -82,7 +85,7 @@ watch(
   () => [props.connectionId, props.namespace] as const,
   () => {
     diagram.value = null;
-    isolated.value = null;
+    pendingIsolate = "";
     if (props.namespace) {
       void load();
     }
@@ -90,38 +93,22 @@ watch(
   { immediate: true },
 );
 
-watch(
-  () => [props.scope, props.selected.join("\n"), neighbours.value] as const,
-  () => {
-    isolated.value = null;
-  },
-);
-
-const focus = computed(() => {
-  if (isolated.value) {
-    return new Set([isolated.value.root]);
-  }
-  return new Set(props.scope === "selection" ? props.selected : []);
-});
+const focus = computed(() => new Set(props.selected));
 
 const scoped = computed(() => {
   const current = diagram.value;
   if (!current) {
     return new Set<string>();
   }
-  if (isolated.value) {
-    const known = new Set(current.tables.map((table) => table.name));
-    return new Set([...isolated.value.tables].filter((name) => known.has(name)));
-  }
   if (props.scope === "schema") {
     return new Set(current.tables.map((table) => table.name));
   }
-  return scopeTables(current, props.namespace, props.selected, neighbours.value);
+  return scopeTables(current, props.namespace, props.selected, false);
 });
 
 const layout = computed(() =>
   diagram.value
-    ? layoutDiagram(diagram.value, props.namespace, scoped.value, { keysOnly: keysOnly.value, focus: focus.value })
+    ? layoutDiagram(diagram.value, props.namespace, scoped.value, { keysOnly: keysOnly.value })
     : null,
 );
 
@@ -136,7 +123,7 @@ const emptyMessage = computed(() => {
     return "This schema has no tables.";
   }
   if (props.scope === "selection" && !props.selected.length) {
-    return "No tables selected. Pick tables in the list on the left. ⌘-click adds more and ⇧-click selects a range.";
+    return "No tables selected. Pick tables in the table list (⌘B shows or hides it). ⌘-click adds more and ⇧-click selects a range.";
   }
   if (!layout.value?.nodes.length) {
     return "The selected tables aren't in this schema.";
@@ -182,7 +169,7 @@ function matches(node: DiagramNode) {
 function nodeClass(node: DiagramNode) {
   const lit = related.value.has(node.name);
   return {
-    focus: node.focus,
+    focus: focus.value.has(node.name),
     lit,
     match: matches(node),
     dim: highlighted.value ? !lit : Boolean(needle.value) && !matches(node),
@@ -384,15 +371,31 @@ function openMenu(event: MouseEvent, table: string) {
     };
   });
 }
-function isolate(table: string) {
-  isolated.value = { root: table, tables: relatedTo(table) };
-  hovered.value = null;
+
+function linkedTables(table: string) {
+  const linked = diagram.value ? scopeTables(diagram.value, props.namespace, [table], true) : new Set<string>();
+  linked.delete(table);
+  return [...linked];
 }
 
-function setScope(scope: DiagramScope) {
-  isolated.value = null;
-  emit("update:scope", scope);
+/** Waits for the schema to load if needed, since the linked tables come from its foreign keys. */
+function isolate(table: string) {
+  if (!diagram.value) {
+    pendingIsolate = table;
+    return;
+  }
+  pendingIsolate = "";
+  hovered.value = null;
+  emit("select", [table, ...linkedTables(table)]);
+  emit("update:scope", "selection");
 }
+
+function addLinked(table: string) {
+  const added = linkedTables(table).filter((name) => !props.selected.includes(name));
+  emit("select", [...props.selected, ...added]);
+}
+
+defineExpose({ isolate, reveal });
 
 function fromMenu(action: (table: string) => unknown) {
   const table = menu.value?.table;
@@ -403,8 +406,15 @@ function fromMenu(action: (table: string) => unknown) {
 }
 
 function revealMatch() {
+  centerOn(layout.value?.nodes.find(matches));
+}
+
+function reveal(table: string) {
+  centerOn(layout.value?.nodes.find((node) => node.name === table));
+}
+
+function centerOn(node: DiagramNode | undefined) {
   const el = viewport.value;
-  const node = layout.value?.nodes.find(matches);
   if (!el || !node) {
     return;
   }
@@ -425,49 +435,24 @@ function revealMatch() {
           <button
             type="button"
             role="tab"
-            :class="{ active: !isolated && scope === 'schema' }"
-            :aria-selected="!isolated && scope === 'schema'"
-            @click="setScope('schema')"
+            :class="{ active: scope === 'schema' }"
+            :aria-selected="scope === 'schema'"
+            @click="emit('update:scope', 'schema')"
           >
             Whole schema
           </button>
           <button
             type="button"
             role="tab"
-            :class="{ active: !isolated && scope === 'selection' }"
-            :aria-selected="!isolated && scope === 'selection'"
+            :class="{ active: scope === 'selection' }"
+            :aria-selected="scope === 'selection'"
             title="The tables selected in the table list"
-            @click="setScope('selection')"
+            @click="emit('update:scope', 'selection')"
           >
             Selection
             <span v-if="selected.length" class="file-count-badge group-count">{{ selected.length }}</span>
           </button>
-          <button
-            v-if="isolated"
-            type="button"
-            role="tab"
-            class="active"
-            aria-selected="true"
-            :title="`${isolated.root} and the tables it's linked to by foreign keys`"
-          >
-            Isolated: {{ isolated.root }}
-          </button>
         </div>
-        <button
-          v-if="scope === 'selection' && !isolated"
-          class="history-switch"
-          :class="{ on: neighbours }"
-          type="button"
-          role="switch"
-          :aria-checked="neighbours"
-          title="Also show the tables the selection references or is referenced by"
-          @click="neighbours = !neighbours"
-        >
-          <span class="history-switch-track" aria-hidden="true">
-            <span class="history-switch-knob" />
-          </span>
-          Neighbours
-        </button>
         <button
           class="history-switch"
           :class="{ on: keysOnly }"
@@ -614,18 +599,34 @@ function revealMatch() {
           class="overflow-menu-item"
           type="button"
           role="menuitem"
-          title="Show only this table and the tables it's linked to by foreign keys"
+          title="Select this table and the tables it's linked to by foreign keys"
           @click="fromMenu(isolate)"
         >
           Isolate
         </button>
+        <button
+          v-if="scope === 'selection'"
+          class="overflow-menu-item"
+          type="button"
+          role="menuitem"
+          title="Add the tables this one is linked to by foreign keys to the selection"
+          :disabled="linkedTables(menu.table).every((name) => selected.includes(name))"
+          @click="fromMenu(addLinked)"
+        >
+          Add linked tables
+        </button>
         <button class="overflow-menu-item" type="button" role="menuitem" @click="fromMenu((table) => emit('open', table))">
           Open table
         </button>
-        <template v-if="isolated">
+        <template v-if="scope === 'selection'">
           <div class="overflow-menu-divider" role="separator" />
-          <button class="overflow-menu-item" type="button" role="menuitem" @click="fromMenu(() => (isolated = null))">
-            Show all
+          <button
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            @click="fromMenu(() => emit('update:scope', 'schema'))"
+          >
+            Show whole schema
           </button>
         </template>
       </div>

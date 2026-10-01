@@ -134,9 +134,33 @@ const tabs = ref<PaneTab[]>([]);
 const view = ref<ConnectionViewTab>("tables");
 const diagramOpened = ref(false);
 const diagramScope = ref<DiagramScope>("schema");
-/** The diagram is drawing the table list's selection, so the list stays beside it for picking tables. */
-const pickingForDiagram = computed(() => view.value === "diagram" && diagramScope.value === "selection");
-const tableListVisible = computed(() => view.value === "tables" || pickingForDiagram.value);
+type TableListView = "tables" | "diagram";
+const TABLE_LIST_KEY = "recon.tableListOpen";
+/** The table list beside the diagram picks tables for it rather than opening them. */
+const listForDiagram = computed(() => view.value === "diagram");
+const tableListOpen = ref<Record<TableListView, boolean>>(loadTableListOpen());
+const tableListView = computed<TableListView | null>(() =>
+  view.value === "tables" || view.value === "diagram" ? view.value : null,
+);
+const tableListVisible = computed(() => (tableListView.value ? tableListOpen.value[tableListView.value] : false));
+
+function loadTableListOpen(): Record<TableListView, boolean> {
+  try {
+    const saved = JSON.parse(localStorage.getItem(TABLE_LIST_KEY) ?? "{}") ?? {};
+    return { tables: saved.tables !== false, diagram: saved.diagram !== false };
+  } catch {
+    return { tables: true, diagram: true };
+  }
+}
+
+function toggleTableList() {
+  const current = tableListView.value;
+  if (!current) {
+    return;
+  }
+  tableListOpen.value = { ...tableListOpen.value, [current]: !tableListOpen.value[current] };
+  localStorage.setItem(TABLE_LIST_KEY, JSON.stringify(tableListOpen.value));
+}
 const workspace = ref<TableWorkspace>(emptyWorkspace());
 const activeQueryTabId = ref("");
 const tabsRestored = ref(false);
@@ -161,6 +185,7 @@ const nameError = ref("");
 const nameBusy = ref(false);
 const nameInput = ref<HTMLInputElement | null>(null);
 const sidebarEl = ref<HTMLElement | null>(null);
+const diagramEl = ref<InstanceType<typeof SchemaDiagram> | null>(null);
 const subtabBar = ref<HTMLElement | null>(null);
 
 const activeTableTabId = computed({
@@ -260,7 +285,7 @@ function tableKey(tableNamespace: string, table: string) {
 }
 
 const activeTableKey = computed(() => {
-  if (pickingForDiagram.value) {
+  if (listForDiagram.value) {
     return "";
   }
   const tab = tabs.value.find((item) => item.id === activeTableTabId.value);
@@ -824,7 +849,7 @@ function onTableDblclick(event: MouseEvent, table: TableInfo) {
   if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
     return;
   }
-  if (pickingForDiagram.value) {
+  if (listForDiagram.value) {
     openFromDiagram(table.name);
     return;
   }
@@ -992,7 +1017,7 @@ function onTableTypingKeydown(event: KeyboardEvent) {
 }
 
 function activeTableName() {
-  if (pickingForDiagram.value) {
+  if (listForDiagram.value) {
     return null;
   }
   const tab = tabs.value.find((item) => item.id === activeTableTabId.value);
@@ -1003,14 +1028,15 @@ function activeTableName() {
  * Finder-style selection: a plain click opens the table and selects only it,
  * Cmd+click toggles a table without opening it, and Shift+click selects the
  * visible range from the last clicked table. Option+click and double-click
- * open another tab on the table. While the diagram is drawing the selection,
- * a plain click only selects and double-click leaves the diagram to open it.
+ * open another tab on the table. Beside the diagram, a plain click only
+ * selects (and centers the table when the whole schema is showing), and
+ * double-click leaves the diagram to open it.
  */
 function onTableClick(event: MouseEvent, table: TableInfo) {
   if (event.altKey) {
     selectedTables.value = new Set([table.name]);
     selectionAnchor = table.name;
-    if (pickingForDiagram.value) {
+    if (listForDiagram.value) {
       view.value = "tables";
     }
     openTable(table, true);
@@ -1040,8 +1066,11 @@ function onTableClick(event: MouseEvent, table: TableInfo) {
   }
   selectedTables.value = new Set([table.name]);
   selectionAnchor = table.name;
-  if (pickingForDiagram.value) {
+  if (listForDiagram.value) {
     clickCreatedTab = "";
+    if (diagramScope.value === "schema") {
+      diagramEl.value?.reveal(table.name);
+    }
     return;
   }
   const created = openTable(table);
@@ -1128,6 +1157,9 @@ function runTableAction(action: "open" | "openNew" | "openSide" | "query" | "cop
   if (action === "diagram") {
     diagramScope.value = "selection";
     selectView("diagram");
+    if (chosen.length === 1) {
+      void nextTick(() => diagramEl.value?.isolate(chosen[0]));
+    }
     return;
   }
   if (!table) {
@@ -1413,12 +1445,16 @@ function paneTabInfos(paneId: string): PaneTabInfo[] {
     return infos;
   }
   const ghost: PaneTabInfo = { ...tabInfo(preview, true), id: `${preview.id}:preview` };
+  const original = infos.findIndex((item) => item.id === preview.id);
+  if (original >= 0) {
+    infos.splice(original, 1);
+  }
   if (place.atStart) {
     infos.unshift(ghost);
   } else if (place.afterId) {
     const after = infos.findIndex((item) => item.id === place.afterId);
     infos.splice(after >= 0 ? after + 1 : infos.length, 0, ghost);
-  } else if (!infos.some((item) => item.id === preview.id)) {
+  } else {
     infos.push(ghost);
   }
   return infos;
@@ -1859,13 +1895,16 @@ function discardAll() {
 }
 
 function onWindowKeydown(event: KeyboardEvent) {
-  if (
-    !props.active ||
-    !(event.metaKey || event.ctrlKey) ||
-    event.altKey ||
-    event.shiftKey ||
-    event.key.toLowerCase() !== "s"
-  ) {
+  if (!props.active || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) {
+    return;
+  }
+  const key = event.key.toLowerCase();
+  if (key === "b" && tableListView.value && !document.querySelector(".modal-layer")) {
+    event.preventDefault();
+    toggleTableList();
+    return;
+  }
+  if (key !== "s") {
     return;
   }
   event.preventDefault();
@@ -2325,6 +2364,11 @@ function onExecuted(statements: string[]) {
   }
 }
 
+function selectFromDiagram(names: string[]) {
+  selectedTables.value = new Set(names);
+  selectionAnchor = names[0] ?? "";
+}
+
 function openFromDiagram(name: string) {
   const table = tables.value.find((item) => item.name === name) ?? { name, kind: "table" as const };
   view.value = "tables";
@@ -2629,7 +2673,13 @@ onUnmounted(() => {
           {{ reconnecting ? "Reconnecting…" : "Reconnect" }}
         </button>
       </div>
-      <ConnectionViewTabs :active="view" :table-count="tables.length" @select="selectView" />
+      <ConnectionViewTabs
+        :active="view"
+        :table-count="tables.length"
+        :list-open="tableListView ? tableListVisible : null"
+        @select="selectView"
+        @toggle-list="toggleTableList"
+      />
       <div class="db-body">
         <aside v-show="tableListVisible" ref="sidebarEl" class="db-sidebar" :style="{ width: `${sidebarWidth}px` }">
           <div class="db-filter">
@@ -2716,6 +2766,7 @@ onUnmounted(() => {
         />
         <SchemaDiagram
           v-if="diagramOpened"
+          ref="diagramEl"
           v-show="view === 'diagram'"
           v-model:scope="diagramScope"
           :connection-id="sessionId"
@@ -2723,6 +2774,7 @@ onUnmounted(() => {
           :selected="selectedTableNames"
           :active="active && view === 'diagram'"
           @open="openFromDiagram"
+          @select="selectFromDiagram"
         />
         <section v-show="view !== 'history' && view !== 'diagram'" class="db-main">
           <div
