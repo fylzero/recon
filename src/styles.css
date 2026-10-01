@@ -3079,17 +3079,17 @@ button.view-tab.active:hover:not(:disabled) {
 .saved-queries-list {
   display: flex;
   flex-direction: column;
-  flex: 0 0 17rem;
+  flex: 0 0 auto;
+  min-width: 0;
   min-height: 0;
   padding-top: 0.5rem;
-  border-right: 1px solid var(--border);
   background: var(--bg-sidebar);
 }
 
 .saved-query-item {
   display: flex;
-  flex-direction: column;
-  gap: 0.1rem;
+  align-items: flex-start;
+  gap: 0.45rem;
   width: 100%;
   padding: 0.4rem 0.55rem;
   border: 0;
@@ -3110,16 +3110,14 @@ button.view-tab.active:hover:not(:disabled) {
   background: var(--bg-active);
 }
 
-.saved-query-item-name,
-.saved-query-item-preview {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.saved-query-item .subtab-icon {
+  margin-top: 0.2em;
+  color: var(--accent);
 }
 
-.saved-query-item-preview {
-  font-size: 11.5px;
+.saved-query-item-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .saved-query-detail {
@@ -3140,8 +3138,21 @@ button.view-tab.active:hover:not(:disabled) {
   padding: 0.85rem 1rem 1rem;
 }
 
+.saved-query-edit {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .saved-query-description {
   min-height: 4.5rem;
+}
+
+.saved-query-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .saved-query-sql-label {
@@ -3152,17 +3163,14 @@ button.view-tab.active:hover:not(:disabled) {
 .saved-query-sql {
   flex: 1;
   min-height: 0;
-  margin: 0;
-  overflow: auto;
-  padding: 0.55rem 0.7rem;
+  overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: #0d1016;
-  font-family: var(--editor-font-family);
-  font-size: var(--editor-font-size);
-  line-height: 1.55;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+}
+
+.saved-query-sql.editing:focus-within {
+  border-color: var(--accent);
 }
 
 .save-query-form {

@@ -182,6 +182,7 @@ const renameValue = ref("");
 const modifiedQueries = ref(new Set<string>());
 const selectedSavedId = ref("");
 const saveDialog = ref<{ tabId: string } | null>(null);
+const savedQueriesEl = ref<InstanceType<typeof SavedQueries> | null>(null);
 const saveName = ref("");
 const saveDescription = ref("");
 const saveBusy = ref(false);
@@ -1851,6 +1852,10 @@ function onWindowKeydown(event: KeyboardEvent) {
     void submitSaveDialog();
     return;
   }
+  if (view.value === "sql" && activeQueryTabId.value === SAVED_TAB_ID && savedQueriesEl.value?.isEditing) {
+    void savedQueriesEl.value.saveEdits();
+    return;
+  }
   const tab = tabs.value.find((item) => item.id === activeQueryTabId.value);
   if (view.value === "sql" && tab?.kind === "query") {
     void saveQueryTab(tab);
@@ -2810,10 +2815,13 @@ onUnmounted(() => {
           </div>
           <SavedQueries
             v-if="connectionSaved.length"
+            ref="savedQueriesEl"
             v-show="showSavedTab && activeTabId === SAVED_TAB_ID"
             v-model:selected-id="selectedSavedId"
             :queries="connectionSaved"
             :open-ids="openSavedIds"
+            :driver="driver"
+            :schema="schema"
             @open="openSavedQuery($event)"
             @run="openSavedQuery($event, true)"
           />
