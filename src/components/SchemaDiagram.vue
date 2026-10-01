@@ -36,6 +36,9 @@ const keysOnly = ref(true);
 const neighbours = ref(true);
 const search = ref("");
 const hovered = ref<string | null>(null);
+const isolated = ref<{ root: string; tables: Set<string> } | null>(null);
+const menu = ref<{ x: number; y: number; table: string } | null>(null);
+const menuEl = ref<HTMLElement | null>(null);
 const view = ref({ x: 0, y: 0, scale: 1 });
 const viewport = ref<HTMLDivElement | null>(null);
 const panning = ref(false);
@@ -48,7 +51,10 @@ let pendingZoom = 0;
 let zoomAnchor = { x: 0, y: 0 };
 let zoomFrame = 0;
 
-onBeforeUnmount(() => cancelAnimationFrame(zoomFrame));
+onBeforeUnmount(() => {
+  cancelAnimationFrame(zoomFrame);
+  closeMenu();
+});
 
 async function load() {
   const id = ++request;
@@ -76,6 +82,7 @@ watch(
   () => [props.connectionId, props.namespace] as const,
   () => {
     diagram.value = null;
+    isolated.value = null;
     if (props.namespace) {
       void load();
     }
@@ -83,12 +90,28 @@ watch(
   { immediate: true },
 );
 
-const focus = computed(() => new Set(props.scope === "selection" ? props.selected : []));
+watch(
+  () => [props.scope, props.selected.join("\n"), neighbours.value] as const,
+  () => {
+    isolated.value = null;
+  },
+);
+
+const focus = computed(() => {
+  if (isolated.value) {
+    return new Set([isolated.value.root]);
+  }
+  return new Set(props.scope === "selection" ? props.selected : []);
+});
 
 const scoped = computed(() => {
   const current = diagram.value;
   if (!current) {
     return new Set<string>();
+  }
+  if (isolated.value) {
+    const known = new Set(current.tables.map((table) => table.name));
+    return new Set([...isolated.value.tables].filter((name) => known.has(name)));
   }
   if (props.scope === "schema") {
     return new Set(current.tables.map((table) => table.name));
@@ -134,14 +157,11 @@ const summary = computed(() => {
   return `${tables} · ${links}`;
 });
 
-const related = computed(() => {
-  const name = hovered.value;
-  const set = new Set<string>();
-  if (!name || !layout.value) {
-    return set;
-  }
-  set.add(name);
-  for (const edge of layout.value.edges) {
+const highlighted = computed(() => menu.value?.table ?? hovered.value);
+
+function relatedTo(name: string) {
+  const set = new Set([name]);
+  for (const edge of layout.value?.edges ?? []) {
     if (edge.from === name) {
       set.add(edge.to);
     } else if (edge.to === name) {
@@ -149,7 +169,9 @@ const related = computed(() => {
     }
   }
   return set;
-});
+}
+
+const related = computed(() => (highlighted.value ? relatedTo(highlighted.value) : new Set<string>()));
 
 const needle = computed(() => search.value.trim().toLowerCase());
 
@@ -163,12 +185,12 @@ function nodeClass(node: DiagramNode) {
     focus: node.focus,
     lit,
     match: matches(node),
-    dim: hovered.value ? !lit : Boolean(needle.value) && !matches(node),
+    dim: highlighted.value ? !lit : Boolean(needle.value) && !matches(node),
   };
 }
 
 function edgeLit(edge: DiagramEdge) {
-  return hovered.value !== null && (edge.from === hovered.value || edge.to === hovered.value);
+  return highlighted.value !== null && (edge.from === highlighted.value || edge.to === highlighted.value);
 }
 
 function clampScale(scale: number) {
@@ -319,6 +341,67 @@ function openTable(name: string) {
   }
 }
 
+function onMenuKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") {
+    event.stopImmediatePropagation();
+    event.preventDefault();
+    closeMenu();
+  }
+}
+
+function onMenuPointerDown(event: PointerEvent) {
+  if (!(event.target instanceof Node && menuEl.value?.contains(event.target))) {
+    closeMenu();
+  }
+}
+
+function closeMenu() {
+  menu.value = null;
+  document.removeEventListener("keydown", onMenuKeydown, true);
+  document.removeEventListener("pointerdown", onMenuPointerDown, true);
+  window.removeEventListener("blur", closeMenu);
+  window.removeEventListener("resize", closeMenu);
+}
+
+function openMenu(event: MouseEvent, table: string) {
+  event.preventDefault();
+  closeMenu();
+  menu.value = { x: event.clientX, y: event.clientY, table };
+  document.addEventListener("keydown", onMenuKeydown, true);
+  document.addEventListener("pointerdown", onMenuPointerDown, true);
+  window.addEventListener("blur", closeMenu);
+  window.addEventListener("resize", closeMenu);
+  void nextTick(() => {
+    const current = menu.value;
+    if (!menuEl.value || !current) {
+      return;
+    }
+    const rect = menuEl.value.getBoundingClientRect();
+    menu.value = {
+      ...current,
+      x: Math.max(4, Math.min(current.x, window.innerWidth - rect.width - 4)),
+      y: Math.max(4, Math.min(current.y, window.innerHeight - rect.height - 4)),
+    };
+  });
+}
+function isolate(table: string) {
+  isolated.value = { root: table, tables: relatedTo(table) };
+  hovered.value = null;
+}
+
+function setScope(scope: DiagramScope) {
+  isolated.value = null;
+  emit("update:scope", scope);
+}
+
+function fromMenu(action: (table: string) => unknown) {
+  const table = menu.value?.table;
+  closeMenu();
+  if (table) {
+    action(table);
+  }
+}
+
 function revealMatch() {
   const el = viewport.value;
   const node = layout.value?.nodes.find(matches);
@@ -342,26 +425,36 @@ function revealMatch() {
           <button
             type="button"
             role="tab"
-            :class="{ active: scope === 'schema' }"
-            :aria-selected="scope === 'schema'"
-            @click="emit('update:scope', 'schema')"
+            :class="{ active: !isolated && scope === 'schema' }"
+            :aria-selected="!isolated && scope === 'schema'"
+            @click="setScope('schema')"
           >
             Whole schema
           </button>
           <button
             type="button"
             role="tab"
-            :class="{ active: scope === 'selection' }"
-            :aria-selected="scope === 'selection'"
+            :class="{ active: !isolated && scope === 'selection' }"
+            :aria-selected="!isolated && scope === 'selection'"
             title="The tables selected in the Tables view"
-            @click="emit('update:scope', 'selection')"
+            @click="setScope('selection')"
           >
             Selection
             <span v-if="selected.length" class="file-count-badge group-count">{{ selected.length }}</span>
           </button>
+          <button
+            v-if="isolated"
+            type="button"
+            role="tab"
+            class="active"
+            aria-selected="true"
+            :title="`${isolated.root} and the tables it's linked to by foreign keys`"
+          >
+            Isolated: {{ isolated.root }}
+          </button>
         </div>
         <button
-          v-if="scope === 'selection'"
+          v-if="scope === 'selection' && !isolated"
           class="history-switch"
           :class="{ on: neighbours }"
           type="button"
@@ -463,7 +556,7 @@ function revealMatch() {
               v-for="edge in layout.edges"
               :key="edge.id"
               class="diagram-edge"
-              :class="{ lit: edgeLit(edge), dim: hovered !== null && !edgeLit(edge) }"
+              :class="{ lit: edgeLit(edge), dim: highlighted !== null && !edgeLit(edge) }"
               :d="edge.path"
               :marker-end="`url(#${edgeLit(edge) ? `${markerId}-lit` : markerId})`"
             >
@@ -484,6 +577,7 @@ function revealMatch() {
           }"
           @mouseenter="hovered = node.name"
           @mouseleave="hovered = null"
+          @contextmenu="openMenu($event, node.name)"
         >
           <button class="diagram-table-name" type="button" :title="`Open ${node.name}`" @click="openTable(node.name)">
             {{ node.name }}
@@ -506,5 +600,35 @@ function revealMatch() {
         </div>
       </div>
     </div>
+    <Teleport to="body">
+      <div
+        v-if="menu"
+        ref="menuEl"
+        class="overflow-menu-dropdown table-context-menu"
+        role="menu"
+        :aria-label="`${menu.table} actions`"
+        :style="{ left: `${menu.x}px`, top: `${menu.y}px` }"
+        @contextmenu.prevent
+      >
+        <button
+          class="overflow-menu-item"
+          type="button"
+          role="menuitem"
+          title="Show only this table and the tables it's linked to by foreign keys"
+          @click="fromMenu(isolate)"
+        >
+          Isolate
+        </button>
+        <button class="overflow-menu-item" type="button" role="menuitem" @click="fromMenu((table) => emit('open', table))">
+          Open table
+        </button>
+        <template v-if="isolated">
+          <div class="overflow-menu-divider" role="separator" />
+          <button class="overflow-menu-item" type="button" role="menuitem" @click="fromMenu(() => (isolated = null))">
+            Show all
+          </button>
+        </template>
+      </div>
+    </Teleport>
   </div>
 </template>
