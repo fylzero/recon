@@ -15,6 +15,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       "Right-click a table with polymorphic columns in the diagram and choose Polymorphic links… to change which table a type points to, unlink it, or add a type that no row stores yet. Your picks are saved for that database. Use automatic matches drops them again.",
       "Turn off the diagram's Polymorphic switch to hide the PM badges and dashed lines and skip reading the type columns.",
       "Isolate and Add linked tables in the diagram include tables linked by polymorphic links, and the summary counts them separately from foreign keys.",
+      "New Missing keys switch in the diagram, off by default. It flags columns like user_id or userId that have no foreign key but whose name matches a table, such as users, with a red FK? badge and a dotted red line to that table. parent_id points back to its own table. Columns that don't match a table, like stripe_id, aren't flagged, and neither are polymorphic pairs. Hover an FK? column to see the table it probably references. Isolate and Add linked tables follow these lines too.",
     ],
   },
   {

@@ -10,6 +10,7 @@ import Modal from "./Modal.vue";
 import {
   guessMorphTable,
   layoutDiagram,
+  missingKeys,
   morphColumns,
   morphKey,
   resolveMorphs,
@@ -43,12 +44,14 @@ const ZOOM_SENSITIVITY = 0.01;
 const ZOOM_STEP_MAX = 0.15;
 const ZOOM_EASE = 0.3;
 const MORPHS_KEY = "recon.diagramMorphs";
+const MISSING_KEY = "recon.diagramMissingKeys";
 
 const diagram = ref<SchemaDiagram | null>(null);
 const loading = ref(false);
 const error = ref("");
 const keysOnly = ref(true);
 const showMorphs = ref(localStorage.getItem(MORPHS_KEY) !== "off");
+const showMissing = ref(localStorage.getItem(MISSING_KEY) === "on");
 const morphTypes = ref<Record<string, string[]> | null>(null);
 const morphOverrides = ref<MorphOverrides>({});
 const morphDialog = ref<{ table: string; picks: Record<string, Record<string, string>> } | null>(null);
@@ -137,6 +140,13 @@ const morphs = computed<ResolvedMorph[]>(() =>
     ? resolveMorphs(detectedMorphs.value, morphTypes.value ?? {}, tableNames.value, morphOverrides.value)
     : [],
 );
+
+const missing = computed(() => (diagram.value && showMissing.value ? missingKeys(diagram.value) : []));
+
+function toggleMissing() {
+  showMissing.value = !showMissing.value;
+  localStorage.setItem(MISSING_KEY, showMissing.value ? "on" : "off");
+}
 
 /** Reads the stored types once the boxes are on screen, since it scans table data. */
 async function loadMorphTypes() {
@@ -248,7 +258,11 @@ const scoped = computed(() => {
 
 const layout = computed(() =>
   diagram.value
-    ? layoutDiagram(diagram.value, props.namespace, scoped.value, { keysOnly: keysOnly.value, morphs: morphs.value })
+    ? layoutDiagram(diagram.value, props.namespace, scoped.value, {
+        keysOnly: keysOnly.value,
+        morphs: morphs.value,
+        missing: missing.value,
+      })
     : null,
 );
 
@@ -281,13 +295,17 @@ const summary = computed(() => {
     return `${tables} · no foreign keys`;
   }
   const foreign = current.edges.filter((edge) => edge.kind === "foreign").length;
-  const morph = current.edges.length - foreign;
+  const morph = current.edges.filter((edge) => edge.kind === "morph").length;
+  const absent = current.edges.length - foreign - morph;
   const parts = [tables];
   if (foreign) {
     parts.push(foreign === 1 ? "1 foreign key" : `${foreign.toLocaleString()} foreign keys`);
   }
   if (morph) {
     parts.push(morph === 1 ? "1 polymorphic link" : `${morph.toLocaleString()} polymorphic links`);
+  }
+  if (absent) {
+    parts.push(absent === 1 ? "1 missing foreign key" : `${absent.toLocaleString()} missing foreign keys`);
   }
   return parts.join(" · ");
 });
@@ -327,6 +345,9 @@ function nodeClass(node: DiagramNode) {
 function rowTitle(row: DiagramRow) {
   if (row.references) {
     return `References ${row.references}`;
+  }
+  if (row.suggests) {
+    return `No foreign key. Probably references ${row.suggests}`;
   }
   return row.polymorphic ? `Polymorphic\n${row.morphTargets}` : undefined;
 }
@@ -529,7 +550,7 @@ function openMenu(event: MouseEvent, table: string) {
 
 function linkedTables(table: string) {
   const linked = diagram.value
-    ? scopeTables(diagram.value, props.namespace, [table], true, morphs.value)
+    ? scopeTables(diagram.value, props.namespace, [table], true, morphs.value, missing.value)
     : new Set<string>();
   linked.delete(table);
   return [...linked];
@@ -637,6 +658,20 @@ function centerOn(node: DiagramNode | undefined) {
             <span class="history-switch-knob" />
           </span>
           Polymorphic
+        </button>
+        <button
+          class="history-switch"
+          :class="{ on: showMissing }"
+          type="button"
+          role="switch"
+          :aria-checked="showMissing"
+          title="Flag {name}_id columns that have no foreign key but match a table by name"
+          @click="toggleMissing"
+        >
+          <span class="history-switch-track" aria-hidden="true">
+            <span class="history-switch-knob" />
+          </span>
+          Missing keys
         </button>
       </div>
       <div class="diagram-toolbar-group">
@@ -746,9 +781,9 @@ function centerOn(node: DiagramNode | undefined) {
           >
             <span
               class="diagram-key"
-              :class="{ pk: row.primaryKey, fk: row.foreignKey, morph: row.polymorphic }"
+              :class="{ pk: row.primaryKey, fk: row.foreignKey, morph: row.polymorphic, missing: Boolean(row.suggests) }"
             >
-              {{ row.primaryKey ? "PK" : row.foreignKey ? "FK" : row.polymorphic ? "PM" : "" }}
+              {{ row.primaryKey ? "PK" : row.foreignKey ? "FK" : row.polymorphic ? "PM" : row.suggests ? "FK?" : "" }}
             </span>
             <span class="diagram-column">{{ row.name }}</span>
             <span class="diagram-type">{{ row.dataType }}</span>

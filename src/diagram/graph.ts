@@ -22,6 +22,16 @@ export interface DiagramRow {
   morphTargets: string;
   /** Where a foreign-key column points, as `table.column` or `schema.table.column`. */
   references: string;
+  /** For an `_id` column with no foreign key, the `table.column` its name suggests. */
+  suggests: string;
+}
+
+/** An `_id` column with no foreign key whose name matches another table. */
+export interface MissingKey {
+  table: string;
+  column: string;
+  refTable: string;
+  refColumn: string;
 }
 
 /** A `{name}_type` and `{name}_id` column pair, like Laravel's `morphs()` creates. */
@@ -59,7 +69,7 @@ export interface DiagramNode {
 
 export interface DiagramEdge {
   id: string;
-  kind: "foreign" | "morph";
+  kind: "foreign" | "morph" | "missing";
   from: string;
   to: string;
   path: string;
@@ -79,6 +89,7 @@ function isLocal(key: DiagramForeignKey, namespace: string) {
 
 const TYPE_SUFFIX = "_type";
 const TEXT_TYPE = /char|text|string|enum/i;
+const ID_SUFFIX = /^(.+?)(?:_id|Id)$/;
 const IRREGULAR_PLURALS: Record<string, string> = {
   person: "people",
   child: "children",
@@ -153,6 +164,41 @@ export function guessMorphTable(type: string, tables: Iterable<string>) {
   return lookup.get(pluralize(name)) ?? lookup.get(name) ?? "";
 }
 
+/**
+ * `{name}_id` and `{name}Id` columns that aren't a primary key, foreign key, or
+ * polymorphic pair, but whose name matches a table with a single-column primary
+ * key. `parent_id` points back to its own table.
+ */
+export function missingKeys(diagram: SchemaDiagram): MissingKey[] {
+  const tables = diagram.tables.map((table) => table.name);
+  const primary = new Map<string, string>();
+  for (const table of diagram.tables) {
+    const keys = table.columns.filter((column) => column.primaryKey);
+    if (keys.length === 1) {
+      primary.set(table.name, keys[0].name);
+    }
+  }
+  const morphIds = new Set(morphColumns(diagram).map((morph) => `${morph.table}.${morph.idColumn}`));
+  const found: MissingKey[] = [];
+  for (const table of diagram.tables) {
+    const keyed = new Set(
+      diagram.foreignKeys.filter((key) => key.table === table.name).flatMap((key) => key.columns),
+    );
+    for (const column of table.columns) {
+      const name = ID_SUFFIX.exec(column.name)?.[1];
+      if (!name || column.primaryKey || keyed.has(column.name) || morphIds.has(`${table.name}.${column.name}`)) {
+        continue;
+      }
+      const refTable = snakeCase(name) === "parent" ? table.name : guessMorphTable(name, tables);
+      const refColumn = primary.get(refTable);
+      if (refColumn) {
+        found.push({ table: table.name, column: column.name, refTable, refColumn });
+      }
+    }
+  }
+  return found;
+}
+
 /** Pairs each morph column with the tables its stored types point to, manual picks first. */
 export function resolveMorphs(
   columns: MorphColumn[],
@@ -197,6 +243,7 @@ export function scopeTables(
   selected: Iterable<string>,
   neighbours: boolean,
   morphs: ResolvedMorph[] = [],
+  missing: MissingKey[] = [],
 ): Set<string> {
   const known = new Set(diagram.tables.map((table) => table.name));
   const picked = new Set([...selected].filter((name) => known.has(name)));
@@ -223,6 +270,14 @@ export function scopeTables(
       if (picked.has(table)) {
         scoped.add(morph.table);
       }
+    }
+  }
+  for (const key of missing) {
+    if (picked.has(key.table)) {
+      scoped.add(key.refTable);
+    }
+    if (picked.has(key.refTable)) {
+      scoped.add(key.table);
     }
   }
   return scoped;
@@ -269,10 +324,11 @@ export function layoutDiagram(
   diagram: SchemaDiagram,
   namespace: string,
   tables: Set<string>,
-  options: { keysOnly: boolean; morphs?: ResolvedMorph[] },
+  options: { keysOnly: boolean; morphs?: ResolvedMorph[]; missing?: MissingKey[] },
 ): DiagramLayout {
   const keys = diagram.foreignKeys.filter((key) => tables.has(key.table));
   const morphs = (options.morphs ?? []).filter((morph) => tables.has(morph.table));
+  const missing = (options.missing ?? []).filter((key) => tables.has(key.table));
   const morphRows = new Map<string, Map<string, string>>();
   for (const morph of morphs) {
     const byColumn = morphRows.get(morph.table) ?? new Map<string, string>();
@@ -299,6 +355,17 @@ export function layoutDiagram(
       referenced.set(key.refTable, set);
     }
   }
+  const suggested = new Map<string, Map<string, string>>();
+  for (const key of missing) {
+    const byColumn = suggested.get(key.table) ?? new Map<string, string>();
+    byColumn.set(key.column, `${key.refTable}.${key.refColumn}`);
+    suggested.set(key.table, byColumn);
+    if (tables.has(key.refTable)) {
+      const set = referenced.get(key.refTable) ?? new Set<string>();
+      set.add(key.refColumn);
+      referenced.set(key.refTable, set);
+    }
+  }
 
   const nodes = new Map<string, DiagramNode>();
   for (const table of diagram.tables) {
@@ -308,6 +375,7 @@ export function layoutDiagram(
     const outgoing = fkColumns.get(table.name);
     const incoming = referenced.get(table.name);
     const polymorphic = morphRows.get(table.name);
+    const suggests = suggested.get(table.name);
     const all: DiagramRow[] = table.columns.map((column) => ({
       name: column.name,
       dataType: column.dataType,
@@ -316,9 +384,12 @@ export function layoutDiagram(
       polymorphic: Boolean(polymorphic?.has(column.name)),
       morphTargets: polymorphic?.get(column.name) ?? "",
       references: outgoing?.get(column.name) ?? "",
+      suggests: suggests?.get(column.name) ?? "",
     }));
     const rows = options.keysOnly
-      ? all.filter((row) => row.primaryKey || row.foreignKey || row.polymorphic || incoming?.has(row.name))
+      ? all.filter(
+          (row) => row.primaryKey || row.foreignKey || row.polymorphic || row.suggests || incoming?.has(row.name),
+        )
       : all;
     const hidden = all.length - rows.length;
     nodes.set(table.name, {
@@ -357,6 +428,19 @@ export function layoutDiagram(
         fromColumn: morph.idColumn,
         toColumn: target.rows.find((row) => row.primaryKey)?.name ?? "",
         label: `${morph.table}.${morph.name} (polymorphic) → ${table} as ${types.join(", ")}`,
+      });
+    }
+  }
+  for (const key of missing) {
+    if (nodes.has(key.refTable)) {
+      links.push({
+        id: `${key.table}:missing:${key.column}`,
+        kind: "missing",
+        from: key.table,
+        to: key.refTable,
+        fromColumn: key.column,
+        toColumn: key.refColumn,
+        label: `${key.table}.${key.column} → ${key.refTable}.${key.refColumn} (no foreign key)`,
       });
     }
   }

@@ -938,6 +938,15 @@ input[type="search"].diagram-search {
   stroke-dasharray: 5 4;
 }
 
+.diagram-edge.missing {
+  stroke-dasharray: 1.5 4;
+  stroke-linecap: round;
+}
+
+.diagram-edge.missing:not(.lit) {
+  stroke: rgb(240 113 120 / 0.55);
+}
+
 .diagram-arrow {
   fill: #4a5568;
 }
@@ -1042,6 +1051,10 @@ input[type="search"].diagram-search {
 
 .diagram-key.morph:not(.pk):not(.fk) {
   color: var(--good);
+}
+
+.diagram-key.missing:not(.pk):not(.fk):not(.morph) {
+  color: var(--bad);
 }
 
 .morph-links {
