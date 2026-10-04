@@ -54,6 +54,13 @@ export interface ResolvedMorph extends MorphColumn {
   targets: MorphTarget[];
 }
 
+/** Which links to follow. Foreign keys are followed unless `foreign` is false. */
+export interface DiagramLinks {
+  foreign?: boolean;
+  morphs?: ResolvedMorph[];
+  missing?: MissingKey[];
+}
+
 /** Manual picks keyed by `morphKey`, then by type value. An empty table means not linked. */
 export type MorphOverrides = Record<string, Record<string, string>>;
 
@@ -242,16 +249,16 @@ export function scopeTables(
   namespace: string,
   selected: Iterable<string>,
   neighbours: boolean,
-  morphs: ResolvedMorph[] = [],
-  missing: MissingKey[] = [],
+  links: DiagramLinks = {},
 ): Set<string> {
+  const { foreign = true, morphs = [], missing = [] } = links;
   const known = new Set(diagram.tables.map((table) => table.name));
   const picked = new Set([...selected].filter((name) => known.has(name)));
   if (!neighbours) {
     return picked;
   }
   const scoped = new Set(picked);
-  for (const key of diagram.foreignKeys) {
+  for (const key of foreign ? diagram.foreignKeys : []) {
     if (!isLocal(key, namespace)) {
       continue;
     }
@@ -324,7 +331,7 @@ export function layoutDiagram(
   diagram: SchemaDiagram,
   namespace: string,
   tables: Set<string>,
-  options: { keysOnly: boolean; morphs?: ResolvedMorph[]; missing?: MissingKey[] },
+  options: DiagramLinks & { keysOnly: boolean },
 ): DiagramLayout {
   const keys = diagram.foreignKeys.filter((key) => tables.has(key.table));
   const morphs = (options.morphs ?? []).filter((morph) => tables.has(morph.table));
@@ -404,7 +411,7 @@ export function layoutDiagram(
   }
 
   const links: (Omit<DiagramEdge, "path"> & { fromColumn: string; toColumn: string })[] = keys
-    .filter((key) => isLocal(key, namespace) && nodes.has(key.refTable))
+    .filter((key) => options.foreign !== false && isLocal(key, namespace) && nodes.has(key.refTable))
     .map((key) => ({
       id: `${key.table}:${key.name}`,
       kind: "foreign",

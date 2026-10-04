@@ -43,15 +43,41 @@ const DRAG_THRESHOLD = 3;
 const ZOOM_SENSITIVITY = 0.01;
 const ZOOM_STEP_MAX = 0.15;
 const ZOOM_EASE = 0.3;
-const MORPHS_KEY = "recon.diagramMorphs";
-const MISSING_KEY = "recon.diagramMissingKeys";
+const LINKS_KEY = "recon.diagramLinks";
+
+type LinkKind = DiagramEdge["kind"];
+
+const LINK_KINDS: { kind: LinkKind; one: string; many: string; title: string }[] = [
+  { kind: "foreign", one: "foreign key", many: "foreign keys", title: "Foreign keys defined in the database" },
+  {
+    kind: "morph",
+    one: "polymorphic",
+    many: "polymorphic",
+    title: "{name}_type and {name}_id column pairs, linked to the tables their stored types point to",
+  },
+  {
+    kind: "missing",
+    one: "missing key",
+    many: "missing keys",
+    title: "{name}_id columns that have no foreign key but match a table by name",
+  },
+];
+
+function loadLinks(): Record<LinkKind, boolean> {
+  const defaults = { foreign: true, morph: true, missing: false };
+  try {
+    return { ...defaults, ...JSON.parse(localStorage.getItem(LINKS_KEY) ?? "{}") };
+  } catch {
+    return defaults;
+  }
+}
 
 const diagram = ref<SchemaDiagram | null>(null);
 const loading = ref(false);
 const error = ref("");
 const keysOnly = ref(true);
-const showMorphs = ref(localStorage.getItem(MORPHS_KEY) !== "off");
-const showMissing = ref(localStorage.getItem(MISSING_KEY) === "on");
+const shown = ref(loadLinks());
+const showMorphs = computed(() => shown.value.morph);
 const morphTypes = ref<Record<string, string[]> | null>(null);
 const morphOverrides = ref<MorphOverrides>({});
 const morphDialog = ref<{ table: string; picks: Record<string, Record<string, string>> } | null>(null);
@@ -141,11 +167,22 @@ const morphs = computed<ResolvedMorph[]>(() =>
     : [],
 );
 
-const missing = computed(() => (diagram.value && showMissing.value ? missingKeys(diagram.value) : []));
+const detectedMissing = computed(() => (diagram.value ? missingKeys(diagram.value) : []));
+const missing = computed(() => (shown.value.missing ? detectedMissing.value : []));
 
-function toggleMissing() {
-  showMissing.value = !showMissing.value;
-  localStorage.setItem(MISSING_KEY, showMissing.value ? "on" : "off");
+/** ⌥-click shows only that kind, or every kind again if it was already the only one shown. */
+function toggleLinks(kind: LinkKind, event: MouseEvent) {
+  const next = { ...shown.value };
+  if (event.altKey) {
+    const alone = LINK_KINDS.every((link) => next[link.kind] === (link.kind === kind));
+    for (const link of LINK_KINDS) {
+      next[link.kind] = alone || link.kind === kind;
+    }
+  } else {
+    next[kind] = !next[kind];
+  }
+  shown.value = next;
+  localStorage.setItem(LINKS_KEY, JSON.stringify(next));
 }
 
 /** Reads the stored types once the boxes are on screen, since it scans table data. */
@@ -172,11 +209,6 @@ async function loadMorphTypes() {
 }
 
 watch([diagram, showMorphs], () => void loadMorphTypes());
-
-function toggleMorphs() {
-  showMorphs.value = !showMorphs.value;
-  localStorage.setItem(MORPHS_KEY, showMorphs.value ? "on" : "off");
-}
 
 function morphsIn(table: string) {
   return morphs.value.filter((morph) => morph.table === table);
@@ -260,6 +292,7 @@ const layout = computed(() =>
   diagram.value
     ? layoutDiagram(diagram.value, props.namespace, scoped.value, {
         keysOnly: keysOnly.value,
+        foreign: shown.value.foreign,
         morphs: morphs.value,
         missing: missing.value,
       })
@@ -290,24 +323,25 @@ const summary = computed(() => {
   if (!current || emptyMessage.value) {
     return "";
   }
-  const tables = current.nodes.length === 1 ? "1 table" : `${current.nodes.length.toLocaleString()} tables`;
-  if (!current.edges.length) {
-    return `${tables} · no foreign keys`;
+  return current.nodes.length === 1 ? "1 table" : `${current.nodes.length.toLocaleString()} tables`;
+});
+
+/** Counted from the columns in the tables on screen, so a kind that's switched off still shows its count. */
+const linkChips = computed(() => {
+  if (!summary.value || !diagram.value) {
+    return [];
   }
-  const foreign = current.edges.filter((edge) => edge.kind === "foreign").length;
-  const morph = current.edges.filter((edge) => edge.kind === "morph").length;
-  const absent = current.edges.length - foreign - morph;
-  const parts = [tables];
-  if (foreign) {
-    parts.push(foreign === 1 ? "1 foreign key" : `${foreign.toLocaleString()} foreign keys`);
-  }
-  if (morph) {
-    parts.push(morph === 1 ? "1 polymorphic link" : `${morph.toLocaleString()} polymorphic links`);
-  }
-  if (absent) {
-    parts.push(absent === 1 ? "1 missing foreign key" : `${absent.toLocaleString()} missing foreign keys`);
-  }
-  return parts.join(" · ");
+  const tables = scoped.value;
+  const counts: Record<LinkKind, number> = {
+    foreign: diagram.value.foreignKeys.filter((key) => tables.has(key.table)).length,
+    morph: detectedMorphs.value.filter((morph) => tables.has(morph.table)).length,
+    missing: detectedMissing.value.filter((key) => tables.has(key.table)).length,
+  };
+  return LINK_KINDS.filter((link) => counts[link.kind]).map((link) => ({
+    ...link,
+    count: counts[link.kind],
+    label: `${counts[link.kind].toLocaleString()} ${counts[link.kind] === 1 ? link.one : link.many}`,
+  }));
 });
 
 const highlighted = computed(() => menu.value?.table ?? hovered.value);
@@ -550,7 +584,11 @@ function openMenu(event: MouseEvent, table: string) {
 
 function linkedTables(table: string) {
   const linked = diagram.value
-    ? scopeTables(diagram.value, props.namespace, [table], true, morphs.value, missing.value)
+    ? scopeTables(diagram.value, props.namespace, [table], true, {
+        foreign: shown.value.foreign,
+        morphs: morphs.value,
+        missing: missing.value,
+      })
     : new Set<string>();
   linked.delete(table);
   return [...linked];
@@ -645,37 +683,27 @@ function centerOn(node: DiagramNode | undefined) {
           </span>
           Keys only
         </button>
-        <button
-          class="history-switch"
-          :class="{ on: showMorphs }"
-          type="button"
-          role="switch"
-          :aria-checked="showMorphs"
-          title="Link {name}_type and {name}_id column pairs to the tables their stored types point to"
-          @click="toggleMorphs"
-        >
-          <span class="history-switch-track" aria-hidden="true">
-            <span class="history-switch-knob" />
-          </span>
-          Polymorphic
-        </button>
-        <button
-          class="history-switch"
-          :class="{ on: showMissing }"
-          type="button"
-          role="switch"
-          :aria-checked="showMissing"
-          title="Flag {name}_id columns that have no foreign key but match a table by name"
-          @click="toggleMissing"
-        >
-          <span class="history-switch-track" aria-hidden="true">
-            <span class="history-switch-knob" />
-          </span>
-          Missing keys
-        </button>
+        <span v-if="summary" class="muted tiny diagram-summary">{{ summary }}</span>
+        <span v-if="summary && !linkChips.length" class="muted tiny diagram-summary">no foreign keys</span>
+        <div v-if="linkChips.length" class="diagram-links" role="group" aria-label="Links to show">
+          <button
+            v-for="chip in linkChips"
+            :key="chip.kind"
+            class="diagram-link-chip"
+            :class="{ on: shown[chip.kind] }"
+            type="button"
+            :aria-pressed="shown[chip.kind]"
+            :title="`${chip.title}. Click to show or hide, ⌥-click to show only these.`"
+            @click="toggleLinks(chip.kind, $event)"
+          >
+            <svg class="diagram-link-swatch" width="18" height="6" aria-hidden="true">
+              <path class="diagram-edge" :class="chip.kind" d="M 2 3 L 16 3" />
+            </svg>
+            {{ chip.label }}
+          </button>
+        </div>
       </div>
       <div class="diagram-toolbar-group">
-        <span v-if="summary" class="muted tiny diagram-summary">{{ summary }}</span>
         <input
           v-model="search"
           class="diagram-search"
