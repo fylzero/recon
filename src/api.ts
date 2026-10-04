@@ -214,6 +214,11 @@ export function schemaDiagram(connectionId: string, namespace: string) {
   return invoke<SchemaDiagram>("schema_diagram", { connectionId, namespace });
 }
 
+/** The distinct values in each type column, in the same order as `columns`. */
+export function morphTypes(connectionId: string, namespace: string, columns: SchemaColumn[]) {
+  return invoke<string[][]>("morph_types", { connectionId, namespace, columns });
+}
+
 export function browseTable(connectionId: string, request: BrowseRequest) {
   return invoke<BrowseResult>("browse_table", { connectionId, request });
 }

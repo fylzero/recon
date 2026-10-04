@@ -701,6 +701,52 @@ async fn diagram_of(session: Arc<Session>, namespace: &str) -> Result<SchemaDiag
     Ok(SchemaDiagram { tables, foreign_keys })
 }
 
+const MORPH_TYPE_LIMIT: usize = 100;
+
+/**
+ * The distinct values stored in each polymorphic type column, in request order.
+ * A column that can't be read comes back empty rather than failing the rest.
+ */
+#[tauri::command]
+pub async fn morph_types(
+    app: AppHandle,
+    connection_id: String,
+    namespace: String,
+    columns: Vec<SchemaColumn>,
+) -> Result<Vec<Vec<String>>, String> {
+    let (namespace, columns) = (namespace.as_str(), columns.as_slice());
+    with_session(&app, &connection_id, move |session| morph_types_in(session, namespace, columns)).await
+}
+
+async fn morph_types_in(
+    session: Arc<Session>,
+    namespace: &str,
+    columns: &[SchemaColumn],
+) -> Result<Vec<Vec<String>>, String> {
+    let dialect = dialect(session.driver);
+    let mut found = Vec::with_capacity(columns.len());
+    for target in columns {
+        let column = dialect.quote_ident(&target.column);
+        let sql = format!(
+            "SELECT DISTINCT {column} FROM {} WHERE {column} IS NOT NULL LIMIT {MORPH_TYPE_LIMIT}",
+            dialect.qualified(namespace, &target.table)
+        );
+        match pool_run(&session, &sql, MORPH_TYPE_LIMIT, QueryOrigin::Schema).await {
+            Ok(output) => found.push(
+                output
+                    .text_rows()
+                    .into_iter()
+                    .map(|row| text_at(&row, 0))
+                    .filter(|value| !value.is_empty())
+                    .collect(),
+            ),
+            Err(err) if db::is_connection_lost(&err) => return Err(err),
+            Err(_) => found.push(Vec::new()),
+        }
+    }
+    Ok(found)
+}
+
 #[tauri::command]
 pub async fn browse_table(
     app: AppHandle,

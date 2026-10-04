@@ -934,6 +934,10 @@ input[type="search"].diagram-search {
   opacity: 0.2;
 }
 
+.diagram-edge.morph {
+  stroke-dasharray: 5 4;
+}
+
 .diagram-arrow {
   fill: #4a5568;
 }
@@ -1034,6 +1038,75 @@ input[type="search"].diagram-search {
 
 .diagram-key.pk.fk {
   color: var(--purple);
+}
+
+.diagram-key.morph:not(.pk):not(.fk) {
+  color: var(--good);
+}
+
+.morph-links {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  max-height: min(60vh, 32rem);
+  overflow-y: auto;
+}
+
+.morph-links > p {
+  margin: 0;
+}
+
+.morph-link-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.morph-link-group > p {
+  margin: 0;
+}
+
+.morph-link-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-weight: 600;
+}
+
+.morph-link-heading .diagram-key {
+  flex: 0 0 auto;
+}
+
+.modal-label.morph-link-row {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.morph-link-type {
+  flex: 1 1 50%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-code);
+  font-size: 12px;
+}
+
+.modal-label.morph-link-row select {
+  flex: 1 1 50%;
+  width: auto;
+  min-width: 0;
+}
+
+.morph-link-add {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.morph-link-add input {
+  flex: 1;
+  min-width: 0;
 }
 
 .diagram-column {

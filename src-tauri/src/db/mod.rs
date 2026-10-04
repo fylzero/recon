@@ -274,7 +274,7 @@ pub fn schema_foreign_keys(output: &RawOutput) -> Vec<SchemaForeignKey> {
     keys
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaColumn {
     pub table: String,

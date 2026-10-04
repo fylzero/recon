@@ -11,6 +11,10 @@ export const CHANGELOG: ChangelogRelease[] = [
     notes: [
       "Toasts moved to the bottom-left corner, above the status bar, so they no longer cover the tabs and toolbar. Hovering over a toast keeps it open. Clicking the toast itself no longer does anything, so it can't catch a click meant for something underneath. Use the close button instead.",
       "New System notifications setting in General. The default, In background, sends results such as a finished backup, restore, import, or export to macOS Notification Center when Recon isn't the active app, and the toast waits until you switch back. You can also choose Always or Never.",
+      "The diagram now shows polymorphic relationships, like the ones Laravel's morphs() and Rails' polymorphic associations create. A text column named {name}_type next to a {name}_id column that isn't a foreign key gets a green PM badge. Dashed lines link it to the tables its stored types point to. Recon reads the distinct values in the type column and matches them to tables by name, so App\\Models\\BlogPost, Admin::BlogPost, and blog_post all find blog_posts. Hover a PM column to see each type and its table.",
+      "Right-click a table with polymorphic columns in the diagram and choose Polymorphic links… to change which table a type points to, unlink it, or add a type that no row stores yet. Your picks are saved for that database. Use automatic matches drops them again.",
+      "Turn off the diagram's Polymorphic switch to hide the PM badges and dashed lines and skip reading the type columns.",
+      "Isolate and Add linked tables in the diagram include tables linked by polymorphic links, and the summary counts them separately from foreign keys.",
     ],
   },
   {

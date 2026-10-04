@@ -6,7 +6,20 @@ export type DiagramScope = "schema" | "selection";
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import * as api from "../api";
 import type { SchemaDiagram } from "../types";
-import { layoutDiagram, scopeTables, type DiagramEdge, type DiagramNode } from "../diagram/graph";
+import Modal from "./Modal.vue";
+import {
+  guessMorphTable,
+  layoutDiagram,
+  morphColumns,
+  morphKey,
+  resolveMorphs,
+  scopeTables,
+  type DiagramEdge,
+  type DiagramNode,
+  type DiagramRow,
+  type MorphOverrides,
+  type ResolvedMorph,
+} from "../diagram/graph";
 
 const props = defineProps<{
   connectionId: string;
@@ -29,11 +42,22 @@ const DRAG_THRESHOLD = 3;
 const ZOOM_SENSITIVITY = 0.01;
 const ZOOM_STEP_MAX = 0.15;
 const ZOOM_EASE = 0.3;
+const MORPHS_KEY = "recon.diagramMorphs";
 
 const diagram = ref<SchemaDiagram | null>(null);
 const loading = ref(false);
 const error = ref("");
 const keysOnly = ref(true);
+const showMorphs = ref(localStorage.getItem(MORPHS_KEY) !== "off");
+const morphTypes = ref<Record<string, string[]> | null>(null);
+const morphOverrides = ref<MorphOverrides>({});
+const morphDialog = ref<{ table: string; picks: Record<string, Record<string, string>> } | null>(null);
+const morphTypeDrafts = ref<Record<string, string>>({});
+
+function morphHeading(key: string) {
+  const morph = detectedMorphs.value.find((column) => morphKey(column) === key);
+  return morph ? `${morph.typeColumn} and ${morph.idColumn}` : key;
+}
 const search = ref("");
 const hovered = ref<string | null>(null);
 const menu = ref<{ x: number; y: number; table: string } | null>(null);
@@ -63,10 +87,14 @@ async function load() {
   try {
     const result = await api.schemaDiagram(props.connectionId, props.namespace);
     if (id === request) {
+      morphTypes.value = null;
       diagram.value = result;
       needsFit = true;
       if (pendingIsolate) {
-        isolate(pendingIsolate);
+        await loadMorphTypes();
+        if (id === request && pendingIsolate) {
+          isolate(pendingIsolate);
+        }
       }
     }
   } catch (err) {
@@ -81,17 +109,129 @@ async function load() {
   }
 }
 
+const overridesKey = computed(() => `recon.morphLinks.${props.connectionId}.${props.namespace}`);
+
 watch(
   () => [props.connectionId, props.namespace] as const,
   () => {
     diagram.value = null;
+    morphTypes.value = null;
     pendingIsolate = "";
+    try {
+      morphOverrides.value = JSON.parse(localStorage.getItem(overridesKey.value) ?? "{}") ?? {};
+    } catch {
+      morphOverrides.value = {};
+    }
     if (props.namespace) {
       void load();
     }
   },
   { immediate: true },
 );
+
+const tableNames = computed(() => diagram.value?.tables.map((table) => table.name) ?? []);
+const detectedMorphs = computed(() => (diagram.value ? morphColumns(diagram.value) : []));
+
+const morphs = computed<ResolvedMorph[]>(() =>
+  showMorphs.value
+    ? resolveMorphs(detectedMorphs.value, morphTypes.value ?? {}, tableNames.value, morphOverrides.value)
+    : [],
+);
+
+/** Reads the stored types once the boxes are on screen, since it scans table data. */
+async function loadMorphTypes() {
+  const current = diagram.value;
+  const columns = detectedMorphs.value;
+  if (!current || !showMorphs.value || morphTypes.value || !columns.length) {
+    return;
+  }
+  const id = request;
+  morphTypes.value = {};
+  try {
+    const found = await api.morphTypes(
+      props.connectionId,
+      props.namespace,
+      columns.map((column) => ({ table: column.table, column: column.typeColumn })),
+    );
+    if (id === request && diagram.value === current) {
+      morphTypes.value = Object.fromEntries(columns.map((column, index) => [morphKey(column), found[index] ?? []]));
+    }
+  } catch {
+    // Without stored types the pairs still get their badge, and manual picks still draw links.
+  }
+}
+
+watch([diagram, showMorphs], () => void loadMorphTypes());
+
+function toggleMorphs() {
+  showMorphs.value = !showMorphs.value;
+  localStorage.setItem(MORPHS_KEY, showMorphs.value ? "on" : "off");
+}
+
+function morphsIn(table: string) {
+  return morphs.value.filter((morph) => morph.table === table);
+}
+
+function openMorphDialog(table: string) {
+  const picks: Record<string, Record<string, string>> = {};
+  for (const morph of morphsIn(table)) {
+    picks[morphKey(morph)] = Object.fromEntries(morph.targets.map((target) => [target.type, target.table]));
+  }
+  morphDialog.value = { table, picks };
+  morphTypeDrafts.value = {};
+}
+
+function addMorphType(key: string) {
+  const type = morphTypeDrafts.value[key]?.trim();
+  const picks = morphDialog.value?.picks[key];
+  if (!type || !picks) {
+    return;
+  }
+  if (!(type in picks)) {
+    picks[type] = guessMorphTable(type, tableNames.value);
+  }
+  morphTypeDrafts.value[key] = "";
+}
+
+function resetMorphDialog() {
+  const dialog = morphDialog.value;
+  if (!dialog) {
+    return;
+  }
+  for (const key of Object.keys(dialog.picks)) {
+    const stored = morphTypes.value?.[key] ?? [];
+    dialog.picks[key] = Object.fromEntries(stored.map((type) => [type, guessMorphTable(type, tableNames.value)]));
+  }
+}
+
+/** Only picks that differ from the automatic match are saved, so later renames still match on their own. */
+function saveMorphDialog() {
+  const dialog = morphDialog.value;
+  if (!dialog) {
+    return;
+  }
+  const next = { ...morphOverrides.value };
+  for (const [key, picks] of Object.entries(dialog.picks)) {
+    const stored = new Set(morphTypes.value?.[key] ?? []);
+    const manual = Object.fromEntries(
+      Object.entries(picks).filter(
+        ([type, table]) => (stored.has(type) ? table !== guessMorphTable(type, tableNames.value) : Boolean(table)),
+      ),
+    );
+    if (Object.keys(manual).length) {
+      next[key] = manual;
+    } else {
+      delete next[key];
+    }
+  }
+  morphOverrides.value = next;
+  if (Object.keys(next).length) {
+    localStorage.setItem(overridesKey.value, JSON.stringify(next));
+  } else {
+    localStorage.removeItem(overridesKey.value);
+  }
+  morphDialog.value = null;
+}
 
 const focus = computed(() => new Set(props.selected));
 
@@ -108,7 +248,7 @@ const scoped = computed(() => {
 
 const layout = computed(() =>
   diagram.value
-    ? layoutDiagram(diagram.value, props.namespace, scoped.value, { keysOnly: keysOnly.value })
+    ? layoutDiagram(diagram.value, props.namespace, scoped.value, { keysOnly: keysOnly.value, morphs: morphs.value })
     : null,
 );
 
@@ -140,8 +280,16 @@ const summary = computed(() => {
   if (!current.edges.length) {
     return `${tables} · no foreign keys`;
   }
-  const links = current.edges.length === 1 ? "1 foreign key" : `${current.edges.length.toLocaleString()} foreign keys`;
-  return `${tables} · ${links}`;
+  const foreign = current.edges.filter((edge) => edge.kind === "foreign").length;
+  const morph = current.edges.length - foreign;
+  const parts = [tables];
+  if (foreign) {
+    parts.push(foreign === 1 ? "1 foreign key" : `${foreign.toLocaleString()} foreign keys`);
+  }
+  if (morph) {
+    parts.push(morph === 1 ? "1 polymorphic link" : `${morph.toLocaleString()} polymorphic links`);
+  }
+  return parts.join(" · ");
 });
 
 const highlighted = computed(() => menu.value?.table ?? hovered.value);
@@ -174,6 +322,13 @@ function nodeClass(node: DiagramNode) {
     match: matches(node),
     dim: highlighted.value ? !lit : Boolean(needle.value) && !matches(node),
   };
+}
+
+function rowTitle(row: DiagramRow) {
+  if (row.references) {
+    return `References ${row.references}`;
+  }
+  return row.polymorphic ? `Polymorphic\n${row.morphTargets}` : undefined;
 }
 
 function edgeLit(edge: DiagramEdge) {
@@ -373,12 +528,14 @@ function openMenu(event: MouseEvent, table: string) {
 }
 
 function linkedTables(table: string) {
-  const linked = diagram.value ? scopeTables(diagram.value, props.namespace, [table], true) : new Set<string>();
+  const linked = diagram.value
+    ? scopeTables(diagram.value, props.namespace, [table], true, morphs.value)
+    : new Set<string>();
   linked.delete(table);
   return [...linked];
 }
 
-/** Waits for the schema to load if needed, since the linked tables come from its foreign keys. */
+/** Waits for the schema to load if needed, since the linked tables come from its foreign keys and morph columns. */
 function isolate(table: string) {
   if (!diagram.value) {
     pendingIsolate = table;
@@ -467,6 +624,20 @@ function centerOn(node: DiagramNode | undefined) {
           </span>
           Keys only
         </button>
+        <button
+          class="history-switch"
+          :class="{ on: showMorphs }"
+          type="button"
+          role="switch"
+          :aria-checked="showMorphs"
+          title="Link {name}_type and {name}_id column pairs to the tables their stored types point to"
+          @click="toggleMorphs"
+        >
+          <span class="history-switch-track" aria-hidden="true">
+            <span class="history-switch-knob" />
+          </span>
+          Polymorphic
+        </button>
       </div>
       <div class="diagram-toolbar-group">
         <span v-if="summary" class="muted tiny diagram-summary">{{ summary }}</span>
@@ -541,7 +712,7 @@ function centerOn(node: DiagramNode | undefined) {
               v-for="edge in layout.edges"
               :key="edge.id"
               class="diagram-edge"
-              :class="{ lit: edgeLit(edge), dim: highlighted !== null && !edgeLit(edge) }"
+              :class="[edge.kind, { lit: edgeLit(edge), dim: highlighted !== null && !edgeLit(edge) }]"
               :d="edge.path"
               :marker-end="`url(#${edgeLit(edge) ? `${markerId}-lit` : markerId})`"
             >
@@ -571,10 +742,13 @@ function centerOn(node: DiagramNode | undefined) {
             v-for="row in node.rows"
             :key="row.name"
             class="diagram-row"
-            :title="row.references ? `References ${row.references}` : undefined"
+            :title="rowTitle(row)"
           >
-            <span class="diagram-key" :class="{ pk: row.primaryKey, fk: row.foreignKey }">
-              {{ row.primaryKey ? "PK" : row.foreignKey ? "FK" : "" }}
+            <span
+              class="diagram-key"
+              :class="{ pk: row.primaryKey, fk: row.foreignKey, morph: row.polymorphic }"
+            >
+              {{ row.primaryKey ? "PK" : row.foreignKey ? "FK" : row.polymorphic ? "PM" : "" }}
             </span>
             <span class="diagram-column">{{ row.name }}</span>
             <span class="diagram-type">{{ row.dataType }}</span>
@@ -599,7 +773,7 @@ function centerOn(node: DiagramNode | undefined) {
           class="overflow-menu-item"
           type="button"
           role="menuitem"
-          title="Select this table and the tables it's linked to by foreign keys"
+          title="Select this table and the tables it's linked to by foreign keys and polymorphic links"
           @click="fromMenu(isolate)"
         >
           Isolate
@@ -609,7 +783,7 @@ function centerOn(node: DiagramNode | undefined) {
           class="overflow-menu-item"
           type="button"
           role="menuitem"
-          title="Add the tables this one is linked to by foreign keys to the selection"
+          title="Add the tables this one is linked to by foreign keys and polymorphic links to the selection"
           :disabled="linkedTables(menu.table).every((name) => selected.includes(name))"
           @click="fromMenu(addLinked)"
         >
@@ -617,6 +791,16 @@ function centerOn(node: DiagramNode | undefined) {
         </button>
         <button class="overflow-menu-item" type="button" role="menuitem" @click="fromMenu((table) => emit('open', table))">
           Open table
+        </button>
+        <button
+          v-if="morphsIn(menu.table).length"
+          class="overflow-menu-item"
+          type="button"
+          role="menuitem"
+          title="Choose which tables this table's polymorphic columns point to"
+          @click="fromMenu(openMorphDialog)"
+        >
+          Polymorphic links…
         </button>
         <template v-if="scope === 'selection'">
           <div class="overflow-menu-divider" role="separator" />
@@ -631,5 +815,44 @@ function centerOn(node: DiagramNode | undefined) {
         </template>
       </div>
     </Teleport>
+    <Modal v-if="morphDialog" :title="`Polymorphic links in ${morphDialog.table}`" medium @close="morphDialog = null">
+      <div class="morph-links">
+        <p class="muted tiny">
+          Each type below is a value stored in the type column. Recon matches types to tables by name. Pick a table to
+          change a match. Your picks are saved for this database.
+        </p>
+        <section v-for="(picks, key) in morphDialog.picks" :key="key" class="morph-link-group">
+          <div class="morph-link-heading">
+            <span class="diagram-key morph">PM</span>
+            {{ morphHeading(String(key)) }}
+          </div>
+          <p v-if="!Object.keys(picks).length" class="muted tiny">No rows store a type yet. Add one below.</p>
+          <label v-for="(_, type) in picks" :key="type" class="modal-label morph-link-row">
+            <code class="morph-link-type" :title="String(type)">{{ type }}</code>
+            <select v-model="picks[type]">
+              <option value="">Not linked</option>
+              <option v-for="name in tableNames" :key="name" :value="name">{{ name }}</option>
+            </select>
+          </label>
+          <form class="morph-link-add" @submit.prevent="addMorphType(String(key))">
+            <input
+              v-model="morphTypeDrafts[key]"
+              type="text"
+              placeholder="Add a type, like App\Models\Post"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <button class="ghost tiny" type="submit" :disabled="!morphTypeDrafts[key]?.trim()">Add</button>
+          </form>
+        </section>
+      </div>
+      <template #actions>
+        <button class="ghost" type="button" title="Drop your picks and use the matches found by name" @click="resetMorphDialog">
+          Use automatic matches
+        </button>
+        <button class="ghost" type="button" @click="morphDialog = null">Cancel</button>
+        <button class="primary" type="button" @click="saveMorphDialog">Save</button>
+      </template>
+    </Modal>
   </div>
 </template>

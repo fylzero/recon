@@ -16,9 +16,36 @@ export interface DiagramRow {
   dataType: string;
   primaryKey: boolean;
   foreignKey: boolean;
+  /** Part of a `{name}_type` and `{name}_id` pair. */
+  polymorphic: boolean;
+  /** For a polymorphic pair, the stored types and the tables they point to, one per line. */
+  morphTargets: string;
   /** Where a foreign-key column points, as `table.column` or `schema.table.column`. */
   references: string;
 }
+
+/** A `{name}_type` and `{name}_id` column pair, like Laravel's `morphs()` creates. */
+export interface MorphColumn {
+  table: string;
+  name: string;
+  typeColumn: string;
+  idColumn: string;
+}
+
+export interface MorphTarget {
+  /** The value stored in the type column, like `App\Models\Post` or `post`. */
+  type: string;
+  /** The table it points to, or empty if it couldn't be matched. */
+  table: string;
+  manual: boolean;
+}
+
+export interface ResolvedMorph extends MorphColumn {
+  targets: MorphTarget[];
+}
+
+/** Manual picks keyed by `morphKey`, then by type value. An empty table means not linked. */
+export type MorphOverrides = Record<string, Record<string, string>>;
 
 export interface DiagramNode {
   name: string;
@@ -32,6 +59,7 @@ export interface DiagramNode {
 
 export interface DiagramEdge {
   id: string;
+  kind: "foreign" | "morph";
   from: string;
   to: string;
   path: string;
@@ -49,15 +77,126 @@ function isLocal(key: DiagramForeignKey, namespace: string) {
   return !key.refNamespace || key.refNamespace === namespace;
 }
 
+const TYPE_SUFFIX = "_type";
+const TEXT_TYPE = /char|text|string|enum/i;
+const IRREGULAR_PLURALS: Record<string, string> = {
+  person: "people",
+  child: "children",
+  man: "men",
+  woman: "women",
+};
+
+export function morphKey(column: MorphColumn) {
+  return `${column.table}.${column.typeColumn}`;
+}
+
+/** Text `{name}_type` columns with a `{name}_id` beside them that isn't already a foreign key. */
+export function morphColumns(diagram: SchemaDiagram): MorphColumn[] {
+  const found: MorphColumn[] = [];
+  for (const table of diagram.tables) {
+    const names = new Set(table.columns.map((column) => column.name));
+    const keyed = new Set(
+      diagram.foreignKeys.filter((key) => key.table === table.name).flatMap((key) => key.columns),
+    );
+    for (const column of table.columns) {
+      if (!column.name.endsWith(TYPE_SUFFIX) || !TEXT_TYPE.test(column.dataType)) {
+        continue;
+      }
+      const name = column.name.slice(0, -TYPE_SUFFIX.length);
+      const idColumn = `${name}_id`;
+      if (name && names.has(idColumn) && !keyed.has(idColumn)) {
+        found.push({ table: table.name, name, typeColumn: column.name, idColumn });
+      }
+    }
+  }
+  return found;
+}
+
+function snakeCase(word: string) {
+  return word
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+    .replace(/([a-z\d])([A-Z])/g, "$1_$2")
+    .replace(/[\s-]+/g, "_")
+    .toLowerCase();
+}
+
+function pluralize(word: string) {
+  const parts = word.split("_");
+  const last = parts.pop() ?? "";
+  let plural: string;
+  if (IRREGULAR_PLURALS[last]) {
+    plural = IRREGULAR_PLURALS[last];
+  } else if (/[^aeiou]y$/.test(last)) {
+    plural = `${last.slice(0, -1)}ies`;
+  } else if (/(s|x|z|ch|sh)$/.test(last)) {
+    plural = `${last}es`;
+  } else {
+    plural = `${last}s`;
+  }
+  return [...parts, plural].join("_");
+}
+
+/**
+ * Matches a stored type to a table the way Laravel and Rails name them, so
+ * `App\Models\BlogPost`, `Admin::BlogPost`, and `blog_post` all find `blog_posts`.
+ */
+export function guessMorphTable(type: string, tables: Iterable<string>) {
+  const lookup = new Map<string, string>();
+  for (const table of tables) {
+    lookup.set(table.toLowerCase(), table);
+  }
+  const base = type.split(/\\|::|\//).filter(Boolean).pop() ?? "";
+  if (!base) {
+    return "";
+  }
+  const name = snakeCase(base);
+  return lookup.get(pluralize(name)) ?? lookup.get(name) ?? "";
+}
+
+/** Pairs each morph column with the tables its stored types point to, manual picks first. */
+export function resolveMorphs(
+  columns: MorphColumn[],
+  types: Record<string, string[]>,
+  tables: string[],
+  overrides: MorphOverrides,
+): ResolvedMorph[] {
+  const known = new Set(tables);
+  return columns.map((column) => {
+    const key = morphKey(column);
+    const picked = overrides[key] ?? {};
+    const values = [...new Set([...(types[key] ?? []), ...Object.keys(picked)])];
+    const targets = values.map((type) => {
+      if (type in picked) {
+        return { type, table: known.has(picked[type]) ? picked[type] : "", manual: true };
+      }
+      return { type, table: guessMorphTable(type, tables), manual: false };
+    });
+    return { ...column, targets };
+  });
+}
+
+/** Each morph column's linked tables, once per table even when several types point to it. */
+function morphTargets(morph: ResolvedMorph) {
+  const byTable = new Map<string, string[]>();
+  for (const target of morph.targets) {
+    if (target.table) {
+      byTable.set(target.table, [...(byTable.get(target.table) ?? []), target.type]);
+    }
+  }
+  return byTable;
+}
+
 /**
  * The selected tables, plus every table they reference or are referenced by
- * when `neighbours` is on. Only tables that exist in the diagram are kept.
+ * when `neighbours` is on, including through polymorphic links. Only tables
+ * that exist in the diagram are kept.
  */
 export function scopeTables(
   diagram: SchemaDiagram,
   namespace: string,
   selected: Iterable<string>,
   neighbours: boolean,
+  morphs: ResolvedMorph[] = [],
 ): Set<string> {
   const known = new Set(diagram.tables.map((table) => table.name));
   const picked = new Set([...selected].filter((name) => known.has(name)));
@@ -74,6 +213,16 @@ export function scopeTables(
     }
     if (picked.has(key.refTable)) {
       scoped.add(key.table);
+    }
+  }
+  for (const morph of morphs) {
+    for (const table of morphTargets(morph).keys()) {
+      if (picked.has(morph.table) && known.has(table)) {
+        scoped.add(table);
+      }
+      if (picked.has(table)) {
+        scoped.add(morph.table);
+      }
     }
   }
   return scoped;
@@ -112,17 +261,28 @@ function edgePath(source: DiagramNode, target: DiagramNode, sy: number, ty: numb
 }
 
 /**
- * Lays out `tables` left to right by their foreign keys. Tables with no link to
- * another visible table are packed into a grid underneath, so a schema full of
- * unrelated tables doesn't become one long column.
+ * Lays out `tables` left to right by their foreign keys and polymorphic links.
+ * Tables with no link to another visible table are packed into a grid underneath,
+ * so a schema full of unrelated tables doesn't become one long column.
  */
 export function layoutDiagram(
   diagram: SchemaDiagram,
   namespace: string,
   tables: Set<string>,
-  options: { keysOnly: boolean },
+  options: { keysOnly: boolean; morphs?: ResolvedMorph[] },
 ): DiagramLayout {
   const keys = diagram.foreignKeys.filter((key) => tables.has(key.table));
+  const morphs = (options.morphs ?? []).filter((morph) => tables.has(morph.table));
+  const morphRows = new Map<string, Map<string, string>>();
+  for (const morph of morphs) {
+    const byColumn = morphRows.get(morph.table) ?? new Map<string, string>();
+    const summary = morph.targets.length
+      ? morph.targets.map((target) => `${target.type} → ${target.table || "no table"}`).join("\n")
+      : "No stored types yet";
+    byColumn.set(morph.typeColumn, summary);
+    byColumn.set(morph.idColumn, summary);
+    morphRows.set(morph.table, byColumn);
+  }
   const fkColumns = new Map<string, Map<string, string>>();
   const referenced = new Map<string, Set<string>>();
   for (const key of keys) {
@@ -147,15 +307,18 @@ export function layoutDiagram(
     }
     const outgoing = fkColumns.get(table.name);
     const incoming = referenced.get(table.name);
+    const polymorphic = morphRows.get(table.name);
     const all: DiagramRow[] = table.columns.map((column) => ({
       name: column.name,
       dataType: column.dataType,
       primaryKey: column.primaryKey,
       foreignKey: Boolean(outgoing?.has(column.name)),
+      polymorphic: Boolean(polymorphic?.has(column.name)),
+      morphTargets: polymorphic?.get(column.name) ?? "",
       references: outgoing?.get(column.name) ?? "",
     }));
     const rows = options.keysOnly
-      ? all.filter((row) => row.primaryKey || row.foreignKey || incoming?.has(row.name))
+      ? all.filter((row) => row.primaryKey || row.foreignKey || row.polymorphic || incoming?.has(row.name))
       : all;
     const hidden = all.length - rows.length;
     nodes.set(table.name, {
@@ -169,12 +332,39 @@ export function layoutDiagram(
     });
   }
 
-  const links = keys.filter((key) => isLocal(key, namespace) && nodes.has(key.refTable));
+  const links: (Omit<DiagramEdge, "path"> & { fromColumn: string; toColumn: string })[] = keys
+    .filter((key) => isLocal(key, namespace) && nodes.has(key.refTable))
+    .map((key) => ({
+      id: `${key.table}:${key.name}`,
+      kind: "foreign",
+      from: key.table,
+      to: key.refTable,
+      fromColumn: key.columns[0],
+      toColumn: key.refColumns[0],
+      label: `${key.table}.${key.columns.join(", ")} → ${key.refTable}.${key.refColumns.join(", ")}`,
+    }));
+  for (const morph of morphs) {
+    for (const [table, types] of morphTargets(morph)) {
+      const target = nodes.get(table);
+      if (!target) {
+        continue;
+      }
+      links.push({
+        id: `${morph.table}:morph:${morph.name}:${table}`,
+        kind: "morph",
+        from: morph.table,
+        to: table,
+        fromColumn: morph.idColumn,
+        toColumn: target.rows.find((row) => row.primaryKey)?.name ?? "",
+        label: `${morph.table}.${morph.name} (polymorphic) → ${table} as ${types.join(", ")}`,
+      });
+    }
+  }
   const linked = new Set<string>();
-  for (const key of links) {
-    if (key.table !== key.refTable) {
-      linked.add(key.table);
-      linked.add(key.refTable);
+  for (const link of links) {
+    if (link.from !== link.to) {
+      linked.add(link.from);
+      linked.add(link.to);
     }
   }
 
@@ -188,9 +378,9 @@ export function layoutDiagram(
       const node = nodes.get(name)!;
       graph.setNode(name, { width: node.width, height: node.height });
     }
-    for (const key of links) {
-      if (key.table !== key.refTable) {
-        graph.setEdge(key.refTable, key.table, {}, `${key.table}:${key.name}`);
+    for (const link of links) {
+      if (link.from !== link.to) {
+        graph.setEdge(link.to, link.from, {}, link.id);
       }
     }
     dagre.layout(graph);
@@ -225,17 +415,10 @@ export function layoutDiagram(
     }
   }
 
-  const edges = links.map((key) => {
-    const source = nodes.get(key.table)!;
-    const target = nodes.get(key.refTable)!;
-    const path = edgePath(source, target, rowCenter(source, key.columns[0]), rowCenter(target, key.refColumns[0]));
-    return {
-      id: `${key.table}:${key.name}`,
-      from: key.table,
-      to: key.refTable,
-      path,
-      label: `${key.table}.${key.columns.join(", ")} → ${key.refTable}.${key.refColumns.join(", ")}`,
-    };
+  const edges = links.map(({ fromColumn, toColumn, ...link }) => {
+    const source = nodes.get(link.from)!;
+    const target = nodes.get(link.to)!;
+    return { ...link, path: edgePath(source, target, rowCenter(source, fromColumn), rowCenter(target, toColumn)) };
   });
 
   return { nodes: [...nodes.values()], edges, width, height };
