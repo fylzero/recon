@@ -135,6 +135,7 @@ export interface SessionInfo {
   serverVersion: string;
   namespaces: NamespaceList;
   namespaceLabel: string;
+  systemNamespaces: string[];
 }
 
 export interface TableInfo {

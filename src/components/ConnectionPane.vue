@@ -240,6 +240,7 @@ const extraTab = computed(() => props.sessionId !== props.connectionId);
 const entry = computed(() => match.value?.connection ?? null);
 const driver = computed(() => entry.value?.driver ?? "mysql");
 const namespaceLabel = computed(() => session.value?.namespaceLabel ?? "Database");
+const systemNamespaces = computed(() => session.value?.systemNamespaces ?? []);
 const needsPassword = computed(
   () => Boolean(entry.value && entry.value.driver !== "sqlite" && !entry.value.savePassword),
 );
@@ -2588,6 +2589,7 @@ onUnmounted(() => {
             :items="namespaces"
             :label="namespaceLabel"
             :hidden-key="connectionId"
+            :system-items="systemNamespaces"
             :creatable="driver !== 'sqlite'"
             :droppable="driver !== 'sqlite'"
             :renamable="driver !== 'sqlite'"

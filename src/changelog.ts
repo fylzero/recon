@@ -16,6 +16,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       "The diagram's summary is now a row of chips, one each for foreign keys, polymorphic links, and missing keys, showing how many the tables on screen have and the line style each one uses. Click a chip to hide or show those lines and badges, or ⌥-click it to show only that kind, and ⌥-click it again to show them all. Tables left without visible links move to the grid underneath. Turning off polymorphic also skips reading the type columns. FK badges stay when foreign keys are hidden, since those keys exist in the database.",
       "Isolate and Add linked tables in the diagram follow whichever kinds of links are shown, including polymorphic links and missing keys.",
       "Turn on the diagram's missing keys chip, off by default, to flag columns like user_id or userId that have no foreign key but whose name matches a table, such as users, with a red FK? badge and a dotted red line to that table. parent_id points back to its own table. Columns that don't match a table, like stripe_id, aren't flagged, and neither are polymorphic pairs. Hover an FK? column to see the table it probably references.",
+      "MySQL's built-in databases, information_schema, mysql, performance_schema, and sys, are now hidden in the database switcher by default. Click Show hidden databases to see them, and right-click one and choose Show in list to keep it visible for that connection.",
     ],
   },
   {

@@ -8,6 +8,7 @@ const props = defineProps<{
   items: string[];
   label: string;
   hiddenKey: string;
+  systemItems?: string[];
   creatable?: boolean;
   droppable?: boolean;
   renamable?: boolean;
@@ -32,10 +33,22 @@ const menuEl = ref<HTMLElement | null>(null);
 const listEl = ref<HTMLElement | null>(null);
 const activeIndex = ref(0);
 const moved = ref(false);
-const hidden = ref(new Set<string>());
+const userHidden = ref(new Set<string>());
+const shownSystem = ref(new Set<string>());
 const showHidden = ref(false);
 
 const storageKey = computed(() => `recon.hiddenDatabases.${props.hiddenKey}`);
+const shownStorageKey = computed(() => `recon.shownSystemDatabases.${props.hiddenKey}`);
+const systemSet = computed(() => new Set(props.systemItems ?? []));
+const hidden = computed(() => {
+  const next = new Set(userHidden.value);
+  for (const name of systemSet.value) {
+    if (!shownSystem.value.has(name)) {
+      next.add(name);
+    }
+  }
+  return next;
+});
 const hiddenCount = computed(() => props.items.filter((item) => hidden.value.has(item)).length);
 
 const displayed = computed(() =>
@@ -47,28 +60,47 @@ const filtered = computed(() => {
   return needle ? displayed.value.filter((item) => item.toLowerCase().includes(needle)) : displayed.value;
 });
 
-function loadHidden() {
+function loadSet(key: string) {
   try {
-    const parsed = JSON.parse(localStorage.getItem(storageKey.value) ?? "[]");
-    hidden.value = new Set(Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : []);
+    const parsed = JSON.parse(localStorage.getItem(key) ?? "[]");
+    return new Set<string>(Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : []);
   } catch {
-    hidden.value = new Set();
+    return new Set<string>();
   }
 }
 
+function saveSet(key: string, set: Set<string>) {
+  if (set.size) {
+    localStorage.setItem(key, JSON.stringify([...set]));
+  } else {
+    localStorage.removeItem(key);
+  }
+}
+
+function loadHidden() {
+  userHidden.value = loadSet(storageKey.value);
+  shownSystem.value = loadSet(shownStorageKey.value);
+}
+
 function setHidden(name: string, value: boolean) {
-  const next = new Set(hidden.value);
-  if (value) {
-    next.add(name);
+  const nextHidden = new Set(userHidden.value);
+  const nextShown = new Set(shownSystem.value);
+  if (systemSet.value.has(name)) {
+    nextHidden.delete(name);
+    if (value) {
+      nextShown.delete(name);
+    } else {
+      nextShown.add(name);
+    }
+  } else if (value) {
+    nextHidden.add(name);
   } else {
-    next.delete(name);
+    nextHidden.delete(name);
   }
-  hidden.value = next;
-  if (next.size) {
-    localStorage.setItem(storageKey.value, JSON.stringify([...next]));
-  } else {
-    localStorage.removeItem(storageKey.value);
-  }
+  userHidden.value = nextHidden;
+  shownSystem.value = nextShown;
+  saveSet(storageKey.value, nextHidden);
+  saveSet(shownStorageKey.value, nextShown);
   if (!hiddenCount.value) {
     showHidden.value = false;
   }

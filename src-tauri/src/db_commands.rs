@@ -47,6 +47,7 @@ pub struct SessionInfo {
     pub server_version: String,
     pub namespaces: NamespaceList,
     pub namespace_label: String,
+    pub system_namespaces: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -303,6 +304,7 @@ async fn open_session(
             server_version: version,
             namespaces,
             namespace_label: dialect.namespace_label().into(),
+            system_namespaces: dialect.system_namespaces().iter().map(|s| s.to_string()).collect(),
         })
     };
     match setup.await {
