@@ -18,7 +18,8 @@ import {
   formatFontSize,
   isPresetFont,
 } from "../../fonts";
-import type { PreferencesPatch } from "../../types";
+import type { NotificationMode, PreferencesPatch } from "../../types";
+import { NOTIFICATION_MODES } from "../../notifications";
 
 const PAGE_SIZE_OPTIONS = [50, 100, 200, 300, 500];
 const ROW_LIMIT_OPTIONS = [1000, 5000, 10_000, 50_000, 100_000];
@@ -35,6 +36,7 @@ const {
   queryRowLimit,
   maxAutoColumnWidth,
   autoApplyFilters,
+  notifications,
   savePreferences,
   previewPreferences,
   showToast,
@@ -193,6 +195,30 @@ function selectValue(event: Event) {
               @change="save({ autoApplyFilters: ($event.target as HTMLInputElement).checked })"
             />
             <span>{{ autoApplyFilters ? "On" : "Off" }}</span>
+          </label>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <h3>System notifications</h3>
+            <p class="muted tiny">
+              When to also send results to macOS Notification Center. In background only
+              notifies while Recon isn't the active app.
+            </p>
+          </div>
+          <label class="settings-control">
+            <span class="visually-hidden">System notifications</span>
+            <select
+              :value="notifications"
+              @change="
+                save({
+                  notifications: ($event.target as HTMLSelectElement).value as NotificationMode,
+                })
+              "
+            >
+              <option v-for="option in NOTIFICATION_MODES" :key="option.id" :value="option.id">
+                {{ option.label }}
+              </option>
+            </select>
           </label>
         </div>
       </section>

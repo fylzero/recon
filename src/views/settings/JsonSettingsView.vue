@@ -27,6 +27,7 @@ const {
   sidebarWidth,
   maxAutoColumnWidth,
   autoApplyFilters,
+  notifications,
   windowState,
   replaceSettings,
   showToast,
@@ -212,6 +213,7 @@ watch(
     sidebarWidth,
     maxAutoColumnWidth,
     autoApplyFilters,
+    notifications,
     windowState,
   ],
   () => {

@@ -40,6 +40,18 @@ fn default_auto_apply_filters() -> bool {
     true
 }
 
+fn default_notifications() -> String {
+    "background".into()
+}
+
+pub fn sanitize_notifications(value: &str) -> String {
+    match value.trim() {
+        "always" => "always".into(),
+        "off" => "off".into(),
+        _ => default_notifications(),
+    }
+}
+
 fn default_header_color() -> String {
     "#16323c".into()
 }
@@ -293,6 +305,9 @@ pub struct AppData {
     /// Table filters reload the rows as they're edited, instead of waiting for Apply.
     #[serde(default = "default_auto_apply_filters")]
     pub auto_apply_filters: bool,
+    /// When to use system notifications: "background", "always", or "off".
+    #[serde(default = "default_notifications")]
+    pub notifications: String,
     #[serde(default)]
     pub window: Option<WindowState>,
 }
@@ -315,6 +330,7 @@ impl Default for AppData {
             sidebar_width: default_sidebar_width(),
             max_auto_column_width: default_max_auto_column_width(),
             auto_apply_filters: default_auto_apply_filters(),
+            notifications: default_notifications(),
             window: None,
         }
     }
@@ -364,6 +380,7 @@ pub struct PreferencesPatch {
     pub sidebar_width: Option<u32>,
     pub max_auto_column_width: Option<u32>,
     pub auto_apply_filters: Option<bool>,
+    pub notifications: Option<String>,
 }
 
 #[cfg(test)]
@@ -412,6 +429,7 @@ mod tests {
         assert_eq!(parsed.grid_font_size, 13.0);
         assert_eq!(parsed.list_font_family, "ui");
         assert_eq!(parsed.list_font_size, 12.5);
+        assert_eq!(parsed.notifications, "background");
 
         let entry: ConnectionEntry =
             serde_json::from_str(r#"{"name":"old","driver":"mysql"}"#).unwrap();
@@ -435,5 +453,13 @@ mod tests {
         assert_eq!(sanitize_color(" #16323c "), Some("#16323c".into()));
         assert_eq!(sanitize_color("#zzzzzz"), None);
         assert_eq!(sanitize_color("red"), None);
+    }
+
+    #[test]
+    fn sanitizes_notifications_mode() {
+        assert_eq!(sanitize_notifications("always"), "always");
+        assert_eq!(sanitize_notifications(" off "), "off");
+        assert_eq!(sanitize_notifications("background"), "background");
+        assert_eq!(sanitize_notifications("loud"), "background");
     }
 }

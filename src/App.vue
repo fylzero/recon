@@ -24,6 +24,7 @@ const SettingsView = defineAsyncComponent({
 const ChangelogView = defineAsyncComponent(() => import("./views/ChangelogView.vue"));
 import { useApp } from "./composables/useApp";
 import { DEFAULT_LIST_FONT, UI_FONT_FALLBACK, resolveFontStack } from "./fonts";
+import { watchWindowFocus } from "./notifications";
 import { useUpdater } from "./composables/useUpdater";
 import { useConnectionForm } from "./composables/useConnectionForm";
 import { CHANGELOG_TAB_ID, CONNECTIONS_TAB_ID, SETTINGS_TAB_ID, useTabs } from "./composables/useTabs";
@@ -38,6 +39,8 @@ const {
   toastMessage,
   toastKind,
   dismissToast,
+  pauseToast,
+  resumeToast,
   showToast,
   editorFontFamily,
   editorFontSize,
@@ -133,6 +136,7 @@ function syncRoute() {
 }
 
 onMounted(() => {
+  watchWindowFocus();
   void load().then(syncRoute);
   void getVersion()
     .then((value) => {
@@ -235,6 +239,8 @@ watch([groups, standaloneConnections], () => {
         :message="toastMessage"
         :kind="toastKind"
         @dismiss="dismissToast"
+        @pause="pauseToast"
+        @resume="resumeToast"
       />
     </Transition>
     <ConnectionForm

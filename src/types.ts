@@ -92,8 +92,11 @@ export interface AppData {
   sidebarWidth?: number;
   maxAutoColumnWidth?: number;
   autoApplyFilters?: boolean;
+  notifications?: NotificationMode;
   window?: WindowState;
 }
+
+export type NotificationMode = "background" | "always" | "off";
 
 export interface PreferencesPatch {
   editorFontFamily?: string;
@@ -107,6 +110,7 @@ export interface PreferencesPatch {
   sidebarWidth?: number;
   maxAutoColumnWidth?: number;
   autoApplyFilters?: boolean;
+  notifications?: NotificationMode;
 }
 
 export interface BytesCell {

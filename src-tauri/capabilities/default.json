@@ -10,6 +10,7 @@
     "clipboard-manager:allow-write-text",
     "opener:default",
     "dialog:default",
+    "notification:default",
     "updater:default",
     "process:default"
   ]

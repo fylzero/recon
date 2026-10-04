@@ -6,6 +6,14 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.4.0",
+    date: "October 3, 2026",
+    notes: [
+      "Toasts moved to the bottom-left corner, above the status bar, so they no longer cover the tabs and toolbar. Hovering over a toast keeps it open. Clicking the toast itself no longer does anything, so it can't catch a click meant for something underneath. Use the close button instead.",
+      "New System notifications setting in General. The default, In background, sends results such as a finished backup, restore, import, or export to macOS Notification Center when Recon isn't the active app, and the toast waits until you switch back. You can also choose Always or Never.",
+    ],
+  },
+  {
     version: "1.3.0",
     date: "September 30, 2026",
     notes: [

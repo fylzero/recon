@@ -1,10 +1,11 @@
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import * as api from "../api";
 import { dashboardIds as orderDashboard } from "../dashboard";
 import type {
   AppData,
   ConnectionEntry,
   ConnectionGroup,
+  NotificationMode,
   PreferencesPatch,
   SavedQuery,
   WindowState,
@@ -18,6 +19,13 @@ import {
   clampFontSize,
   sanitizeFontFamily,
 } from "../fonts";
+import {
+  ensureNotificationPermission,
+  prefersSystemNotification,
+  sanitizeNotificationMode,
+  sendSystemNotification,
+  windowFocused,
+} from "../notifications";
 
 export const DEFAULT_PAGE_SIZE = 300;
 export const DEFAULT_QUERY_ROW_LIMIT = 10_000;
@@ -49,14 +57,48 @@ const queryRowLimit = ref(DEFAULT_QUERY_ROW_LIMIT);
 const sidebarWidth = ref(260);
 const maxAutoColumnWidth = ref(DEFAULT_MAX_AUTO_COLUMN_WIDTH);
 const autoApplyFilters = ref(true);
+const notifications = ref<NotificationMode>("background");
 const windowState = ref<WindowState | null>(null);
 const toastMessage = ref("");
 const toastKind = ref<"success" | "error">("success");
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
+let toastRemaining = 0;
+let toastStartedAt = 0;
+let toastHovered = false;
+
+const TOAST_RESUME_MIN_MS = 1200;
 
 function clampSidebar(width: number) {
   return Math.round(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, width)));
 }
+
+function startToastTimer() {
+  if (toastTimer || !toastMessage.value || toastHovered || !windowFocused.value) {
+    return;
+  }
+  toastStartedAt = Date.now();
+  toastTimer = setTimeout(() => {
+    toastMessage.value = "";
+    toastTimer = null;
+  }, toastRemaining);
+}
+
+function stopToastTimer() {
+  if (!toastTimer) {
+    return;
+  }
+  clearTimeout(toastTimer);
+  toastTimer = null;
+  toastRemaining = Math.max(TOAST_RESUME_MIN_MS, toastRemaining - (Date.now() - toastStartedAt));
+}
+
+watch(windowFocused, (focused) => {
+  if (focused) {
+    startToastTimer();
+  } else {
+    stopToastTimer();
+  }
+});
 
 export function useApp() {
   async function load() {
@@ -97,6 +139,7 @@ export function useApp() {
     sidebarWidth.value = clampSidebar(data.sidebarWidth ?? 260);
     maxAutoColumnWidth.value = data.maxAutoColumnWidth ?? DEFAULT_MAX_AUTO_COLUMN_WIDTH;
     autoApplyFilters.value = data.autoApplyFilters ?? true;
+    notifications.value = sanitizeNotificationMode(data.notifications);
     windowState.value = data.window ?? null;
   }
 
@@ -105,25 +148,54 @@ export function useApp() {
       clearTimeout(toastTimer);
       toastTimer = null;
     }
+    toastHovered = false;
     toastMessage.value = "";
   }
 
-  function showToast(message: string, kind: "success" | "error" = "success") {
+  function showInAppToast(message: string, kind: "success" | "error") {
     dismissToast();
     toastKind.value = kind;
     toastMessage.value = message;
-    toastTimer = setTimeout(
-      () => {
-        toastMessage.value = "";
-        toastTimer = null;
-      },
-      kind === "error" ? 5600 : 3200,
-    );
+    toastRemaining = kind === "error" ? 5600 : 3200;
+    startToastTimer();
+  }
+
+  /**
+   * In the background mode the in-app toast still appears, but its timer waits
+   * for the window to regain focus so it is there when you come back.
+   */
+  function showToast(message: string, kind: "success" | "error" = "success") {
+    if (!message || !prefersSystemNotification(notifications.value)) {
+      showInAppToast(message, kind);
+      return;
+    }
+    const mode = notifications.value;
+    if (mode === "background") {
+      showInAppToast(message, kind);
+    }
+    void sendSystemNotification(message, kind).then((sent) => {
+      if (!sent && mode === "always") {
+        showInAppToast(message, kind);
+      }
+    });
+  }
+
+  function pauseToast() {
+    toastHovered = true;
+    stopToastTimer();
+  }
+
+  function resumeToast() {
+    toastHovered = false;
+    startToastTimer();
   }
 
   async function savePreferences(patch: PreferencesPatch) {
     const next = await api.updatePreferences(patch);
     applyState(next);
+    if (patch.notifications && notifications.value !== "off") {
+      void ensureNotificationPermission();
+    }
   }
 
   function previewPreferences(patch: PreferencesPatch) {
@@ -414,12 +486,15 @@ export function useApp() {
     sidebarWidth,
     maxAutoColumnWidth,
     autoApplyFilters,
+    notifications,
     windowState,
     toastMessage,
     toastKind,
     load,
     showToast,
     dismissToast,
+    pauseToast,
+    resumeToast,
     savePreferences,
     previewPreferences,
     replaceSettings,
