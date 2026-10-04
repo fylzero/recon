@@ -17,6 +17,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       "Isolate and Add linked tables in the diagram follow whichever kinds of links are shown, including polymorphic links and missing keys.",
       "Turn on the diagram's missing keys chip, off by default, to flag columns like user_id or userId that have no foreign key but whose name matches a table, such as users, with a red FK? badge and a dotted red line to that table. parent_id points back to its own table. Columns that don't match a table, like stripe_id, aren't flagged, and neither are polymorphic pairs. Hover an FK? column to see the table it probably references.",
       "MySQL's built-in databases, information_schema, mysql, performance_schema, and sys, are now hidden in the database switcher by default. Click Show hidden databases to see them, and right-click one and choose Show in list to keep it visible for that connection.",
+      "Imports, exports, backups, and restores can run in the background. While one is running, click Run in background or press Escape to hide its window and keep using Recon, including other tabs and other databases in the same tab. The tab it's running in shows its progress, and clicking that shows the window again. If it stops with an error, you get a notification and the tab shows a red !. Closing a tab with one still running asks first, since closing cancels it.",
     ],
   },
   {

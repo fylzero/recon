@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { computed, onUnmounted, ref } from "vue";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
+import { useTransferJob } from "../composables/useTransfers";
 import type { BackupInfo, Driver, ImportProgress } from "../types";
 import Modal from "./Modal.vue";
 
@@ -21,6 +22,7 @@ const emit = defineEmits<{
 }>();
 
 const { showToast } = useApp();
+const job = useTransferJob(() => props.connectionId, "restore");
 
 const understood = ref(false);
 const running = ref(false);
@@ -60,7 +62,9 @@ const percent = computed(() => {
 });
 
 function close() {
-  if (!running.value) {
+  if (running.value) {
+    job.hide();
+  } else {
     emit("close");
   }
 }
@@ -72,10 +76,11 @@ async function start() {
   running.value = true;
   error.value = "";
   progress.value = null;
-  transferId = crypto.randomUUID();
+  transferId = job.begin(`Restoring “${props.namespace}” from ${fileName.value}`);
   stopProgress = await listen<ImportProgress>("import-progress", (event) => {
     if (event.payload.transferId === transferId) {
       progress.value = event.payload;
+      job.progress(percent.value);
     }
   });
   try {
@@ -91,6 +96,10 @@ async function start() {
       emit("close");
     } else {
       error.value = String(err);
+      job.stopped();
+      if (job.hidden.value) {
+        showToast(`Restore of “${props.namespace}” stopped: ${error.value}`, "error");
+      }
     }
   } finally {
     running.value = false;
@@ -116,7 +125,7 @@ onUnmounted(() => stopProgress?.());
 </script>
 
 <template>
-  <Modal :title="`Restore ${label} “${namespace}”`" @close="close">
+  <Modal v-if="!job.hidden.value" :title="`Restore ${label} “${namespace}”`" @close="close">
     <p class="transfer-file" :title="path">{{ fileName }}</p>
     <p class="muted tiny">
       Backup of “{{ info.namespace || namespace }}”<template v-if="info.server"> from {{ info.server }}</template>,
@@ -155,6 +164,7 @@ onUnmounted(() => stopProgress?.());
     </div>
     <p v-if="error" class="settings-error transfer-error">{{ error }}</p>
     <template #actions>
+      <button v-if="running" class="ghost transfer-hide" type="button" @click="job.hide">Run in background</button>
       <button class="ghost" type="button" :disabled="cancelling || !canCancel" @click="cancel">
         {{ error && !running ? "Close" : "Cancel" }}
       </button>

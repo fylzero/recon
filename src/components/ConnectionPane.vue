@@ -7,6 +7,7 @@ import * as api from "../api";
 import { SIDEBAR_MAX, SIDEBAR_MIN, useApp } from "../composables/useApp";
 import { useConnectionForm } from "../composables/useConnectionForm";
 import { registerInnerTabCloser, setLiveTitle, useTabs } from "../composables/useTabs";
+import { useTransfers } from "../composables/useTransfers";
 import type { FilterPreviewGroup } from "../filters/compile";
 import {
   cloneNode,
@@ -111,6 +112,7 @@ const {
 } = useApp();
 const { openEditConnection } = useConnectionForm();
 const { openConnectionTab } = useTabs();
+const { revealKind } = useTransfers();
 
 type ConnectionEvent = { connectionId: string; error: string | null };
 
@@ -219,10 +221,11 @@ const saveDescription = ref("");
 const saveBusy = ref(false);
 const saveError = ref("");
 const saveNameInput = ref<HTMLInputElement | null>(null);
-const exportDialog = ref<{ tables: string[] | null } | null>(null);
-const importPath = ref<string | null>(null);
-const backupOpen = ref(false);
-const restoreTarget = ref<{ path: string; info: BackupInfo } | null>(null);
+// Each keeps the database it was opened on, since its transfer can keep running while you switch away.
+const exportDialog = ref<{ namespace: string; tables: string[] | null; tableCount: number } | null>(null);
+const importTarget = ref<{ namespace: string; path: string } | null>(null);
+const backupTarget = ref<{ namespace: string; tableCount: number } | null>(null);
+const restoreTarget = ref<{ namespace: string; path: string; info: BackupInfo } | null>(null);
 let selectionAnchor = "";
 const editors = new Map<string, InstanceType<typeof QueryEditor>>();
 const tableViews = new Map<string, InstanceType<typeof TableView>>();
@@ -1176,11 +1179,26 @@ function runTableAction(action: "open" | "openNew" | "openSide" | "query" | "cop
   } else if (action === "copy") {
     void copyNamespaceName(table.name);
   } else {
-    exportDialog.value = { tables: chosen };
+    openExport(chosen);
+  }
+}
+
+function openExport(chosen: string[] | null) {
+  if (!revealKind(props.sessionId, "export")) {
+    exportDialog.value = { namespace: namespace.value, tables: chosen, tableCount: tables.value.length };
+  }
+}
+
+function openBackup() {
+  if (!revealKind(props.sessionId, "backup")) {
+    backupTarget.value = { namespace: namespace.value, tableCount: tables.value.length };
   }
 }
 
 async function startImport() {
+  if (revealKind(props.sessionId, "import")) {
+    return;
+  }
   const path = await openFile({
     title: `Import into “${namespace.value}”`,
     multiple: false,
@@ -1188,11 +1206,14 @@ async function startImport() {
     filters: [{ name: "SQL", extensions: ["sql", "gz"] }],
   });
   if (typeof path === "string") {
-    importPath.value = path;
+    importTarget.value = { namespace: namespace.value, path };
   }
 }
 
 async function startRestore() {
+  if (revealKind(props.sessionId, "restore")) {
+    return;
+  }
   const path = await openFile({
     title: `Restore “${namespace.value}” from a backup`,
     multiple: false,
@@ -1203,7 +1224,8 @@ async function startRestore() {
     return;
   }
   try {
-    restoreTarget.value = { path, info: await api.readBackupInfo(path) };
+    const target = namespace.value;
+    restoreTarget.value = { namespace: target, path, info: await api.readBackupInfo(path) };
   } catch (err) {
     showToast(String(err), "error");
   }
@@ -2645,7 +2667,7 @@ onUnmounted(() => {
               type="button"
               :disabled="!canTransfer"
               :title="`Export “${namespace}” to a .sql file`"
-              @click="exportDialog = { tables: null }"
+              @click="openExport(null)"
             >
               <svg viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M8 10V2.5M4.8 5.7 8 2.5l3.2 3.2M2.5 11.5v1a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-1" />
@@ -2658,7 +2680,7 @@ onUnmounted(() => {
               type="button"
               :disabled="!canTransfer"
               :title="`Save a full backup of “${namespace}” that Restore can bring back`"
-              @click="backupOpen = true"
+              @click="openBackup"
             >
               <svg viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M3.5 2.5h7l2 2v8a1 1 0 0 1-1 1h-8a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1ZM5.5 2.5v3h5v-3M5 13.5v-4h6v4" />
@@ -3281,35 +3303,35 @@ onUnmounted(() => {
       <ExportDialog
         v-if="exportDialog"
         :connection-id="sessionId"
-        :namespace="namespace"
+        :namespace="exportDialog.namespace"
         :namespace-label="namespaceLabel"
         :tables="exportDialog.tables"
-        :table-count="tables.length"
+        :table-count="exportDialog.tableCount"
         @close="exportDialog = null"
       />
       <ImportDialog
-        v-if="importPath"
+        v-if="importTarget"
         :connection-id="sessionId"
-        :namespace="namespace"
+        :namespace="importTarget.namespace"
         :namespace-label="namespaceLabel"
-        :path="importPath"
+        :path="importTarget.path"
         @imported="onImported"
-        @close="importPath = null"
+        @close="importTarget = null"
       />
       <BackupDialog
-        v-if="backupOpen"
+        v-if="backupTarget"
         :connection-id="sessionId"
         :driver="driver"
-        :namespace="namespace"
+        :namespace="backupTarget.namespace"
         :namespace-label="namespaceLabel"
-        :table-count="tables.length"
-        @close="backupOpen = false"
+        :table-count="backupTarget.tableCount"
+        @close="backupTarget = null"
       />
       <RestoreDialog
         v-if="restoreTarget"
         :connection-id="sessionId"
         :driver="driver"
-        :namespace="namespace"
+        :namespace="restoreTarget.namespace"
         :namespace-label="namespaceLabel"
         :path="restoreTarget.path"
         :info="restoreTarget.info"

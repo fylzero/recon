@@ -4,6 +4,7 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { computed, onUnmounted, ref } from "vue";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
+import { useTransferJob } from "../composables/useTransfers";
 import { backupLimits, fileSafe, formatBytes } from "../transfer";
 import type { Driver, ExportProgress, ExportResult } from "../types";
 import Modal from "./Modal.vue";
@@ -21,6 +22,7 @@ const emit = defineEmits<{
 }>();
 
 const { showToast } = useApp();
+const job = useTransferJob(() => props.connectionId, "backup");
 
 const running = ref(false);
 const cancelling = ref(false);
@@ -52,7 +54,9 @@ function timestamp() {
 }
 
 function close() {
-  if (!running.value) {
+  if (running.value) {
+    job.hide();
+  } else {
     emit("close");
   }
 }
@@ -79,16 +83,21 @@ async function start() {
   running.value = true;
   error.value = "";
   progress.value = null;
-  transferId = crypto.randomUUID();
+  transferId = job.begin(`Backing up “${props.namespace}”`);
   stopProgress = await listen<ExportProgress>("export-progress", (event) => {
     if (event.payload.transferId === transferId) {
       progress.value = event.payload;
+      job.progress(percent.value);
     }
   });
   try {
     const result = await api.backupDatabase(props.connectionId, transferId, props.namespace, path);
     if (result.skipped.length) {
       incomplete.value = result;
+      job.stopped();
+      if (job.hidden.value) {
+        showToast(`Backup of “${props.namespace}” is incomplete. Open it from its tab to see what was left out.`, "error");
+      }
     } else {
       showToast(describe(result));
       emit("close");
@@ -99,6 +108,10 @@ async function start() {
       emit("close");
     } else {
       error.value = String(err);
+      job.stopped();
+      if (job.hidden.value) {
+        showToast(`Backup of “${props.namespace}” stopped: ${error.value}`, "error");
+      }
     }
   } finally {
     running.value = false;
@@ -121,7 +134,7 @@ onUnmounted(() => stopProgress?.());
 </script>
 
 <template>
-  <Modal :title="`Back up ${label} “${namespace}”`" @close="close">
+  <Modal v-if="!job.hidden.value" :title="`Back up ${label} “${namespace}”`" @close="close">
     <template v-if="incomplete">
       <p class="muted tiny transfer-summary">{{ describe(incomplete) }}.</p>
       <div class="transfer-warning" role="alert">
@@ -153,6 +166,7 @@ onUnmounted(() => stopProgress?.());
     <template #actions>
       <button v-if="incomplete" class="primary" type="button" @click="emit('close')">Done</button>
       <template v-else>
+        <button v-if="running" class="ghost transfer-hide" type="button" @click="job.hide">Run in background</button>
         <button class="ghost" type="button" :disabled="cancelling" @click="cancel">Cancel</button>
         <button class="primary" type="button" :disabled="running" @click="start">
           <span v-if="running" class="spinner" aria-hidden="true" />

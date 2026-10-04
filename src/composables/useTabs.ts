@@ -1,7 +1,9 @@
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { computed, ref } from "vue";
 import { useRouter } from "vue-router";
 import { DEFAULT_HEADER_COLOR } from "../color";
 import { useApp } from "./useApp";
+import { useTransfers } from "./useTransfers";
 
 export const CONNECTIONS_TAB_ID = "connections";
 export const SETTINGS_TAB_ID = "settings";
@@ -68,6 +70,7 @@ export function settingsPath(section: SettingsSection = settingsSection.value) {
 export function useTabs() {
   const router = useRouter();
   const { findConnection } = useApp();
+  const { runningFor } = useTransfers();
 
   const tabs = computed<AppTab[]>(() => [
     { id: CONNECTIONS_TAB_ID, title: "Connections", closable: false },
@@ -207,7 +210,22 @@ export function useTabs() {
       closeUtilityTab(CHANGELOG_TAB_ID, changelogTabOpen);
       return;
     }
-    closeConnections([id]);
+    const running = runningFor(id);
+    if (!running.length) {
+      closeConnections([id]);
+      return;
+    }
+    const names = running.map((job) => job.label).join(", ");
+    void confirm(`${names} ${running.length === 1 ? "is" : "are"} still running in this tab. Closing the tab cancels it.`, {
+      title: "Close tab",
+      kind: "warning",
+      okLabel: "Close and cancel",
+      cancelLabel: "Keep open",
+    }).then((ok) => {
+      if (ok) {
+        closeConnections([id]);
+      }
+    });
   }
 
   function closeConnections(ids: string[]) {

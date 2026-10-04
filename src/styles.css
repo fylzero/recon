@@ -1432,6 +1432,41 @@ button.tab-tool.update:hover:not(:disabled) {
   color: var(--text);
 }
 
+.tab-transfer,
+button.tab-transfer:hover:not(:disabled),
+button.tab-transfer:active {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.1rem 0.4rem;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  box-shadow: none;
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+button.tab-transfer:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+.tab-transfer .spinner {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-width: 1.5px;
+}
+
+.tab-transfer.attention,
+button.tab-transfer.attention:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--bad) 18%, transparent);
+  color: var(--bad);
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -2363,6 +2398,10 @@ button.link-button:hover:not(:disabled) {
 .test-result.bad {
   background: rgba(240, 113, 120, 0.1);
   color: #ff9ca2;
+}
+
+.modal-actions .transfer-hide {
+  margin-right: auto;
 }
 
 .modal-actions .test-button {

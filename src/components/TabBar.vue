@@ -1,12 +1,19 @@
 <script setup lang="ts">
 import { useApp } from "../composables/useApp";
 import { CHANGELOG_TAB_ID, CONNECTIONS_TAB_ID, SETTINGS_TAB_ID, useTabs } from "../composables/useTabs";
+import { useTransfers } from "../composables/useTransfers";
 import { useUpdater } from "../composables/useUpdater";
 import DriverIcon from "./DriverIcon.vue";
 
 const { tabs, activeId, activate, closeTab, openSettings } = useTabs();
 const { findConnection } = useApp();
 const { updateReady, availableVersion, showPrompt } = useUpdater();
+const { jobsFor, reveal } = useTransfers();
+
+function showJob(tabId: string, jobId: string) {
+  activate(tabId);
+  reveal(jobId);
+}
 </script>
 
 <template>
@@ -60,6 +67,19 @@ const { updateReady, availableVersion, showPrompt } = useUpdater();
         <DriverIcon v-else class="tab-icon" :driver="findConnection(tab.id)?.connection.driver" />
         <span class="tab-title">{{ tab.title }}</span>
         <span v-if="tab.badge" class="repo-label tab-badge" :title="tab.badge">{{ tab.badge }}</span>
+        <button
+          v-for="job in jobsFor(tab.id)"
+          :key="job.id"
+          class="tab-transfer"
+          :class="{ attention: job.status === 'attention' }"
+          type="button"
+          :title="job.status === 'attention' ? `${job.label} stopped. Show details` : `${job.label} · ${job.percent}%`"
+          :aria-label="job.status === 'attention' ? `${job.label} stopped. Show details` : `${job.label}, ${job.percent}%. Show progress`"
+          @click.stop="showJob(tab.id, job.id)"
+        >
+          <span v-if="job.status === 'running'" class="spinner" aria-hidden="true" />
+          {{ job.status === "attention" ? "!" : `${job.percent}%` }}
+        </button>
         <button
           v-if="tab.closable"
           class="tab-close"
