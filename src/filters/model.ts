@@ -106,10 +106,10 @@ export interface AutoRefreshState {
 }
 
 export const AUTO_REFRESH_PRESETS = [
-  { label: "5 s", ms: 5_000 },
-  { label: "30 s", ms: 30_000 },
-  { label: "1 m", ms: 60_000 },
-  { label: "5 m", ms: 300_000 },
+  { label: "5s", ms: 5_000 },
+  { label: "30s", ms: 30_000 },
+  { label: "1m", ms: 60_000 },
+  { label: "5m", ms: 300_000 },
 ] as const;
 
 export const MIN_AUTO_REFRESH_MS = 1_000;
@@ -123,10 +123,13 @@ export function clampAutoRefreshMs(value: number) {
 }
 
 export function formatAutoRefresh(ms: number) {
-  if (ms % 60_000 === 0) {
-    return `${ms / 60_000} m`;
+  const total = Math.max(1, Math.round(ms / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  if (minutes === 0) {
+    return `${seconds}s`;
   }
-  return `${Math.max(1, Math.round(ms / 1000))} s`;
+  return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
 }
 
 export function formatCountdown(ms: number) {
