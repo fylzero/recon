@@ -679,7 +679,6 @@ function scrollToTop() {
   void nextTick(() => {
     if (scroller.value) {
       scroller.value.scrollTop = 0;
-      scroller.value.scrollLeft = 0;
     }
   });
 }

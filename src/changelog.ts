@@ -14,6 +14,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       "Right-click a table in the sidebar and choose Truncate table… to delete every row while keeping the table's structure. Select several tables first to truncate them together. MySQL and SQLite can turn off foreign key checks first. PostgreSQL can also empty the tables that reference them (CASCADE). PostgreSQL and SQLite can restart identity and AUTOINCREMENT counters, and MySQL always does. Open tabs on those tables reload afterward, and a table with unsaved changes has to be saved or discarded first.",
       "Right-click a table in the sidebar and choose Drop table… to delete it and all of its rows. Select several tables first to drop them together. MySQL and SQLite can turn off foreign key checks first, which leaves other tables' foreign keys pointing at a table that no longer exists. PostgreSQL can also drop the views and foreign keys that depend on them (CASCADE), keeping the tables those keys were in. Open tabs on those tables close afterward.",
       "An empty table no longer shows a No rows label over the grid.",
+      "Sorting a table, changing pages, or applying a filter no longer scrolls the grid back to the first column. It only goes back to the top row.",
       "A custom auto refresh interval now shows in minutes and seconds, like 2m 30s, instead of only seconds. The intervals in the auto refresh menu are written without spaces, like 5s and 1m.",
     ],
   },
