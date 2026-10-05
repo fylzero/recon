@@ -110,7 +110,7 @@ pub(crate) async fn write_query(
             let mut query = sqlx::query::<sqlx::Sqlite>(sql);
             for param in params {
                 query = match param {
-                    EditValue::Null => query.bind(None::<String>),
+                    EditValue::Null | EditValue::Now(_) => query.bind(None::<String>),
                     EditValue::Bool(value) => query.bind(*value),
                     EditValue::Int(value) => query.bind(*value),
                     EditValue::Float(value) => query.bind(*value),

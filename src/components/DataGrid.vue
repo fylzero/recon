@@ -3,6 +3,23 @@ export interface CellPosition {
   row: number;
   col: number;
 }
+
+export interface CellOption {
+  /** The text the cell gets. */
+  value: string;
+  /** Shown in the list instead of `value`. */
+  label?: string;
+}
+
+export interface CellOptions {
+  values: CellOption[];
+  /** Only these values make sense, so the current one starts highlighted. */
+  strict?: boolean;
+  /** The cell is a comma-separated list, and a pick fills in its last item. */
+  list?: boolean;
+  /** Listed only while the editor is empty, or when what's typed matches. */
+  whenEmpty?: boolean;
+}
 </script>
 
 <script setup lang="ts">
@@ -33,6 +50,8 @@ const props = defineProps<{
   editableColumns?: boolean[];
   /** Overrides `editable` and `editableColumns` when set. */
   cellEditable?: (row: number, col: number) => boolean;
+  /** Values listed under a cell's editor while it's being edited. */
+  cellOptions?: (row: number, col: number) => CellOptions | null;
   /** Rows from this index on are new and numbered with a +. */
   newRowStart?: number;
   /** Per column, whether the database assigns the value in new rows. Tab skips these cells. */
@@ -104,6 +123,166 @@ const focus = ref<CellPosition | null>(null);
 const editing = ref<CellPosition | null>(null);
 const draft = ref("");
 const initialDraft = ref("");
+const menuEl = ref<HTMLDivElement | null>(null);
+const menuOpen = ref(false);
+const menuFiltering = ref(false);
+const menuHighlight = ref(-1);
+const menuStyle = ref<Record<string, string> | null>(null);
+let editorEl: HTMLTextAreaElement | null = null;
+
+const MENU_MAX_HEIGHT = 240;
+
+const editOptions = computed(() => {
+  const position = editing.value;
+  return position ? (props.cellOptions?.(position.row, position.col) ?? null) : null;
+});
+
+function stripQuotes(text: string) {
+  return text.trim().replace(/^[`"[]|[`"\]]$/g, "").toLowerCase();
+}
+
+const menuItems = computed(() => {
+  const options = editOptions.value;
+  if (!options || !menuOpen.value || (options.whenEmpty && !menuFiltering.value && draft.value.trim())) {
+    return [];
+  }
+  const parts = options.list ? draft.value.split(",") : [draft.value];
+  const query = stripQuotes(parts[parts.length - 1] ?? "");
+  const chosen = new Set((menuFiltering.value ? parts.slice(0, -1) : parts).map(stripQuotes));
+  const label = (option: CellOption) => (option.label ?? option.value).toLowerCase();
+  const items = options.values.filter((option) => !chosen.has(label(option)) && !chosen.has(stripQuotes(option.value)));
+  if (!menuFiltering.value || !query) {
+    return items;
+  }
+  const rank = (option: CellOption) => {
+    const text = label(option);
+    return text === query ? 0 : text.startsWith(query) ? 1 : 2;
+  };
+  return items
+    .filter((option) => label(option).includes(query) || option.value.toLowerCase().includes(query))
+    .sort((a, b) => rank(a) - rank(b));
+});
+
+function openMenu(filtering: boolean) {
+  menuOpen.value = Boolean(editOptions.value);
+  menuFiltering.value = filtering;
+  resetHighlight();
+  void nextTick(placeMenu);
+}
+
+function resetHighlight() {
+  if (!editOptions.value?.strict) {
+    menuHighlight.value = -1;
+  } else if (menuFiltering.value) {
+    menuHighlight.value = menuItems.value.length ? 0 : -1;
+  } else {
+    menuHighlight.value = Math.max(
+      menuItems.value.findIndex((option) => option.value === initialDraft.value),
+      0,
+    );
+  }
+}
+
+function closeMenu() {
+  menuOpen.value = false;
+  menuHighlight.value = -1;
+  menuStyle.value = null;
+}
+
+function placeMenu() {
+  if (!menuOpen.value || !editorEl?.isConnected) {
+    menuStyle.value = null;
+    return;
+  }
+  const rect = editorEl.getBoundingClientRect();
+  const below = window.innerHeight - rect.bottom;
+  const font = getComputedStyle(editorEl);
+  const style: Record<string, string> = {
+    left: `${Math.round(rect.left)}px`,
+    minWidth: `${Math.round(rect.width)}px`,
+    fontFamily: font.fontFamily,
+    fontSize: font.fontSize,
+  };
+  if (below < MENU_MAX_HEIGHT && rect.top > below) {
+    style.bottom = `${Math.round(window.innerHeight - rect.top + 2)}px`;
+    style.maxHeight = `${Math.min(MENU_MAX_HEIGHT, Math.round(rect.top - 8))}px`;
+  } else {
+    style.top = `${Math.round(rect.bottom + 2)}px`;
+    style.maxHeight = `${Math.min(MENU_MAX_HEIGHT, Math.round(below - 8))}px`;
+  }
+  menuStyle.value = style;
+}
+
+watch(menuHighlight, (index) => {
+  void nextTick(() => {
+    menuEl.value?.children[index]?.scrollIntoView({ block: "nearest" });
+  });
+});
+
+function onEditorInput() {
+  menuOpen.value = Boolean(editOptions.value);
+  menuFiltering.value = true;
+  resetHighlight();
+  void nextTick(placeMenu);
+}
+
+/** Puts an option into the draft. Returns true when the edit should still go on. */
+function pickOption(option: CellOption) {
+  if (!editOptions.value?.list) {
+    draft.value = option.value;
+    return false;
+  }
+  const parts = draft.value.split(",");
+  if (!menuFiltering.value && parts[parts.length - 1].trim()) {
+    parts.push("");
+  }
+  parts[parts.length - 1] = parts.length > 1 ? ` ${option.value}` : option.value;
+  draft.value = parts.join(",");
+  closeMenu();
+  void nextTick(() => editorEl?.setSelectionRange(draft.value.length, draft.value.length));
+  return true;
+}
+
+function onMenuPick(option: CellOption) {
+  if (pickOption(option)) {
+    return;
+  }
+  commitEdit();
+  scroller.value?.focus({ preventScroll: true });
+}
+
+function onMenuKeydown(event: KeyboardEvent) {
+  if (!menuOpen.value && editOptions.value && event.key === "ArrowDown") {
+    event.preventDefault();
+    openMenu(false);
+    menuHighlight.value = menuItems.value.length ? 0 : -1;
+    return true;
+  }
+  const items = menuItems.value;
+  if (!items.length) {
+    return false;
+  }
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    const lowest = editOptions.value?.strict ? 0 : -1;
+    const step = event.key === "ArrowDown" ? 1 : -1;
+    menuHighlight.value = Math.min(Math.max(menuHighlight.value + step, lowest), items.length - 1);
+    return true;
+  }
+  if (event.key === "Escape" && !editOptions.value?.strict) {
+    event.preventDefault();
+    closeMenu();
+    return true;
+  }
+  const option = items[menuHighlight.value];
+  if (option && (event.key === "Enter" || event.key === "Tab") && !event.shiftKey && !event.altKey) {
+    if (pickOption(option)) {
+      event.preventDefault();
+      return true;
+    }
+  }
+  return false;
+}
 
 const rowHeight = computed(() => Math.round(gridFontSize.value * 1.85 + 2));
 const headerHeight = computed(() => rowHeight.value + 4);
@@ -201,9 +380,13 @@ onMounted(() => {
     viewportHeight.value = node.clientHeight;
   });
   resizeObserver.observe(node);
+  window.addEventListener("resize", placeMenu);
 });
 
-onBeforeUnmount(() => resizeObserver?.disconnect());
+onBeforeUnmount(() => {
+  resizeObserver?.disconnect();
+  window.removeEventListener("resize", placeMenu);
+});
 
 watch(
   () => {
@@ -363,6 +546,7 @@ function startEdit(row: number, col: number, initial?: string) {
   anchor.value = { row, col };
   focus.value = { row, col };
   scrollCellIntoView({ row, col });
+  openMenu(initial !== undefined);
 }
 
 function commitEdit() {
@@ -371,6 +555,7 @@ function commitEdit() {
     return;
   }
   editing.value = null;
+  closeMenu();
   if (draft.value !== initialDraft.value) {
     emit("edit", position.row, position.col, draft.value);
   }
@@ -378,10 +563,15 @@ function commitEdit() {
 
 function cancelEdit() {
   editing.value = null;
+  closeMenu();
 }
 
 function focusEditor(element: unknown) {
-  if (element instanceof HTMLTextAreaElement && document.activeElement !== element) {
+  if (!(element instanceof HTMLTextAreaElement)) {
+    return;
+  }
+  editorEl = element;
+  if (document.activeElement !== element) {
     element.focus({ preventScroll: true });
     element.setSelectionRange(element.value.length, element.value.length);
   }
@@ -389,6 +579,9 @@ function focusEditor(element: unknown) {
 
 function onEditorKeydown(event: KeyboardEvent) {
   event.stopPropagation();
+  if (onMenuKeydown(event)) {
+    return;
+  }
   if (event.key === "Enter" && !event.shiftKey && !event.altKey) {
     event.preventDefault();
     commitEdit();
@@ -740,6 +933,7 @@ defineExpose({ scrollToTop, commitEdit, editCell, focusedCell, selectedRows, cop
     @keydown="onKeydown"
     @dblclick="onBlankDblclick"
     @wheel="onWheel"
+    @scroll.passive="menuOpen && placeMenu()"
   >
     <div class="grid-header" role="row">
       <div class="grid-gutter grid-corner" />
@@ -822,6 +1016,9 @@ defineExpose({ scrollToTop, commitEdit, editCell, focusedCell, selectedRows, cop
               autocomplete="off"
               autocapitalize="off"
               :placeholder="isAutoCell(item.index, col) ? 'auto' : value === null ? 'NULL' : ''"
+              :aria-expanded="menuItems.length > 0"
+              :aria-activedescendant="menuHighlight >= 0 ? `grid-option-${menuHighlight}` : undefined"
+              @input="onEditorInput"
               @keydown="onEditorKeydown"
               @blur="commitEdit"
               @mousedown.stop
@@ -867,5 +1064,30 @@ defineExpose({ scrollToTop, commitEdit, editCell, focusedCell, selectedRows, cop
         <div v-for="col in columns.length" :key="col" class="grid-cell" />
       </div>
     </div>
+    <Teleport to="body">
+      <div
+        v-if="editing && menuItems.length && menuStyle"
+        ref="menuEl"
+        class="overflow-menu-dropdown grid-options"
+        role="listbox"
+        :style="menuStyle"
+        @mousedown.prevent
+      >
+        <button
+          v-for="(option, index) in menuItems"
+          :id="`grid-option-${index}`"
+          :key="option.value"
+          class="overflow-menu-item"
+          :class="{ highlighted: index === menuHighlight, current: option.value === initialDraft }"
+          type="button"
+          role="option"
+          tabindex="-1"
+          :aria-selected="index === menuHighlight"
+          @click="onMenuPick(option)"
+        >
+          {{ option.label ?? option.value }}
+        </button>
+      </div>
+    </Teleport>
   </div>
 </template>

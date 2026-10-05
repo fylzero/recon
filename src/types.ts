@@ -242,7 +242,8 @@ export interface BrowseResult {
   durationMs: number;
 }
 
-export type EditValue = null | boolean | number | string;
+/** `now` has the database fill in its current date, time, or timestamp when the row is saved. */
+export type EditValue = null | boolean | number | string | { now: "date" | "time" | "datetime" };
 
 export interface CellEdit {
   column: string;

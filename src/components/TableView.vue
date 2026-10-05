@@ -58,7 +58,7 @@ import type {
   TableLink,
   TableStructure as Structure,
 } from "../types";
-import DataGrid, { type CellPosition } from "./DataGrid.vue";
+import DataGrid, { type CellOptions, type CellPosition } from "./DataGrid.vue";
 import ExportRowsDialog, { type ExportRowsSource } from "./ExportRowsDialog.vue";
 import FilterPanel from "./FilterPanel.vue";
 import FilterPopover from "./FilterPopover.vue";
@@ -265,6 +265,32 @@ const keyIndexes = computed(() => {
 const nullable = computed(
   () => new Map((structure.value?.columns ?? []).map((column) => [column.name, column.nullable])),
 );
+const NOW_TEXT = "NOW()";
+const NOW_OPTIONS: CellOptions = { values: [{ value: NOW_TEXT }], whenEmpty: true };
+const temporalKinds = computed(() => {
+  const kinds = new Map<string, "date" | "time" | "datetime">();
+  for (const column of structure.value?.columns ?? []) {
+    const kind = column.filterKind;
+    if (kind === "date" || kind === "time" || kind === "datetime") {
+      kinds.set(column.name, kind);
+    }
+  }
+  return kinds;
+});
+
+/** Date and time cells offer NOW() while being edited empty. The database fills it in when the row is saved. */
+function cellOptions(_row: number, col: number) {
+  const name = columns.value[col]?.name;
+  return name && temporalKinds.value.has(name) ? NOW_OPTIONS : null;
+}
+
+function editValue(column: string, value: Cell): EditValue {
+  const kind = temporalKinds.value.get(column);
+  if (kind && typeof value === "string" && /^now(\(\))?$/i.test(value.trim())) {
+    return { now: kind };
+  }
+  return value as EditValue;
+}
 const autoColumns = computed(() => {
   const auto = new Set(
     (structure.value?.columns ?? []).filter(isAutoIncrement).map((column) => column.name),
@@ -1011,7 +1037,7 @@ function pendingChanges() {
   const structurePending = structureView.value?.pendingChanges();
   const rowEdits = [...pendingByRow.value.values()];
   const cellEdits = (cells: PendingCell[]) =>
-    cells.map((cell) => ({ column: cell.column, value: cell.value as EditValue }));
+    cells.map((cell) => ({ column: cell.column, value: editValue(cell.column, cell.value) }));
   const request: SaveRequest = {
     namespace: namespace.value,
     table: table.value,
@@ -1868,6 +1894,7 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
           :sort-column="sortColumn"
           :sort-dir="sortDir"
           :cell-editable="cellEditable"
+          :cell-options="cellOptions"
           :new-row-start="rows.length"
           :new-row-auto="autoColumns"
           :creatable="canInsert"

@@ -400,6 +400,7 @@ impl Fragment {
 pub fn literal(driver: Driver, value: &EditValue) -> String {
     match value {
         EditValue::Null => "NULL".into(),
+        EditValue::Now(kind) => kind.sql().into(),
         EditValue::Bool(value) => match driver {
             Driver::Postgres => if *value { "TRUE" } else { "FALSE" }.into(),
             _ => i64::from(*value).to_string(),
@@ -618,7 +619,7 @@ fn like_pattern(op: FilterOp, text: &str) -> String {
 
 fn scalar_text(value: &EditValue) -> Option<String> {
     match value {
-        EditValue::Null => None,
+        EditValue::Null | EditValue::Now(_) => None,
         EditValue::Bool(value) => Some(value.to_string()),
         EditValue::Int(value) => Some(value.to_string()),
         EditValue::Float(value) => Some(value.to_string()),

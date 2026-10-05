@@ -344,12 +344,37 @@ pub enum EditValue {
     Int(i64),
     Float(f64),
     Text(String),
+    /** The database's current date, time, or timestamp, written into the SQL instead of bound. */
+    Now(NowKind),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NowKind {
+    Date,
+    Time,
+    Datetime,
+}
+
+impl NowKind {
+    pub fn sql(self) -> &'static str {
+        match self {
+            NowKind::Date => "CURRENT_DATE",
+            NowKind::Time => "CURRENT_TIME",
+            NowKind::Datetime => "CURRENT_TIMESTAMP",
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for EditValue {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde_json::Value;
         match Value::deserialize(deserializer)? {
+            Value::Object(object) => match object.get("now").and_then(Value::as_str) {
+                Some("date") => Ok(EditValue::Now(NowKind::Date)),
+                Some("time") => Ok(EditValue::Now(NowKind::Time)),
+                Some("datetime") => Ok(EditValue::Now(NowKind::Datetime)),
+                _ => Err(serde::de::Error::custom("expected {\"now\": \"date\" | \"time\" | \"datetime\"}")),
+            },
             Value::Null => Ok(EditValue::Null),
             Value::Bool(value) => Ok(EditValue::Bool(value)),
             Value::Number(number) => match number.as_i64() {
@@ -373,11 +398,24 @@ impl EditValue {
             EditValue::Int(value) => Some(value.to_string()),
             EditValue::Float(value) => Some(value.to_string()),
             EditValue::Text(value) => Some(value.clone()),
+            EditValue::Now(_) => None,
+        }
+    }
+
+    /** SQL for values that are never bound as parameters. */
+    fn inline_sql(&self) -> Option<String> {
+        match self {
+            EditValue::Null => Some("NULL".into()),
+            EditValue::Now(kind) => Some(kind.sql().into()),
+            _ => None,
         }
     }
 
     /// Postgres infers the column type from an untyped literal, so every value is quoted.
     fn postgres_literal(&self) -> String {
+        if let Some(sql) = self.inline_sql() {
+            return sql;
+        }
         match self.text() {
             None => "NULL".into(),
             Some(text) => format!("E'{}'", text.replace('\\', "\\\\").replace('\'', "''")),
@@ -391,6 +429,7 @@ impl EditValue {
                 self.text().unwrap_or_default()
             }
             EditValue::Text(text) => quote_literal(text),
+            EditValue::Now(kind) => kind.sql().into(),
         }
     }
 }
@@ -504,11 +543,11 @@ pub fn insert_statement(driver: Driver, table: &str, insert: &RowInsert, overrid
     let mut display_values = Vec::new();
     for cell in &insert.values {
         columns.push(dialect.quote_ident(&cell.column));
-        values.push(match &cell.value {
-            EditValue::Null => "NULL".to_string(),
-            value if driver == Driver::Postgres => value.postgres_literal(),
-            value => {
-                params.push(value.clone());
+        values.push(match cell.value.inline_sql() {
+            Some(sql) => sql,
+            None if driver == Driver::Postgres => cell.value.postgres_literal(),
+            None => {
+                params.push(cell.value.clone());
                 "?".to_string()
             }
         });
@@ -708,10 +747,7 @@ pub fn update_statement(driver: Driver, table: &str, update: &RowUpdate) -> Resu
     let mut set_display = Vec::new();
     for change in &update.changes {
         let column = dialect.quote_ident(&change.column);
-        let sql = match change.value {
-            EditValue::Null => "NULL".to_string(),
-            ref value => value_sql(value),
-        };
+        let sql = change.value.inline_sql().unwrap_or_else(|| value_sql(&change.value));
         set.push(format!("{column} = {sql}"));
         set_display.push(format!("{column} = {}", change.value.display_literal()));
     }
@@ -798,7 +834,7 @@ macro_rules! apply_in_transaction {
             let mut query = sqlx::query(&statement.sql);
             for param in &statement.params {
                 query = match param {
-                    EditValue::Null => query.bind(None::<String>),
+                    EditValue::Null | EditValue::Now(_) => query.bind(None::<String>),
                     EditValue::Bool(value) => query.bind(*value),
                     EditValue::Int(value) => query.bind(*value),
                     EditValue::Float(value) => query.bind(*value),
@@ -2089,6 +2125,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(indexes.text_rows()[0][0].as_deref(), Some("by_status"));
+    }
+
+    #[tokio::test]
+    async fn writes_the_current_time_inline() {
+        let value: EditValue = serde_json::from_str(r#"{"now":"datetime"}"#).unwrap();
+        assert_eq!(value, EditValue::Now(NowKind::Datetime));
+        assert!(serde_json::from_str::<EditValue>(r#"{"now":"later"}"#).is_err());
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let pool = Pool::Sqlite(pool);
+        pool.run("CREATE TABLE posts (id INTEGER PRIMARY KEY, day DATE, at DATETIME)", 0).await.unwrap();
+        let insert = RowInsert {
+            values: vec![
+                CellEdit { column: "id".into(), value: EditValue::Int(1) },
+                CellEdit { column: "day".into(), value: EditValue::Now(NowKind::Date) },
+            ],
+        };
+        let insert = insert_statement(Driver::Sqlite, "\"posts\"", &insert, false);
+        assert_eq!(insert.sql, "INSERT INTO \"posts\" (\"id\", \"day\") VALUES (?, CURRENT_DATE)");
+        assert_eq!(insert.params, vec![EditValue::Int(1)]);
+        let update = RowUpdate {
+            key: vec![CellEdit { column: "id".into(), value: EditValue::Int(1) }],
+            changes: vec![CellEdit { column: "at".into(), value: EditValue::Now(NowKind::Datetime) }],
+        };
+        let update = update_statement(Driver::Postgres, "\"posts\"", &update).unwrap();
+        assert_eq!(update.sql, "UPDATE \"posts\" SET \"at\" = CURRENT_TIMESTAMP WHERE \"id\" = E'1'");
+        let update = RowUpdate {
+            key: vec![CellEdit { column: "id".into(), value: EditValue::Int(1) }],
+            changes: vec![CellEdit { column: "at".into(), value: EditValue::Now(NowKind::Datetime) }],
+        };
+        pool.apply(&[insert, update_statement(Driver::Sqlite, "\"posts\"", &update).unwrap()]).await.unwrap();
+        let saved = pool.run("SELECT length(day), length(at) FROM posts", 10).await.unwrap();
+        assert_eq!(saved.rows[0], vec![CellValue::Int(10), CellValue::Int(19)]);
     }
 
     #[tokio::test]

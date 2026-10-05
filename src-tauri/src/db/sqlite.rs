@@ -73,7 +73,7 @@ pub async fn run_bound(
     let mut query = sqlx::query::<Sqlite>(sql);
     for param in params {
         query = match param {
-            EditValue::Null => query.bind(None::<String>),
+            EditValue::Null | EditValue::Now(_) => query.bind(None::<String>),
             EditValue::Bool(value) => query.bind(*value),
             EditValue::Int(value) => query.bind(*value),
             EditValue::Float(value) => query.bind(*value),

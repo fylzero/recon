@@ -5032,6 +5032,30 @@ button.grid-find-close {
   font-style: italic;
 }
 
+.grid-options {
+  position: fixed;
+  right: auto;
+  z-index: 13;
+  min-width: 8rem;
+  overflow-y: auto;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.grid-options .overflow-menu-item {
+  padding: 0.3rem 0.55rem;
+  font: inherit;
+  white-space: nowrap;
+}
+
+.grid-options .overflow-menu-item.highlighted {
+  background: var(--bg-hover);
+}
+
+.grid-options .overflow-menu-item.current {
+  color: var(--accent);
+}
+
 .edit-status {
   color: var(--warn);
 }
