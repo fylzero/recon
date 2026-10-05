@@ -7,6 +7,7 @@ pub mod sql_split;
 pub mod sqlite;
 pub mod ssh;
 pub mod table_ops;
+pub mod tabular;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1245,7 +1246,7 @@ impl SessionStore {
 
 struct StoredResult {
     connection_id: String,
-    rows: Vec<RowValues>,
+    rows: Arc<Vec<RowValues>>,
 }
 
 #[derive(Default)]
@@ -1261,21 +1262,26 @@ impl ResultStore {
                 id.clone(),
                 StoredResult {
                     connection_id: connection_id.to_string(),
-                    rows,
+                    rows: Arc::new(rows),
                 },
             );
         }
         id
     }
 
-    pub fn window(&self, result_id: &str, offset: usize, limit: usize) -> Result<Vec<RowValues>, String> {
+    pub fn rows(&self, result_id: &str) -> Result<Arc<Vec<RowValues>>, String> {
         let results = self.results.lock().map_err(|err| err.to_string())?;
-        let stored = results
+        results
             .get(result_id)
-            .ok_or_else(|| "That result is no longer available. Run the query again.".to_string())?;
-        let start = offset.min(stored.rows.len());
-        let end = offset.saturating_add(limit).min(stored.rows.len());
-        Ok(stored.rows[start..end].to_vec())
+            .map(|stored| stored.rows.clone())
+            .ok_or_else(|| "That result is no longer available. Run the query again.".to_string())
+    }
+
+    pub fn window(&self, result_id: &str, offset: usize, limit: usize) -> Result<Vec<RowValues>, String> {
+        let rows = self.rows(result_id)?;
+        let start = offset.min(rows.len());
+        let end = offset.saturating_add(limit).min(rows.len());
+        Ok(rows[start..end].to_vec())
     }
 
     pub fn remove(&self, result_ids: &[String]) {

@@ -711,7 +711,7 @@ async fn load_columns(session: &Session, namespace: &str, table: &str) -> Result
     Ok(columns)
 }
 
-async fn table_columns(session: &Session, namespace: &str, table: &str) -> Result<Arc<Vec<ColumnDetail>>, String> {
+pub(crate) async fn table_columns(session: &Session, namespace: &str, table: &str) -> Result<Arc<Vec<ColumnDetail>>, String> {
     match session.cached_columns(namespace, table) {
         Some(columns) => Ok(columns),
         None => load_columns(session, namespace, table).await,
@@ -857,7 +857,8 @@ async fn filtered_select(session: &Session, request: &BrowseRequest, select: &st
     Ok(statement)
 }
 
-async fn browse_statement(session: &Session, request: &BrowseRequest) -> Result<(Fragment, u64), String> {
+/** The filtered `SELECT *` with the request's sort, but no LIMIT. */
+async fn sorted_select(session: &Session, request: &BrowseRequest) -> Result<Fragment, String> {
     let dialect = dialect(session.driver);
     let mut statement = filtered_select(session, request, "*").await?;
     if let Some(column) = request.order_by.as_deref().filter(|column| !column.is_empty()) {
@@ -871,9 +872,22 @@ async fn browse_statement(session: &Session, request: &BrowseRequest) -> Result<
             request.order_dir.unwrap_or(db::SortDirection::Asc).sql()
         ));
     }
+    Ok(statement)
+}
+
+async fn browse_statement(session: &Session, request: &BrowseRequest) -> Result<(Fragment, u64), String> {
+    let mut statement = sorted_select(session, request).await?;
     let limit = request.limit.clamp(1, BROWSE_LIMIT_MAX);
     statement.push_sql(format!(" LIMIT {limit} OFFSET {}", request.offset));
     Ok((statement, limit))
+}
+
+/** What exporting a table view reads: every matching row, or only the page on screen. */
+pub(crate) async fn export_statement(session: &Session, request: &BrowseRequest, page_only: bool) -> Result<Fragment, String> {
+    if page_only {
+        return browse_statement(session, request).await.map(|(statement, _)| statement);
+    }
+    sorted_select(session, request).await
 }
 
 fn record_statement(
@@ -1283,7 +1297,7 @@ pub async fn run_query(
             Ok(raw) => {
                 let row_count = raw.rows.len();
                 let first_page = raw.rows[..row_count.min(FIRST_PAGE)].to_vec();
-                let result_id = (row_count > FIRST_PAGE).then(|| results.insert(&connection_id, raw.rows));
+                let result_id = Some(results.insert(&connection_id, raw.rows));
                 output.push(StatementResult {
                     sql: sql.to_string(),
                     result_id,

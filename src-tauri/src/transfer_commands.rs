@@ -15,17 +15,19 @@ use tauri::{AppHandle, Emitter, State};
 use crate::db::dump::{self, Dump, DumpOptions, DumpProgress, DumpSummary, DumpTable};
 use crate::db::restore::{self, BackupInfo};
 use crate::db::sql_split::{is_copy_from_stdin, Splitter};
+use crate::db::tabular::TabularOptions;
 use crate::db::{describe_error, dialect, first_text, Conn, Session, SessionStore, TableInfo};
 use crate::db_commands::{reapply_namespace, tables_in};
 use crate::models::Driver;
 use crate::query_log::{self, QueryOrigin, QueryRecord};
+use crate::tabular_commands;
 
-const EXPORT_PROGRESS_EVENT: &str = "export-progress";
-const IMPORT_PROGRESS_EVENT: &str = "import-progress";
+pub(crate) const EXPORT_PROGRESS_EVENT: &str = "export-progress";
+pub(crate) const IMPORT_PROGRESS_EVENT: &str = "import-progress";
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(120);
-const READ_BUFFER: usize = 256 * 1024;
+pub(crate) const READ_BUFFER: usize = 256 * 1024;
 const COPY_CHUNK: usize = 256 * 1024;
-const IMPORT_CANCELLED: &str = "Import cancelled.";
+pub(crate) const IMPORT_CANCELLED: &str = "Import cancelled.";
 const RESTORE_CANCELLED: &str = "Restore cancelled.";
 
 #[derive(Default)]
@@ -34,7 +36,7 @@ pub struct TransferStore {
 }
 
 impl TransferStore {
-    fn start<'a>(&'a self, transfer_id: &'a str) -> Transfer<'a> {
+    pub(crate) fn start<'a>(&'a self, transfer_id: &'a str) -> Transfer<'a> {
         let cancel = Arc::new(AtomicBool::new(false));
         if let Ok(mut flags) = self.flags.lock() {
             flags.insert(transfer_id.to_string(), cancel.clone());
@@ -54,14 +56,14 @@ impl TransferStore {
 }
 
 /// Unregisters the transfer however it ends.
-struct Transfer<'a> {
+pub(crate) struct Transfer<'a> {
     store: &'a TransferStore,
-    transfer_id: &'a str,
-    cancel: Arc<AtomicBool>,
+    pub(crate) transfer_id: &'a str,
+    pub(crate) cancel: Arc<AtomicBool>,
 }
 
 impl Transfer<'_> {
-    fn cancelled(&self) -> bool {
+    pub(crate) fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
     }
 }
@@ -75,10 +77,10 @@ impl Drop for Transfer<'_> {
 }
 
 /// Emits at most every `PROGRESS_INTERVAL`, unless `force` marks a step worth showing right away.
-struct Throttle(Option<Instant>);
+pub(crate) struct Throttle(pub(crate) Option<Instant>);
 
 impl Throttle {
-    fn ready(&mut self, force: bool) -> bool {
+    pub(crate) fn ready(&mut self, force: bool) -> bool {
         if force || self.0.is_none_or(|last| last.elapsed() >= PROGRESS_INTERVAL) {
             self.0 = Some(Instant::now());
             return true;
@@ -87,7 +89,7 @@ impl Throttle {
     }
 }
 
-fn file_name(path: &Path) -> String {
+pub(crate) fn file_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
@@ -110,6 +112,9 @@ pub struct ExportRequest {
     pub structure: bool,
     pub data: bool,
     pub drop_tables: bool,
+    /// Rows as CSV or JSON instead of SQL. `path` is a folder when there's more than one table.
+    #[serde(default)]
+    pub tabular: Option<TabularOptions>,
 }
 
 #[derive(Debug, Serialize)]
@@ -123,15 +128,15 @@ pub struct ExportResult {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ExportProgressEvent<'a> {
-    transfer_id: &'a str,
-    table: &'a str,
-    index: usize,
-    total: usize,
-    rows: u64,
+pub(crate) struct ExportProgressEvent<'a> {
+    pub(crate) transfer_id: &'a str,
+    pub(crate) table: &'a str,
+    pub(crate) index: usize,
+    pub(crate) total: usize,
+    pub(crate) rows: u64,
 }
 
-enum Sink {
+pub(crate) enum Sink {
     Plain(BufWriter<File>),
     Gzip(GzEncoder<BufWriter<File>>),
 }
@@ -153,7 +158,15 @@ impl Write for Sink {
 }
 
 impl Sink {
-    fn finish(self) -> io::Result<()> {
+    pub(crate) fn new(file: File, gzip: bool) -> Self {
+        if gzip {
+            Sink::Gzip(GzEncoder::new(BufWriter::new(file), Compression::default()))
+        } else {
+            Sink::Plain(BufWriter::new(file))
+        }
+    }
+
+    pub(crate) fn finish(self) -> io::Result<()> {
         match self {
             Sink::Plain(mut out) => out.flush(),
             Sink::Gzip(out) => out.finish()?.flush(),
@@ -164,7 +177,7 @@ impl Sink {
 /// Builds the text placed before the dump, from the server version and what the dump wrote.
 type Header<'a> = &'a (dyn Fn(&str, &DumpSummary) -> String + Sync);
 
-fn sibling(path: &Path, suffix: &str) -> PathBuf {
+pub(crate) fn sibling(path: &Path, suffix: &str) -> PathBuf {
     path.with_file_name(format!("{}.{suffix}", file_name(path)))
 }
 
@@ -210,11 +223,7 @@ async fn write_dump(
     let partial = sibling(path, "part");
     let body = if header.is_some() { sibling(path, "body.part") } else { partial.clone() };
     let file = File::create(&body).map_err(|err| format!("Could not create {}: {err}", file_name(path)))?;
-    let mut sink = if gzip {
-        Sink::Gzip(GzEncoder::new(BufWriter::new(file), Compression::default()))
-    } else {
-        Sink::Plain(BufWriter::new(file))
-    };
+    let mut sink = Sink::new(file, gzip);
 
     let outcome = async {
         let mut conn = session.pool.detached().await?;
@@ -276,7 +285,7 @@ pub async fn export_sql(
     transfer_id: String,
     request: ExportRequest,
 ) -> Result<ExportResult, String> {
-    if !request.structure && !request.data {
+    if request.tabular.is_none() && !request.structure && !request.data {
         return Err("Choose to export the structure, the data, or both.".into());
     }
     let session = sessions.get(&connection_id).await?;
@@ -299,6 +308,10 @@ pub async fn export_sql(
     }
 
     let transfer = transfers.start(&transfer_id);
+    if let Some(options) = &request.tabular {
+        let path = Path::new(&request.path);
+        return tabular_commands::export_tables(&app, &session, &transfer, &request.namespace, &tables, options, path).await;
+    }
     let options = DumpOptions {
         structure: request.structure,
         data: request.data,
@@ -453,14 +466,14 @@ async fn copy_from_stdin(
 }
 
 /// A .sql or gzipped .sql file, read as plain SQL either way.
-struct SqlFile {
-    name: String,
-    reader: Box<dyn BufRead + Send>,
-    read: Arc<AtomicU64>,
-    total_bytes: u64,
+pub(crate) struct SqlFile {
+    pub(crate) name: String,
+    pub(crate) reader: Box<dyn BufRead + Send>,
+    pub(crate) read: Arc<AtomicU64>,
+    pub(crate) total_bytes: u64,
 }
 
-fn open_sql_file(path: &str) -> Result<SqlFile, String> {
+pub(crate) fn open_sql_file(path: &str) -> Result<SqlFile, String> {
     let name = file_name(Path::new(path));
     let file = File::open(path).map_err(|err| format!("Could not open {name}: {err}"))?;
     let total_bytes = file.metadata().map(|meta| meta.len()).unwrap_or(0);

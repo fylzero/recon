@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { save } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { computed, onUnmounted, ref, watch } from "vue";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
 import { useTransferJob } from "../composables/useTransfers";
-import { fileSafe, formatBytes } from "../transfer";
-import type { ExportProgress } from "../types";
+import { fileSafe, formatBytes, loadTabularOptions, saveTabularOptions, tabularExtension, tabularFilter } from "../transfer";
+import type { ExportProgress, TabularOptions as TabularChoices } from "../types";
 import Modal from "./Modal.vue";
+import TabularOptions from "./TabularOptions.vue";
 
 const props = defineProps<{
   connectionId: string;
@@ -26,8 +27,10 @@ const { showToast } = useApp();
 const job = useTransferJob(() => props.connectionId, "export");
 
 type ExportOptions = { structure: boolean; data: boolean; dropTables: boolean; gzip: boolean };
+type ExportFormat = "sql" | "csv" | "json";
 
 const OPTIONS_KEY = "recon.exportOptions";
+const FORMAT_KEY = "recon.exportFormat";
 const DEFAULT_OPTIONS: ExportOptions = { structure: true, data: true, dropTables: true, gzip: true };
 
 function loadOptions(): ExportOptions {
@@ -45,7 +48,14 @@ function loadOptions(): ExportOptions {
   }
 }
 
+function loadFormat(): ExportFormat {
+  const saved = localStorage.getItem(FORMAT_KEY);
+  return saved === "csv" || saved === "json" ? saved : "sql";
+}
+
 const options = ref(loadOptions());
+const format = ref<ExportFormat>(loadFormat());
+const tabular = ref<TabularChoices>(loadTabularOptions());
 const running = ref(false);
 const cancelling = ref(false);
 const error = ref("");
@@ -54,6 +64,13 @@ let transferId = "";
 let stopProgress: UnlistenFn | null = null;
 
 watch(options, (value) => localStorage.setItem(OPTIONS_KEY, JSON.stringify(value)), { deep: true });
+watch(format, (value) => {
+  localStorage.setItem(FORMAT_KEY, value);
+  if (value !== "sql") {
+    tabular.value = { ...tabular.value, format: value };
+  }
+});
+watch(tabular, (value) => saveTabularOptions(value));
 
 const label = computed(() => props.namespaceLabel.toLowerCase());
 const title = computed(() => {
@@ -74,7 +91,15 @@ const summary = computed(() => {
   const more = props.tables.length > 4 ? ` and ${props.tables.length - 4} more` : "";
   return `${names}${more} from “${props.namespace}”.`;
 });
-const canExport = computed(() => options.value.structure || options.value.data);
+const isTabular = computed(() => format.value !== "sql");
+/** CSV and JSON hold one table each, so several tables go into a folder. */
+const toFolder = computed(() => isTabular.value && (props.tables === null || props.tables.length > 1));
+const tabularRequest = computed<TabularChoices>(() => ({
+  ...tabular.value,
+  format: format.value === "json" ? "json" : "csv",
+  gzip: options.value.gzip,
+}));
+const canExport = computed(() => isTabular.value || options.value.structure || options.value.data);
 const percent = computed(() => {
   const current = progress.value;
   if (!current?.total) {
@@ -98,18 +123,33 @@ function close() {
   }
 }
 
-async function start() {
-  if (!canExport.value || running.value) {
-    return;
+async function choosePath() {
+  if (toFolder.value) {
+    const folder = await open({ title: `${title.value}: choose a folder for one file per table`, directory: true });
+    return typeof folder === "string" ? folder : null;
+  }
+  if (isTabular.value) {
+    return save({
+      title: title.value,
+      defaultPath: `${fileSafe(defaultName())}.${tabularExtension(tabularRequest.value)}`,
+      filters: [tabularFilter(tabularRequest.value)],
+    });
   }
   const extension = options.value.gzip ? "sql.gz" : "sql";
-  const path = await save({
+  return save({
     title: title.value,
     defaultPath: `${fileSafe(defaultName())}.${extension}`,
     filters: [
       options.value.gzip ? { name: "Gzipped SQL", extensions: ["gz"] } : { name: "SQL", extensions: ["sql"] },
     ],
   });
+}
+
+async function start() {
+  if (!canExport.value || running.value) {
+    return;
+  }
+  const path = await choosePath();
   if (!path) {
     return;
   }
@@ -129,6 +169,7 @@ async function start() {
       tables: props.tables,
       path,
       ...options.value,
+      tabular: isTabular.value ? tabularRequest.value : null,
     });
     const file = result.path.split("/").pop() ?? result.path;
     const tables = `${result.tables.toLocaleString()} ${result.tables === 1 ? "table" : "tables"}`;
@@ -170,7 +211,20 @@ onUnmounted(() => stopProgress?.());
 <template>
   <Modal v-if="!job.hidden.value" :title="title" @close="close">
     <p class="muted tiny transfer-summary">{{ summary }}</p>
-    <div class="transfer-options">
+    <div class="segmented transfer-format" role="group" aria-label="Format">
+      <button
+        v-for="item in (['sql', 'csv', 'json'] as const)"
+        :key="item"
+        type="button"
+        :class="{ active: format === item }"
+        :aria-pressed="format === item"
+        :disabled="running"
+        @click="format = item"
+      >
+        {{ item.toUpperCase() }}
+      </button>
+    </div>
+    <div v-if="!isTabular" class="transfer-options">
       <label class="checkbox-row">
         <input v-model="options.structure" type="checkbox" :disabled="running" />
         Structure
@@ -188,6 +242,17 @@ onUnmounted(() => stopProgress?.());
         Compress with gzip (.sql.gz)
       </label>
     </div>
+    <template v-else>
+      <p class="muted tiny transfer-summary">
+        Only the rows are exported, not the structure.
+        <template v-if="toFolder">Each table and view gets its own file in the folder you choose.</template>
+      </p>
+      <TabularOptions v-model="tabular" :disabled="running" />
+      <label class="checkbox-row">
+        <input v-model="options.gzip" type="checkbox" :disabled="running" />
+        Compress with gzip (.{{ tabularExtension({ ...tabularRequest, gzip: true }) }})
+      </label>
+    </template>
     <div v-if="running" class="transfer-progress" aria-live="polite">
       <div class="transfer-bar"><span :style="{ width: `${percent}%` }" /></div>
       <p class="muted tiny transfer-status">

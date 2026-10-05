@@ -325,6 +325,80 @@ export interface ExportRequest {
   structure: boolean;
   data: boolean;
   dropTables: boolean;
+  /** Rows as CSV or JSON instead of SQL. `path` is a folder when there's more than one table. */
+  tabular?: TabularOptions | null;
+}
+
+export type TabularFormat = "csv" | "json";
+export type JsonStyle = "array" | "lines";
+
+export interface TabularOptions {
+  format: TabularFormat;
+  delimiter: string;
+  header: boolean;
+  /** How NULL is written in CSV: "", "\\N", or "NULL". */
+  nullAs: string;
+  /** A UTF-8 byte order mark, which Excel needs to read the file as UTF-8. */
+  bom: boolean;
+  jsonStyle: JsonStyle;
+  gzip: boolean;
+}
+
+export interface ImportFileOptions {
+  format?: TabularFormat | null;
+  /** Detected from the first line when null. */
+  delimiter?: string | null;
+  header: boolean;
+  /** Unquoted CSV fields that mean NULL. */
+  nullMarkers: string[];
+}
+
+export interface ImportPreview {
+  fileName: string;
+  format: TabularFormat;
+  delimiter: string;
+  columns: string[];
+  /** A guessed column type for each column, for creating a table. */
+  types: string[];
+  rows: (string | null)[][];
+  sampled: number;
+  totalBytes: number;
+}
+
+export interface ColumnMapping {
+  /** Index into `sourceColumns`. */
+  source: number;
+  target: string;
+}
+
+export interface NewTable {
+  columns: { name: string; dataType: string }[];
+  idColumn: boolean;
+}
+
+export interface ImportRowsRequest {
+  namespace: string;
+  table: string;
+  path: string;
+  file: ImportFileOptions;
+  sourceColumns: string[];
+  mapping: ColumnMapping[];
+  create?: NewTable | null;
+  emptyFirst: boolean;
+  skipConflicts: boolean;
+}
+
+export interface ImportRowsResult {
+  rows: number;
+  durationMs: number;
+  created: boolean;
+}
+
+export interface ImportRowsProgress {
+  transferId: string;
+  rows: number;
+  bytes: number;
+  totalBytes: number;
 }
 
 export interface ExportResult {

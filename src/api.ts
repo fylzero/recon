@@ -9,7 +9,11 @@ import type {
   DropOptions,
   ExportRequest,
   ExportResult,
+  ImportFileOptions,
+  ImportPreview,
   ImportResult,
+  ImportRowsRequest,
+  ImportRowsResult,
   NamespaceList,
   PreferencesPatch,
   QueryLogEntry,
@@ -21,6 +25,7 @@ import type {
   SessionInfo,
   StatementResult,
   TableInfo,
+  TabularOptions,
   TableStructure,
   TruncateOptions,
   WindowState,
@@ -279,6 +284,29 @@ export function cancelQuery(connectionId: string) {
 
 export function exportSql(connectionId: string, transferId: string, request: ExportRequest) {
   return invoke<ExportResult>("export_sql", { connectionId, transferId, request });
+}
+
+export function exportBrowse(
+  connectionId: string,
+  transferId: string,
+  request: BrowseRequest,
+  pageOnly: boolean,
+  options: TabularOptions,
+  path: string,
+) {
+  return invoke<ExportResult>("export_browse", { connectionId, transferId, request, pageOnly, options, path });
+}
+
+export function exportResult(resultId: string, columns: string[], options: TabularOptions, path: string) {
+  return invoke<ExportResult>("export_result", { resultId, columns, options, path });
+}
+
+export function previewImport(connectionId: string, path: string, options: ImportFileOptions) {
+  return invoke<ImportPreview>("preview_import", { connectionId, path, options });
+}
+
+export function importRows(connectionId: string, transferId: string, request: ImportRowsRequest) {
+  return invoke<ImportRowsResult>("import_rows", { connectionId, transferId, request });
 }
 
 export function importSql(connectionId: string, transferId: string, namespace: string, path: string) {

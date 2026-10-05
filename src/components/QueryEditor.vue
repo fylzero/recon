@@ -11,8 +11,11 @@ import { splitStatements, statementAt } from "../sql";
 import { sqlDialect, sqlEditorTheme, sqlHighlighting } from "../sqlEditor";
 import { exportSqlFile } from "../transfer";
 import type { Driver, RowValues, StatementResult } from "../types";
+import type { CopyFormat } from "../cells";
 import { useGridFind } from "../composables/useGridFind";
+import { placeAtPoint, useDismiss, type PopoverPosition } from "../composables/usePopover";
 import DataGrid from "./DataGrid.vue";
+import ExportRowsDialog, { type ExportRowsSource } from "./ExportRowsDialog.vue";
 import GridFind from "./GridFind.vue";
 
 const FETCH_BLOCK = 500;
@@ -63,6 +66,43 @@ const findable = computed(() => Boolean(current.value?.result.columns.length && 
 
 function gridElement() {
   return grid.value?.$el as HTMLElement | undefined;
+}
+
+const gridMenu = ref<PopoverPosition | null>(null);
+const gridMenuEl = ref<HTMLElement | null>(null);
+
+useDismiss(
+  computed(() => Boolean(gridMenu.value)),
+  () => [gridMenuEl.value],
+  () => (gridMenu.value = null),
+);
+
+function openGridMenu(event: MouseEvent) {
+  gridMenu.value = { left: event.clientX, top: event.clientY };
+  void nextTick(() => {
+    gridMenu.value = placeAtPoint(event.clientX, event.clientY, gridMenuEl.value);
+  });
+}
+
+function copyFromMenu(format: CopyFormat) {
+  gridMenu.value = null;
+  void grid.value?.copySelection(format);
+}
+
+const exportSource = ref<ExportRowsSource | null>(null);
+
+function exportResult() {
+  const state = current.value;
+  if (!state?.result.resultId) {
+    return;
+  }
+  exportSource.value = {
+    kind: "result",
+    resultId: state.result.resultId,
+    columns: state.result.columns.map((column) => column.name),
+    rowCount: state.result.rowCount,
+    truncated: state.result.truncated,
+  };
 }
 
 function closeFind() {
@@ -533,7 +573,10 @@ defineExpose({ insertText, getText, focus, run });
             :rows="current.rows"
             :matches="find.byRow.value"
             :current-match="find.current.value"
+            context-menus
             @need-rows="(start, end) => current && loadRows(current, start, end)"
+            @cell-menu="(_row, _col, event) => openGridMenu(event)"
+            @row-menu="(_row, event) => openGridMenu(event)"
           />
           <div class="pane-status muted tiny">
             {{ current.result.rowCount.toLocaleString() }}
@@ -542,6 +585,15 @@ defineExpose({ insertText, getText, focus, run });
             <span v-if="current.result.truncated" class="warn-text">
               · Cut off at the query row limit. Change it in Settings → General.
             </span>
+            <button
+              class="ghost tiny pane-status-action"
+              type="button"
+              :disabled="!current.result.resultId"
+              title="Export this result as CSV or JSON"
+              @click="exportResult"
+            >
+              Export…
+            </button>
           </div>
         </template>
       </template>
@@ -549,5 +601,33 @@ defineExpose({ insertText, getText, focus, run });
         Results appear here. Separate statements with semicolons.
       </p>
     </div>
+    <Teleport to="body">
+      <div
+        v-if="gridMenu"
+        ref="gridMenuEl"
+        class="overflow-menu-dropdown table-context-menu"
+        role="menu"
+        :style="{ left: `${gridMenu.left}px`, top: `${gridMenu.top}px` }"
+        @contextmenu.prevent
+      >
+        <button class="overflow-menu-item" type="button" role="menuitem" aria-keyshortcuts="Meta+C" @click="copyFromMenu('tsv')">
+          Copy
+        </button>
+        <button class="overflow-menu-item" type="button" role="menuitem" @click="copyFromMenu('csv')">
+          Copy as CSV
+        </button>
+        <button class="overflow-menu-item" type="button" role="menuitem" @click="copyFromMenu('json')">
+          Copy as JSON
+        </button>
+      </div>
+    </Teleport>
+    <ExportRowsDialog
+      v-if="exportSource"
+      :connection-id="connectionId"
+      title="Export query result"
+      :name="title"
+      :source="exportSource"
+      @close="exportSource = null"
+    />
   </div>
 </template>

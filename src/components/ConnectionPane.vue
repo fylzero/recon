@@ -20,6 +20,7 @@ import {
   sanitizeFilter,
   type TableViewState,
 } from "../filters/model";
+import { isTabularFile } from "../transfer";
 import {
   driverLabel,
   type BackupInfo,
@@ -36,6 +37,7 @@ import DriverIcon from "./DriverIcon.vue";
 import ExportDialog from "./ExportDialog.vue";
 import FilterPopover from "./FilterPopover.vue";
 import ImportDialog from "./ImportDialog.vue";
+import ImportRowsDialog from "./ImportRowsDialog.vue";
 import Modal from "./Modal.vue";
 import QueryEditor from "./QueryEditor.vue";
 import QueryHistory from "./QueryHistory.vue";
@@ -225,6 +227,7 @@ const saveNameInput = ref<HTMLInputElement | null>(null);
 // Each keeps the database it was opened on, since its transfer can keep running while you switch away.
 const exportDialog = ref<{ namespace: string; tables: string[] | null; tableCount: number } | null>(null);
 const importTarget = ref<{ namespace: string; path: string } | null>(null);
+const importRowsTarget = ref<{ namespace: string; path: string; table: string | null } | null>(null);
 const backupTarget = ref<{ namespace: string; tableCount: number } | null>(null);
 const restoreTarget = ref<{ namespace: string; path: string; info: BackupInfo } | null>(null);
 const tableAction = ref<{ action: "truncate" | "drop"; namespace: string; tables: string[] } | null>(null);
@@ -1223,7 +1226,18 @@ function openTabMenu(event: MouseEvent, tab: PaneTab) {
 }
 
 function runTableAction(
-  action: "open" | "openNew" | "openSide" | "query" | "copy" | "pin" | "diagram" | "export" | "truncate" | "drop",
+  action:
+    | "open"
+    | "openNew"
+    | "openSide"
+    | "query"
+    | "copy"
+    | "pin"
+    | "diagram"
+    | "export"
+    | "importRows"
+    | "truncate"
+    | "drop",
 ) {
   const chosen = tableMenu.value?.tables ?? [];
   const table = tables.value.find((item) => item.name === chosen[0]);
@@ -1262,6 +1276,8 @@ function runTableAction(
     queryTable(table);
   } else if (action === "copy") {
     void copyNamespaceName(table.name);
+  } else if (action === "importRows") {
+    void startImport(table.name);
   } else {
     openExport(chosen);
   }
@@ -1279,17 +1295,25 @@ function openBackup() {
   }
 }
 
-async function startImport() {
+async function startImport(table: string | null = null) {
   if (revealKind(props.sessionId, "import")) {
     return;
   }
+  const rows = { name: "CSV or JSON", extensions: ["csv", "tsv", "txt", "json", "ndjson", "jsonl", "gz"] };
+  const sql = { name: "SQL", extensions: ["sql", "gz"] };
+  const any = { name: "SQL, CSV, or JSON", extensions: ["sql", ...rows.extensions] };
   const path = await openFile({
-    title: `Import into “${namespace.value}”`,
+    title: table ? `Import rows into “${table}”` : `Import into “${namespace.value}”`,
     multiple: false,
     directory: false,
-    filters: [{ name: "SQL", extensions: ["sql", "gz"] }],
+    filters: table ? [rows] : [any, sql, rows],
   });
-  if (typeof path === "string") {
+  if (typeof path !== "string") {
+    return;
+  }
+  if (table || isTabularFile(path)) {
+    importRowsTarget.value = { namespace: namespace.value, path, table };
+  } else {
     importTarget.value = { namespace: namespace.value, path };
   }
 }
@@ -2787,8 +2811,8 @@ onUnmounted(() => {
               class="ghost tiny"
               type="button"
               :disabled="!canTransfer"
-              :title="`Run a .sql or .sql.gz file against “${namespace}”`"
-              @click="startImport"
+              :title="`Run a .sql file against “${namespace}”, or load rows from a CSV or JSON file`"
+              @click="startImport()"
             >
               <svg viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M8 2.5v7.5M4.8 6.8 8 10l3.2-3.2M2.5 11.5v1a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-1" />
@@ -2799,7 +2823,7 @@ onUnmounted(() => {
               class="ghost tiny"
               type="button"
               :disabled="!canTransfer"
-              :title="`Export “${namespace}” to a .sql file`"
+              :title="`Export “${namespace}” as SQL, CSV, or JSON`"
               @click="openExport(null)"
             >
               <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -3258,6 +3282,16 @@ onUnmounted(() => {
           <button class="overflow-menu-item" type="button" role="menuitem" @click="runTableAction('export')">
             {{ tableMenuExportLabel }}
           </button>
+          <button
+            v-if="tableMenu.tables.length === 1 && menuHasOnlyTables"
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            :disabled="!canTransfer"
+            @click="runTableAction('importRows')"
+          >
+            Import rows from CSV or JSON…
+          </button>
           <template v-if="menuHasOnlyTables">
             <div class="overflow-menu-divider" role="separator" />
             <button class="overflow-menu-item danger" type="button" role="menuitem" @click="runTableAction('truncate')">
@@ -3475,6 +3509,18 @@ onUnmounted(() => {
         :path="importTarget.path"
         @imported="onImported"
         @close="importTarget = null"
+      />
+      <ImportRowsDialog
+        v-if="importRowsTarget"
+        :connection-id="sessionId"
+        :driver="driver"
+        :namespace="importRowsTarget.namespace"
+        :namespace-label="namespaceLabel"
+        :path="importRowsTarget.path"
+        :tables="importRowsTarget.namespace === namespace ? tables : []"
+        :table="importRowsTarget.table"
+        @imported="onImported"
+        @close="importRowsTarget = null"
       />
       <BackupDialog
         v-if="backupTarget"

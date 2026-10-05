@@ -154,7 +154,7 @@ fn float_literal(value: f64) -> String {
     }
 }
 
-fn mysql_string(text: &str) -> String {
+pub fn mysql_string(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('\'');
     for c in text.chars() {

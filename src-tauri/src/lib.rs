@@ -6,6 +6,7 @@ mod models;
 mod persist;
 mod query_log;
 mod secrets;
+mod tabular_commands;
 mod transfer_commands;
 mod window_state;
 
@@ -112,6 +113,10 @@ pub fn run() {
             transfer_commands::read_backup_info,
             transfer_commands::restore_database,
             transfer_commands::cancel_transfer,
+            tabular_commands::export_browse,
+            tabular_commands::export_result,
+            tabular_commands::preview_import,
+            tabular_commands::import_rows,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -6,7 +6,7 @@ import { useApp } from "../composables/useApp";
 import { useGridFind } from "../composables/useGridFind";
 import { useOverflowMenu } from "../composables/useOverflowMenu";
 import { placeAtPoint, useDismiss, type PopoverPosition } from "../composables/usePopover";
-import { isBytes, isNumericColumn } from "../cells";
+import { isBytes, isNumericColumn, type CopyFormat } from "../cells";
 import {
   compileFilter,
   formatDate,
@@ -59,6 +59,7 @@ import type {
   TableStructure as Structure,
 } from "../types";
 import DataGrid, { type CellPosition } from "./DataGrid.vue";
+import ExportRowsDialog, { type ExportRowsSource } from "./ExportRowsDialog.vue";
 import FilterPanel from "./FilterPanel.vue";
 import FilterPopover from "./FilterPopover.vue";
 import FilterSummary from "./FilterSummary.vue";
@@ -1454,6 +1455,20 @@ function deleteFromMenu() {
   deleteRows(targets);
 }
 
+function copyFromMenu(format: CopyFormat) {
+  closeGridMenus();
+  void grid.value?.copySelection(format);
+}
+
+const exportOpen = ref(false);
+const exportSource = computed<ExportRowsSource>(() => ({
+  kind: "browse",
+  request: browseRequest(),
+  total: total.value,
+  pageRows: rows.value.length,
+  filtered: applied.value.count > 0,
+}));
+
 function placeGridMenu(x: number, y: number) {
   menuPosition.value = { left: x, top: y };
   void nextTick(() => {
@@ -1705,6 +1720,19 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         </button>
       </span>
       <div class="pane-toolbar-end">
+        <button
+          v-if="mode === 'data'"
+          class="ghost tiny"
+          type="button"
+          :disabled="!result"
+          title="Export these rows as CSV or JSON, with the current filters and sort"
+          @click="exportOpen = true"
+        >
+          <svg class="button-icon" viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M8 10V2.5M4.8 5.7 8 2.5l3.2 3.2M2.5 11.5v1a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-1" />
+          </svg>
+          Export
+        </button>
         <div class="overflow-menu auto-refresh-menu refresh-split">
           <button
             class="ghost tiny refresh-main"
@@ -1942,6 +1970,18 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         :style="{ left: `${menuPosition.left}px`, top: `${menuPosition.top}px` }"
         @contextmenu.prevent
       >
+        <template v-if="cellMenu || rowMenu">
+          <button class="overflow-menu-item" type="button" role="menuitem" aria-keyshortcuts="Meta+C" @click="copyFromMenu('tsv')">
+            Copy
+          </button>
+          <button class="overflow-menu-item" type="button" role="menuitem" @click="copyFromMenu('csv')">
+            Copy as CSV
+          </button>
+          <button class="overflow-menu-item" type="button" role="menuitem" @click="copyFromMenu('json')">
+            Copy as JSON
+          </button>
+          <div v-if="cellMenu || kind === 'table'" class="overflow-menu-divider" role="separator" />
+        </template>
         <template v-if="cellMenu">
           <button
             class="overflow-menu-item"
@@ -2061,5 +2101,13 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         <button class="primary" type="button" :disabled="!sqlPreview.sql" @click="openSqlInTab">Open in SQL tab</button>
       </template>
     </Modal>
+    <ExportRowsDialog
+      v-if="exportOpen"
+      :connection-id="connectionId"
+      :title="`Export “${table}”`"
+      :name="table"
+      :source="exportSource"
+      @close="exportOpen = false"
+    />
   </div>
 </template>

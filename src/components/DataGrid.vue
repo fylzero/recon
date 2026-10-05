@@ -13,12 +13,14 @@ import {
   cellDisplay,
   cellText,
   cellTitle,
+  copyText,
   initialColumnWidth,
   isBytes,
   isNumericColumn,
+  type CopyFormat,
 } from "../cells";
 import { useApp } from "../composables/useApp";
-import type { ColumnMeta, RowValues, SortDirection } from "../types";
+import type { Cell, ColumnMeta, RowValues, SortDirection } from "../types";
 
 const props = defineProps<{
   columns: ColumnMeta[];
@@ -494,9 +496,13 @@ function moveFocus(rowDelta: number, colDelta: number, extend: boolean) {
   scrollCellIntoView(next);
 }
 
-async function copySelection() {
+async function copySelection(format: CopyFormat = "tsv") {
   const range = selection.value;
   if (!range) {
+    return;
+  }
+  if (format !== "tsv") {
+    await copySelectionAs(format, range);
     return;
   }
   const lines: string[] = [];
@@ -529,6 +535,29 @@ async function copySelection() {
           ? "Copied value"
           : `Copied ${count.toLocaleString()} ${count === 1 ? "row" : "rows"}`,
     );
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+}
+
+/** CSV and JSON always name the columns and keep NULLs, newlines, and tabs as they are. */
+async function copySelectionAs(format: "csv" | "json", range: NonNullable<typeof selection.value>) {
+  const columns = props.columns.slice(range.left, range.right + 1);
+  const rows: Cell[][] = [];
+  let missing = 0;
+  for (let row = range.top; row <= range.bottom; row += 1) {
+    const values = props.rows[row];
+    if (!values) {
+      missing += 1;
+      continue;
+    }
+    rows.push(values.slice(range.left, range.right + 1).map((value) => value ?? null));
+  }
+  try {
+    await navigator.clipboard.writeText(copyText(format, columns, rows));
+    const count = rows.length;
+    const what = `${count.toLocaleString()} ${count === 1 ? "row" : "rows"} as ${format.toUpperCase()}`;
+    showToast(missing ? `Copied ${what}. ${missing.toLocaleString()} rows were not loaded yet.` : `Copied ${what}`);
   } catch (err) {
     showToast(String(err), "error");
   }
@@ -693,7 +722,7 @@ function focusedCell(): { position: CellPosition; text: string } | null {
   return { position: { ...position }, text: cellText(value) };
 }
 
-defineExpose({ scrollToTop, commitEdit, editCell, focusedCell, selectedRows });
+defineExpose({ scrollToTop, commitEdit, editCell, focusedCell, selectedRows, copySelection });
 </script>
 
 <template>
