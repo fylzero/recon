@@ -43,6 +43,7 @@ import SchemaDiagram, { type DiagramScope } from "./SchemaDiagram.vue";
 import RestoreDialog from "./RestoreDialog.vue";
 import SavedQueries from "./SavedQueries.vue";
 import SplitWorkspace from "./SplitWorkspace.vue";
+import TableActionDialog from "./TableActionDialog.vue";
 import TablePaneFrame, { type PaneTabInfo } from "./TablePaneFrame.vue";
 import TableView from "./TableView.vue";
 import {
@@ -226,6 +227,7 @@ const exportDialog = ref<{ namespace: string; tables: string[] | null; tableCoun
 const importTarget = ref<{ namespace: string; path: string } | null>(null);
 const backupTarget = ref<{ namespace: string; tableCount: number } | null>(null);
 const restoreTarget = ref<{ namespace: string; path: string; info: BackupInfo } | null>(null);
+const tableAction = ref<{ action: "truncate" | "drop"; namespace: string; tables: string[] } | null>(null);
 let selectionAnchor = "";
 const editors = new Map<string, InstanceType<typeof QueryEditor>>();
 const tableViews = new Map<string, InstanceType<typeof TableView>>();
@@ -353,6 +355,15 @@ const tableMenuExportLabel = computed(() => {
   }
   const kind = tables.value.find((table) => table.name === chosen[0])?.kind;
   return kind === "view" ? "Export view…" : "Export table…";
+});
+
+const menuHasOnlyTables = computed(() => {
+  const chosen = tableMenu.value?.tables ?? [];
+  return (
+    !lost.value &&
+    chosen.length > 0 &&
+    chosen.every((name) => tables.value.find((table) => table.name === name)?.kind === "table")
+  );
 });
 
 const canTransfer = computed(() => Boolean(namespace.value || driver.value === "sqlite") && !lost.value);
@@ -1153,7 +1164,9 @@ function openTabMenu(event: MouseEvent, tab: PaneTab) {
   fitMenu(tabMenu, tabMenuEl);
 }
 
-function runTableAction(action: "open" | "openNew" | "openSide" | "query" | "copy" | "diagram" | "export") {
+function runTableAction(
+  action: "open" | "openNew" | "openSide" | "query" | "copy" | "diagram" | "export" | "truncate" | "drop",
+) {
   const chosen = tableMenu.value?.tables ?? [];
   const table = tables.value.find((item) => item.name === chosen[0]);
   if (action === "openSide" && table) {
@@ -1161,6 +1174,14 @@ function runTableAction(action: "open" | "openNew" | "openSide" | "query" | "cop
     return;
   }
   closeMenus();
+  if (action === "truncate") {
+    startTruncate(chosen);
+    return;
+  }
+  if (action === "drop") {
+    tableAction.value = { action, namespace: namespace.value, tables: chosen };
+    return;
+  }
   if (action === "diagram") {
     diagramScope.value = "selection";
     selectView("diagram");
@@ -1240,6 +1261,44 @@ function refreshVisibleTables() {
 function onImported() {
   void refreshAll();
   refreshVisibleTables();
+}
+
+function tabsOnTables(target: string, names: string[]) {
+  return tabs.value.filter((tab) => tab.kind === "table" && tab.namespace === target && names.includes(tab.table));
+}
+
+function startTruncate(names: string[]) {
+  const dirty = tabsOnTables(namespace.value, names).find((tab) => dirtyTabs.value.has(tab.id));
+  if (dirty && dirty.kind === "table") {
+    showToast(`Save or discard your changes to “${dirty.table}” before truncating it.`, "error");
+    return;
+  }
+  tableAction.value = { action: "truncate", namespace: namespace.value, tables: names };
+}
+
+function onTableActionDone(names: string[]) {
+  const done = tableAction.value;
+  tableAction.value = null;
+  if (!done) {
+    return;
+  }
+  const subject = names.length === 1 ? `“${names[0]}”` : `${names.length} tables`;
+  if (done.action === "truncate") {
+    for (const tab of tabsOnTables(done.namespace, names)) {
+      tableViews.get(tab.id)?.refresh();
+    }
+    showToast(`Truncated ${subject}`);
+    return;
+  }
+  for (const tab of tabsOnTables(done.namespace, names)) {
+    setTabChanges(tab.id, 0);
+    removeTab(tab.id);
+  }
+  selectedTables.value = new Set([...selectedTables.value].filter((name) => !names.includes(name)));
+  if (done.namespace === namespace.value) {
+    void loadTables();
+  }
+  showToast(`Dropped ${subject}`);
 }
 
 watch(namespace, () => {
@@ -1902,6 +1961,7 @@ async function saveAll() {
     ({ request }) =>
       request.updates.length ||
       request.inserts.length ||
+      request.deletes.length ||
       request.columns.length ||
       request.newColumns.length ||
       request.indexes.length ||
@@ -3109,6 +3169,15 @@ onUnmounted(() => {
           <button class="overflow-menu-item" type="button" role="menuitem" @click="runTableAction('export')">
             {{ tableMenuExportLabel }}
           </button>
+          <template v-if="menuHasOnlyTables">
+            <div class="overflow-menu-divider" role="separator" />
+            <button class="overflow-menu-item danger" type="button" role="menuitem" @click="runTableAction('truncate')">
+              {{ tableMenu.tables.length === 1 ? "Truncate table…" : `Truncate ${tableMenu.tables.length.toLocaleString()} tables…` }}
+            </button>
+            <button class="overflow-menu-item danger" type="button" role="menuitem" @click="runTableAction('drop')">
+              {{ tableMenu.tables.length === 1 ? "Drop table…" : `Drop ${tableMenu.tables.length.toLocaleString()} tables…` }}
+            </button>
+          </template>
         </div>
         <div
           v-if="tabMenu && menuTab"
@@ -3337,6 +3406,16 @@ onUnmounted(() => {
         :info="restoreTarget.info"
         @restored="onImported"
         @close="restoreTarget = null"
+      />
+      <TableActionDialog
+        v-if="tableAction"
+        :action="tableAction.action"
+        :connection-id="sessionId"
+        :driver="driver"
+        :namespace="tableAction.namespace"
+        :tables="tableAction.tables"
+        @done="onTableActionDone"
+        @close="tableAction = null"
       />
     </template>
   </div>

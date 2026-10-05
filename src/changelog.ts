@@ -6,6 +6,17 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.5.0",
+    date: "October 4, 2026",
+    notes: [
+      "Delete rows from a table. Select whole rows by their row numbers and press Backspace or Delete, or right-click and choose Delete row. Rows marked for deletion turn red and are struck through until you save, and undo, Discard, or choosing Restore row on them brings them back. New rows you haven't saved yet are removed right away. Rows can only be deleted from tables with a primary key.",
+      "Right-clicking inside a selection in the grid keeps the selection, so the menu acts on every selected row instead of just the one under the pointer. Control-click works the same way.",
+      "Right-click a table in the sidebar and choose Truncate table… to delete every row while keeping the table's structure. Select several tables first to truncate them together. MySQL and SQLite can turn off foreign key checks first. PostgreSQL can also empty the tables that reference them (CASCADE). PostgreSQL and SQLite can restart identity and AUTOINCREMENT counters, and MySQL always does. Open tabs on those tables reload afterward, and a table with unsaved changes has to be saved or discarded first.",
+      "Right-click a table in the sidebar and choose Drop table… to delete it and all of its rows. Select several tables first to drop them together. MySQL and SQLite can turn off foreign key checks first, which leaves other tables' foreign keys pointing at a table that no longer exists. PostgreSQL can also drop the views and foreign keys that depend on them (CASCADE), keeping the tables those keys were in. Open tabs on those tables close afterward.",
+      "An empty table no longer shows a No rows label over the grid.",
+    ],
+  },
+  {
     version: "1.4.0",
     date: "October 3, 2026",
     notes: [

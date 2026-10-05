@@ -37,6 +37,10 @@ const props = defineProps<{
   newRowAuto?: boolean[];
   creatable?: boolean;
   modified?: Map<number, Set<number>>;
+  /** Backspace on whole selected rows emits `deleteRows` instead of setting them to NULL. */
+  deletable?: boolean;
+  /** Rows marked for deletion on the next save. */
+  deletedRows?: Set<number>;
   /** Per column, the record a value points to (such as `users.id`), or null for plain columns. */
   links?: (string | null)[];
   /** Emits `cellMenu` and `headerMenu` on right-click instead of showing the default menu. */
@@ -52,9 +56,11 @@ const emit = defineEmits<{
   needRows: [start: number, end: number];
   edit: [row: number, col: number, text: string];
   setNull: [cells: CellPosition[]];
+  deleteRows: [rows: number[]];
   create: [];
   follow: [row: number, col: number, options?: { side?: boolean }];
   cellMenu: [row: number, col: number, event: MouseEvent];
+  rowMenu: [row: number, event: MouseEvent];
   headerMenu: [col: number, event: MouseEvent];
 }>();
 
@@ -63,6 +69,18 @@ function onCellContextMenu(event: MouseEvent, row: number, col: number) {
     event.preventDefault();
     emit("cellMenu", row, col, event);
   }
+}
+
+function onRowContextMenu(event: MouseEvent, row: number) {
+  if (props.contextMenus) {
+    event.preventDefault();
+    emit("rowMenu", row, event);
+  }
+}
+
+/** A right-click, including Control-click on macOS, opens a menu for the selection it lands in. */
+function isMenuClick(event: MouseEvent) {
+  return event.button === 2 || (event.button === 0 && event.ctrlKey);
 }
 
 function onHeaderContextMenu(event: MouseEvent, col: number) {
@@ -243,6 +261,14 @@ function isEditing(row: number, col: number) {
   return editing.value?.row === row && editing.value?.col === col;
 }
 
+function selectedRows() {
+  const range = selection.value;
+  if (!range) {
+    return [];
+  }
+  return Array.from({ length: range.bottom - range.top + 1 }, (_, index) => range.top + index);
+}
+
 function isModified(row: number, col: number) {
   return Boolean(props.modified?.get(row)?.has(col));
 }
@@ -319,7 +345,7 @@ function editCell(row: number, col: number) {
 
 function onBlankDblclick(event: MouseEvent) {
   const target = event.target as Element;
-  if (props.creatable && (target.closest(".grid-filler, .grid-empty") || !target.closest(".grid-row, .grid-header"))) {
+  if (props.creatable && (target.closest(".grid-filler") || !target.closest(".grid-row, .grid-header"))) {
     emit("create");
   }
 }
@@ -403,6 +429,10 @@ function setSelectionNull() {
 
 function selectCell(event: MouseEvent, row: number, col: number) {
   commitEdit();
+  if (isMenuClick(event) && isSelected(row, col)) {
+    scroller.value?.focus({ preventScroll: true });
+    return;
+  }
   const position = { row, col };
   if (event.shiftKey && anchor.value) {
     focus.value = position;
@@ -415,6 +445,10 @@ function selectCell(event: MouseEvent, row: number, col: number) {
 
 function selectRow(event: MouseEvent, row: number) {
   commitEdit();
+  if (isMenuClick(event) && isRowActive(row)) {
+    scroller.value?.focus({ preventScroll: true });
+    return;
+  }
   const last = Math.max(props.columns.length - 1, 0);
   if (event.shiftKey && anchor.value) {
     focus.value = { row, col: last };
@@ -554,7 +588,12 @@ function onKeydown(event: KeyboardEvent) {
     startEdit(focus.value.row, focus.value.col);
   } else if (event.key === "Backspace" || event.key === "Delete") {
     event.preventDefault();
-    setSelectionNull();
+    const range = selection.value;
+    if (props.deletable && range && range.left === 0 && range.right === props.columns.length - 1) {
+      emit("deleteRows", selectedRows());
+    } else {
+      setSelectionNull();
+    }
   } else if (event.key.length === 1 && canEdit(focus.value.row, focus.value.col)) {
     event.preventDefault();
     startEdit(focus.value.row, focus.value.col, event.key);
@@ -655,7 +694,7 @@ function focusedCell(): { position: CellPosition; text: string } | null {
   return { position: { ...position }, text: cellText(value) };
 }
 
-defineExpose({ scrollToTop, commitEdit, editCell, focusedCell });
+defineExpose({ scrollToTop, commitEdit, editCell, focusedCell, selectedRows });
 </script>
 
 <template>
@@ -711,11 +750,16 @@ defineExpose({ scrollToTop, commitEdit, editCell, focusedCell });
           odd: item.index % 2 === 1,
           active: isRowActive(item.index),
           modified: modified?.has(item.index),
+          deleted: deletedRows?.has(item.index),
         }"
         role="row"
         :style="{ transform: `translateY(${item.start - headerHeight}px)` }"
       >
-        <div class="grid-gutter" @mousedown.prevent="selectRow($event, item.index)">
+        <div
+          class="grid-gutter"
+          @mousedown.prevent="selectRow($event, item.index)"
+          @contextmenu="onRowContextMenu($event, item.index)"
+        >
           {{ newRowStart !== undefined && item.index >= newRowStart ? "+" : (rowNumberOffset ?? 0) + item.index + 1 }}
         </div>
         <template v-if="rows[item.index]">
@@ -795,6 +839,5 @@ defineExpose({ scrollToTop, commitEdit, editCell, focusedCell });
         <div v-for="col in columns.length" :key="col" class="grid-cell" />
       </div>
     </div>
-    <div v-if="!rows.length" class="grid-empty muted tiny">No rows</div>
   </div>
 </template>

@@ -143,6 +143,15 @@ export interface TableInfo {
   kind: "table" | "view";
 }
 
+export interface DropOptions {
+  disableForeignKeys: boolean;
+  cascade: boolean;
+}
+
+export interface TruncateOptions extends DropOptions {
+  restartIdentity: boolean;
+}
+
 export interface ColumnDetail {
   name: string;
   dataType: string;
@@ -266,6 +275,10 @@ export interface RowInsert {
   values: CellEdit[];
 }
 
+export interface RowDelete {
+  key: CellEdit[];
+}
+
 export interface NewColumn {
   name: string;
   dataType: string;
@@ -284,6 +297,7 @@ export interface SaveRequest {
   table: string;
   updates: RowUpdate[];
   inserts: RowInsert[];
+  deletes: RowDelete[];
   columns: ColumnChange[];
   newColumns: NewColumn[];
   indexes: IndexChange[];

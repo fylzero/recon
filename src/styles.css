@@ -2579,6 +2579,10 @@ button.link-button:hover:not(:disabled) {
   gap: 0.5rem;
 }
 
+.table-action-hint {
+  margin: -0.3rem 0 0.15rem 1.45rem;
+}
+
 .transfer-progress {
   display: flex;
   flex-direction: column;
@@ -4753,6 +4757,22 @@ button.grid-find-close {
   color: var(--warn);
 }
 
+.grid-row.deleted {
+  background: rgba(240, 113, 120, 0.13);
+}
+
+.grid-row.deleted .grid-gutter {
+  background: #2a171b;
+  box-shadow: inset 3px 0 0 var(--bad);
+  color: var(--bad);
+}
+
+.grid-row.deleted .grid-cell {
+  color: #f4a7ac;
+  text-decoration: line-through;
+  text-decoration-color: rgba(240, 113, 120, 0.6);
+}
+
 .grid-gutter {
   position: sticky;
   left: 0;
@@ -4903,15 +4923,6 @@ button.grid-find-close {
   grid-column: 2 / -1;
   color: var(--muted);
   font-style: italic;
-}
-
-.grid-empty {
-  position: absolute;
-  top: var(--grid-header-height);
-  left: var(--grid-gutter-width);
-  z-index: 1;
-  padding: 0.75rem;
-  pointer-events: none;
 }
 
 body.resizing-columns,

@@ -10,6 +10,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::commands::{sanitize_connection, AppState};
 use crate::db::ssh::Tunnel;
 use crate::db::filter::{self, Fragment};
+use crate::db::table_ops::{self, DropOptions, TruncateOptions};
 use crate::db::{
     self, dialect, first_text, text_at, BrowseRequest, BrowseResult, CellValue, ColumnDetail,
     ColumnMeta, EditValue, IndexInfo, NamespaceList, Pool, PooledConn, RawOutput, ResultStore, RowInsert,
@@ -584,6 +585,85 @@ pub async fn tables_in(session: Arc<Session>, namespace: &str) -> Result<Vec<Tab
 }
 
 #[tauri::command]
+pub async fn truncate_tables(
+    app: AppHandle,
+    connection_id: String,
+    namespace: String,
+    tables: Vec<String>,
+    options: TruncateOptions,
+) -> Result<(), String> {
+    if tables.is_empty() {
+        return Ok(());
+    }
+    let session = app.state::<SessionStore>().get(&connection_id).await?;
+    let mut conn = session.pool.detached().await?;
+    let outcome = truncate_on(&session, &mut conn, &namespace, &tables, options).await;
+    conn.close().await;
+    outcome
+}
+
+/** MySQL commits each TRUNCATE as it runs, so a failure names the tables already emptied. */
+async fn truncate_on(
+    session: &Session,
+    conn: &mut db::Conn,
+    namespace: &str,
+    tables: &[String],
+    options: TruncateOptions,
+) -> Result<(), String> {
+    let has_sequence = session.driver == Driver::Sqlite && options.restart_identity && {
+        let sql = table_ops::sqlite_sequence_sql(namespace);
+        first_text(&detached_run(session, conn, &sql, QueryOrigin::Schema).await?) != "0"
+    };
+    let mut emptied = Vec::new();
+    for sql in table_ops::truncate_statements(session.driver, namespace, tables, options, has_sequence) {
+        if let Err(err) = detached_run(session, conn, &sql, QueryOrigin::Edit).await {
+            if session.driver == Driver::Mysql && !emptied.is_empty() {
+                return Err(format!("{err} These tables were already emptied: {}.", emptied.join(", ")));
+            }
+            return Err(err);
+        }
+        if session.driver == Driver::Mysql && sql.starts_with("TRUNCATE") {
+            emptied.push(format!("“{}”", tables[emptied.len()]));
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn drop_tables(
+    app: AppHandle,
+    connection_id: String,
+    namespace: String,
+    tables: Vec<String>,
+    options: DropOptions,
+) -> Result<(), String> {
+    if tables.is_empty() {
+        return Ok(());
+    }
+    let session = app.state::<SessionStore>().get(&connection_id).await?;
+    let mut conn = session.pool.detached().await?;
+    let mut outcome = Ok(());
+    for sql in table_ops::drop_statements(session.driver, &namespace, &tables, options) {
+        outcome = detached_run(&session, &mut conn, &sql, QueryOrigin::Schema).await.map(|_| ());
+        if outcome.is_err() {
+            break;
+        }
+    }
+    conn.close().await;
+    for table in &tables {
+        session.forget_columns(Some(&namespace), Some(table));
+    }
+    outcome
+}
+
+async fn detached_run(session: &Session, conn: &mut db::Conn, sql: &str, origin: QueryOrigin) -> Result<RawOutput, String> {
+    let started = Instant::now();
+    let outcome = conn.run(sql, usize::MAX, None).await;
+    record(session, sql, origin, started, &outcome);
+    outcome
+}
+
+#[tauri::command]
 pub async fn table_structure(
     app: AppHandle,
     connection_id: String,
@@ -1007,6 +1087,7 @@ pub async fn save_table_changes(
     let requests = requests.as_slice();
     let repeatable = requests.iter().all(|request| {
         request.inserts.is_empty()
+            && request.deletes.is_empty()
             && request.columns.is_empty()
             && request.new_columns.is_empty()
             && request.indexes.is_empty()
@@ -1020,7 +1101,7 @@ pub async fn save_table_changes(
         Err(err) if db::is_connection_lost(&err) => {
             let _ = recover(&app, &connection_id, &session).await;
             Err(format!(
-                "{err} Recon reconnected but didn't retry, because new rows or structure changes may already be saved. Reload to check before saving again."
+                "{err} Recon reconnected but didn't retry, because new rows, deleted rows, or structure changes may already be saved. Reload to check before saving again."
             ))
         }
         outcome => outcome,
@@ -1030,9 +1111,10 @@ pub async fn save_table_changes(
 /**
  * Row edits are primary-key updates to absolute values inside one
  * transaction, so repeating them after a dropped connection cannot apply
- * anything twice. Structure changes run after every row update and insert
- * because those still use the old column names, and new indexes run last so
- * they can use new columns.
+ * anything twice. Deletes run first so their unique values are free for the
+ * updates and inserts. Structure changes run after every row change because
+ * those still use the old column names, and new indexes run last so they can
+ * use new columns.
  */
 async fn save(session: Arc<Session>, requests: &[SaveRequest]) -> Result<usize, String> {
     let dialect = dialect(session.driver);
@@ -1043,6 +1125,9 @@ async fn save(session: Arc<Session>, requests: &[SaveRequest]) -> Result<usize, 
             session.forget_columns(Some(&request.namespace), Some(&request.table));
         }
         let table = dialect.qualified(&request.namespace, &request.table);
+        for delete in &request.deletes {
+            statements.push(db::delete_statement(session.driver, &table, delete)?);
+        }
         for update in &request.updates {
             statements.push(db::update_statement(session.driver, &table, update)?);
         }
@@ -1115,6 +1200,7 @@ async fn save(session: Arc<Session>, requests: &[SaveRequest]) -> Result<usize, 
         .map(|request| {
             request.updates.len()
                 + request.inserts.len()
+                + request.deletes.len()
                 + request.columns.len()
                 + request.new_columns.len()
                 + request.indexes.len()

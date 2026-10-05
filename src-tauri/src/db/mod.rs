@@ -6,6 +6,7 @@ pub mod restore;
 pub mod sql_split;
 pub mod sqlite;
 pub mod ssh;
+pub mod table_ops;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -407,6 +408,12 @@ pub struct RowUpdate {
     pub changes: Vec<CellEdit>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RowDelete {
+    pub key: Vec<CellEdit>,
+}
+
 fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Option<String>>, D::Error> {
     Option::<String>::deserialize(deserializer).map(Some)
 }
@@ -475,6 +482,8 @@ pub struct SaveRequest {
     pub updates: Vec<RowUpdate>,
     #[serde(default)]
     pub inserts: Vec<RowInsert>,
+    #[serde(default)]
+    pub deletes: Vec<RowDelete>,
     #[serde(default)]
     pub columns: Vec<ColumnChange>,
     #[serde(default)]
@@ -705,34 +714,66 @@ pub fn update_statement(driver: Driver, table: &str, update: &RowUpdate) -> Resu
         set.push(format!("{column} = {sql}"));
         set_display.push(format!("{column} = {}", change.value.display_literal()));
     }
-    let mut filter = Vec::new();
-    let mut filter_display = Vec::new();
-    let mut label = Vec::new();
-    for key in &update.key {
-        let column = dialect.quote_ident(&key.column);
-        let (sql, display) = match key.value {
-            EditValue::Null => (format!("{column} IS NULL"), format!("{column} IS NULL")),
-            ref value => (
-                format!("{column} = {}", value_sql(value)),
-                format!("{column} = {}", value.display_literal()),
-            ),
-        };
-        filter.push(sql);
-        filter_display.push(display);
-        label.push(format!("{} = {}", key.column, key.value.display_literal()));
-    }
+    let filter = key_filter(driver, &update.key, &mut params);
     Ok(EditStatement {
-        sql: format!("UPDATE {table} SET {} WHERE {}", set.join(", "), filter.join(" AND ")),
+        sql: format!("UPDATE {table} SET {} WHERE {}", set.join(", "), filter.sql),
         params,
-        display: format!(
-            "UPDATE {table} SET {} WHERE {}",
-            set_display.join(", "),
-            filter_display.join(" AND ")
-        ),
+        display: format!("UPDATE {table} SET {} WHERE {}", set_display.join(", "), filter.display),
         table: table.to_string(),
-        label: label.join(", "),
+        label: filter.label,
         expect_one_row: true,
     })
+}
+
+pub fn delete_statement(driver: Driver, table: &str, delete: &RowDelete) -> Result<EditStatement, String> {
+    if delete.key.is_empty() {
+        return Err("Rows can only be deleted by primary key.".into());
+    }
+    let mut params = Vec::new();
+    let filter = key_filter(driver, &delete.key, &mut params);
+    Ok(EditStatement {
+        sql: format!("DELETE FROM {table} WHERE {}", filter.sql),
+        params,
+        display: format!("DELETE FROM {table} WHERE {}", filter.display),
+        table: table.to_string(),
+        label: filter.label,
+        expect_one_row: true,
+    })
+}
+
+struct KeyFilter {
+    sql: String,
+    display: String,
+    label: String,
+}
+
+/** PostgreSQL values are inlined; other drivers append theirs to `params`. */
+fn key_filter(driver: Driver, key: &[CellEdit], params: &mut Vec<EditValue>) -> KeyFilter {
+    let dialect = dialect(driver);
+    let mut sql = Vec::new();
+    let mut display = Vec::new();
+    let mut label = Vec::new();
+    for cell in key {
+        let column = dialect.quote_ident(&cell.column);
+        match cell.value {
+            EditValue::Null => {
+                sql.push(format!("{column} IS NULL"));
+                display.push(format!("{column} IS NULL"));
+            }
+            ref value => {
+                let placeholder = if driver == Driver::Postgres {
+                    value.postgres_literal()
+                } else {
+                    params.push(value.clone());
+                    "?".to_string()
+                };
+                sql.push(format!("{column} = {placeholder}"));
+                display.push(format!("{column} = {}", value.display_literal()));
+            }
+        }
+        label.push(format!("{} = {}", cell.column, cell.value.display_literal()));
+    }
+    KeyFilter { sql: sql.join(" AND "), display: display.join(" AND "), label: label.join(", ") }
 }
 
 fn check_matched(statement: &EditStatement, matched: u64) -> Result<(), String> {
@@ -743,7 +784,7 @@ fn check_matched(statement: &EditStatement, matched: u64) -> Result<(), String> 
             statement.table, statement.label
         )),
         count => Err(format!(
-            "The row in {} where {} matched {count} rows, so it cannot be updated safely. Nothing was saved.",
+            "The row in {} where {} matched {count} rows, so it cannot be changed safely. Nothing was saved.",
             statement.table, statement.label
         )),
     }
@@ -1695,6 +1736,23 @@ mod tests {
         assert!(update_statement(Driver::Sqlite, "\"users\"", &update).is_err());
     }
 
+    #[test]
+    fn builds_deletes_by_primary_key() {
+        let delete: RowDelete = serde_json::from_value(serde_json::json!({
+            "key": [{ "column": "tenant", "value": "o'b" }, { "column": "id", "value": 7 }],
+        }))
+        .unwrap();
+        let mysql = delete_statement(Driver::Mysql, "`app`.`users`", &delete).unwrap();
+        assert_eq!(mysql.sql, "DELETE FROM `app`.`users` WHERE `tenant` = ? AND `id` = ?");
+        assert_eq!(mysql.params, vec![EditValue::Text("o'b".into()), EditValue::Int(7)]);
+        assert_eq!(mysql.label, "tenant = 'o''b', id = 7");
+        assert!(mysql.expect_one_row);
+        let postgres = delete_statement(Driver::Postgres, "\"users\"", &delete).unwrap();
+        assert_eq!(postgres.sql, "DELETE FROM \"users\" WHERE \"tenant\" = E'o''b' AND \"id\" = E'7'");
+        assert!(postgres.params.is_empty());
+        assert!(delete_statement(Driver::Sqlite, "\"users\"", &RowDelete { key: Vec::new() }).is_err());
+    }
+
     fn column_change(value: serde_json::Value) -> ColumnChange {
         serde_json::from_value(value).unwrap()
     }
@@ -2081,6 +2139,40 @@ mod tests {
         pool.apply(&statements[..1]).await.unwrap();
         let saved = pool.run("SELECT name, score FROM users WHERE id = 1", 1).await.unwrap();
         assert_eq!(saved.rows[0], vec![CellValue::Text("ada'".into()), CellValue::Int(42)]);
+    }
+
+    #[tokio::test]
+    async fn deletes_rows_before_updates_in_one_transaction() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let pool = Pool::Sqlite(pool);
+        pool.run("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT UNIQUE)", 0).await.unwrap();
+        pool.run("INSERT INTO users VALUES (1, 'a@x'), (2, 'b@x')", 0).await.unwrap();
+        let delete = |id: i64| RowDelete { key: vec![CellEdit { column: "id".into(), value: EditValue::Int(id) }] };
+        let update = RowUpdate {
+            key: vec![CellEdit { column: "id".into(), value: EditValue::Int(2) }],
+            changes: vec![CellEdit { column: "email".into(), value: EditValue::Text("a@x".into()) }],
+        };
+
+        let missing = [
+            delete_statement(Driver::Sqlite, "\"users\"", &delete(1)).unwrap(),
+            delete_statement(Driver::Sqlite, "\"users\"", &delete(99)).unwrap(),
+        ];
+        let error = pool.apply(&missing).await.unwrap_err();
+        assert!(error.contains("id = 99"), "{error}");
+        let kept = pool.run("SELECT COUNT(*) FROM users", 1).await.unwrap();
+        assert_eq!(kept.rows[0][0], CellValue::Int(2));
+
+        let statements = [
+            delete_statement(Driver::Sqlite, "\"users\"", &delete(1)).unwrap(),
+            update_statement(Driver::Sqlite, "\"users\"", &update).unwrap(),
+        ];
+        pool.apply(&statements).await.unwrap();
+        let saved = pool.run("SELECT id, email FROM users", 10).await.unwrap();
+        assert_eq!(saved.rows, vec![vec![CellValue::Int(2), CellValue::Text("a@x".into())]]);
     }
 
     #[tokio::test]

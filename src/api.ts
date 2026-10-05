@@ -6,6 +6,7 @@ import type {
   BrowseResult,
   ConnectionEntry,
   ConnectionGroup,
+  DropOptions,
   ExportRequest,
   ExportResult,
   ImportResult,
@@ -21,6 +22,7 @@ import type {
   StatementResult,
   TableInfo,
   TableStructure,
+  TruncateOptions,
   WindowState,
 } from "./types";
 
@@ -200,6 +202,14 @@ export function renameDatabase(connectionId: string, from: string, to: string) {
 
 export function listTables(connectionId: string, namespace: string) {
   return invoke<TableInfo[]>("list_tables", { connectionId, namespace });
+}
+
+export function truncateTables(connectionId: string, namespace: string, tables: string[], options: TruncateOptions) {
+  return invoke<void>("truncate_tables", { connectionId, namespace, tables, options });
+}
+
+export function dropTables(connectionId: string, namespace: string, tables: string[], options: DropOptions) {
+  return invoke<void>("drop_tables", { connectionId, namespace, tables, options });
 }
 
 export function tableStructure(connectionId: string, namespace: string, table: string) {
