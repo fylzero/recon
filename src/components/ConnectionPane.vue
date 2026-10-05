@@ -341,11 +341,69 @@ const activeTabId = computed(() => {
   return view.value === "sql" ? activeQueryTabId.value : activeTableTabId.value;
 });
 
+const pinnedTables = ref(new Set<string>());
+const pinnedKey = (tableNamespace: string) => `recon.pinnedTables.${props.connectionId}.${tableNamespace}`;
+
+function loadPinned(tableNamespace: string) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(pinnedKey(tableNamespace)) ?? "[]");
+    return new Set<string>(Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : []);
+  } catch {
+    return new Set<string>();
+  }
+}
+
+function savePinned(tableNamespace: string, pinned: Set<string>) {
+  if (pinned.size) {
+    localStorage.setItem(pinnedKey(tableNamespace), JSON.stringify([...pinned]));
+  } else {
+    localStorage.removeItem(pinnedKey(tableNamespace));
+  }
+  if (tableNamespace === namespace.value) {
+    pinnedTables.value = pinned;
+  }
+}
+
+function setPinned(names: string[], value: boolean) {
+  const next = new Set(pinnedTables.value);
+  for (const name of names) {
+    if (value) {
+      next.add(name);
+    } else {
+      next.delete(name);
+    }
+  }
+  savePinned(namespace.value, next);
+}
+
+watch(namespace, (value) => (pinnedTables.value = loadPinned(value)), { immediate: true });
+
+/** Pinned tables come first, each group keeping the database's order. */
 const filteredTables = computed(() => {
   const needle = filter.value.trim().toLowerCase();
-  return needle
+  const matching = needle
     ? tables.value.filter((table) => table.name.toLowerCase().includes(needle))
     : tables.value;
+  const pinned = pinnedTables.value;
+  if (!pinned.size) {
+    return matching;
+  }
+  return [
+    ...matching.filter((table) => pinned.has(table.name)),
+    ...matching.filter((table) => !pinned.has(table.name)),
+  ];
+});
+const pinnedShownCount = computed(
+  () => filteredTables.value.filter((table) => pinnedTables.value.has(table.name)).length,
+);
+const menuAllPinned = computed(() => {
+  const chosen = tableMenu.value?.tables ?? [];
+  return chosen.length > 0 && chosen.every((name) => pinnedTables.value.has(name));
+});
+const tableMenuPinLabel = computed(() => {
+  const count = tableMenu.value?.tables.length ?? 0;
+  const verb = menuAllPinned.value ? "Unpin" : "Pin";
+  return count === 1 ? (menuAllPinned.value ? "Unpin" : "Pin to top") : `${verb} ${count.toLocaleString()} tables`;
 });
 
 const tableMenuExportLabel = computed(() => {
@@ -1165,7 +1223,7 @@ function openTabMenu(event: MouseEvent, tab: PaneTab) {
 }
 
 function runTableAction(
-  action: "open" | "openNew" | "openSide" | "query" | "copy" | "diagram" | "export" | "truncate" | "drop",
+  action: "open" | "openNew" | "openSide" | "query" | "copy" | "pin" | "diagram" | "export" | "truncate" | "drop",
 ) {
   const chosen = tableMenu.value?.tables ?? [];
   const table = tables.value.find((item) => item.name === chosen[0]);
@@ -1173,7 +1231,12 @@ function runTableAction(
     openTableToTheSide(table);
     return;
   }
+  const unpin = menuAllPinned.value;
   closeMenus();
+  if (action === "pin") {
+    setPinned(chosen, !unpin);
+    return;
+  }
   if (action === "truncate") {
     startTruncate(chosen);
     return;
@@ -1295,6 +1358,10 @@ function onTableActionDone(names: string[]) {
     removeTab(tab.id);
   }
   selectedTables.value = new Set([...selectedTables.value].filter((name) => !names.includes(name)));
+  const pinned = loadPinned(done.namespace);
+  if (names.some((name) => pinned.has(name))) {
+    savePinned(done.namespace, new Set([...pinned].filter((name) => !names.includes(name))));
+  }
   if (done.namespace === namespace.value) {
     void loadTables();
   }
@@ -2299,6 +2366,11 @@ async function renameNamespace(from: string, to: string) {
     tab.kind === "table" && tab.namespace === from ? { ...tab, namespace: to } : tab,
   );
   scheduleSaveTableTabs();
+  const pinned = loadPinned(from);
+  if (pinned.size) {
+    savePinned(to, pinned);
+    savePinned(from, new Set());
+  }
   const wasCurrent = namespace.value === from;
   await refreshNamespaces();
   if (wasCurrent) {
@@ -2529,8 +2601,9 @@ function autoFitSidebar() {
   const base = `${font.fontWeight} ${font.fontSize} ${font.fontFamily}`;
   const longest = tables.value.reduce((max, table) => {
     const dirty = dirtyTableKeys.value.has(tableKey(namespace.value, table.name));
+    const pinned = pinnedTables.value.has(table.name);
     context.font = dirty ? `italic ${base}` : base;
-    return Math.max(max, context.measureText(table.name).width + (dirty ? 12 : 0));
+    return Math.max(max, context.measureText(table.name).width + (dirty ? 12 : 0) + (pinned ? 22 : 0));
   }, 0);
 
   /**
@@ -2811,47 +2884,60 @@ onUnmounted(() => {
               {{ namespace || driver === "sqlite" ? "No tables." : `Choose a ${namespaceLabel.toLowerCase()}.` }}
             </p>
             <p v-else-if="!filteredTables.length" class="muted tiny db-list-hint">No matches.</p>
-            <button
-              v-for="table in filteredTables"
-              :key="table.name"
-              class="db-table"
-              type="button"
-              role="option"
-              :aria-selected="selectedTables.has(table.name) || activeTableKey === tableKey(namespace, table.name)"
-              :class="{
-                active: activeTableKey === tableKey(namespace, table.name),
-                selected: selectedTables.has(table.name),
-                view: table.kind === 'view',
-                dirty: dirtyTableKeys.has(tableKey(namespace, table.name)),
-              }"
-              :title="
-                dirtyTableKeys.has(tableKey(namespace, table.name))
-                  ? `${table.name} (unsaved changes)`
-                  : table.kind === 'view'
-                    ? `${table.name} (view) · double-click to open in a new tab`
-                    : `${table.name} · double-click to open in a new tab`
-              "
-              @mousedown="armTableTyping"
-              @focus="armTableTyping"
-              @click="onTableClick($event, table)"
-              @dblclick="onTableDblclick($event, table)"
-              @contextmenu="openTableMenu($event, table)"
-            >
-              <svg v-if="table.kind === 'view'" viewBox="0 0 16 16" aria-hidden="true">
-                <path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8 12.1 12.5 8 12.5 1.5 8 1.5 8Z" />
-                <circle cx="8" cy="8" r="1.8" />
-              </svg>
-              <svg v-else viewBox="0 0 16 16" aria-hidden="true">
-                <rect x="2" y="3" width="12" height="10" rx="1.5" />
-                <path d="M2 6.5h12M6.5 6.5V13" />
-              </svg>
-              <span class="db-table-name">{{ table.name }}</span>
-              <span
-                v-if="dirtyTableKeys.has(tableKey(namespace, table.name))"
-                class="dirty-dot"
-                aria-label="Unsaved changes"
+            <template v-for="(table, index) in filteredTables" :key="table.name">
+              <div
+                v-if="index === pinnedShownCount && index > 0"
+                class="db-table-divider"
+                role="separator"
               />
-            </button>
+              <button
+                class="db-table"
+                type="button"
+                role="option"
+                :aria-selected="selectedTables.has(table.name) || activeTableKey === tableKey(namespace, table.name)"
+                :class="{
+                  active: activeTableKey === tableKey(namespace, table.name),
+                  selected: selectedTables.has(table.name),
+                  view: table.kind === 'view',
+                  dirty: dirtyTableKeys.has(tableKey(namespace, table.name)),
+                }"
+                :title="
+                  dirtyTableKeys.has(tableKey(namespace, table.name))
+                    ? `${table.name} (unsaved changes)`
+                    : table.kind === 'view'
+                      ? `${table.name} (view) · double-click to open in a new tab`
+                      : `${table.name} · double-click to open in a new tab`
+                "
+                @mousedown="armTableTyping"
+                @focus="armTableTyping"
+                @click="onTableClick($event, table)"
+                @dblclick="onTableDblclick($event, table)"
+                @contextmenu="openTableMenu($event, table)"
+              >
+                <svg v-if="table.kind === 'view'" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8 12.1 12.5 8 12.5 1.5 8 1.5 8Z" />
+                  <circle cx="8" cy="8" r="1.8" />
+                </svg>
+                <svg v-else viewBox="0 0 16 16" aria-hidden="true">
+                  <rect x="2" y="3" width="12" height="10" rx="1.5" />
+                  <path d="M2 6.5h12M6.5 6.5V13" />
+                </svg>
+                <span class="db-table-name">{{ table.name }}</span>
+                <span
+                  v-if="dirtyTableKeys.has(tableKey(namespace, table.name))"
+                  class="dirty-dot"
+                  aria-label="Unsaved changes"
+                />
+                <svg
+                  v-if="index < pinnedShownCount"
+                  class="db-table-pin"
+                  viewBox="0 0 16 16"
+                  aria-label="Pinned"
+                >
+                  <path d="M6 2.5h4M6.75 2.5v4l-2.25 2.5h7L9.25 6.5v-4M8 9v4.5" />
+                </svg>
+              </button>
+            </template>
           </div>
         </aside>
         <div
@@ -3163,6 +3249,9 @@ onUnmounted(() => {
             </button>
             <div class="overflow-menu-divider" role="separator" />
           </template>
+          <button class="overflow-menu-item" type="button" role="menuitem" @click="runTableAction('pin')">
+            {{ tableMenuPinLabel }}
+          </button>
           <button class="overflow-menu-item" type="button" role="menuitem" @click="runTableAction('diagram')">
             Show diagram
           </button>

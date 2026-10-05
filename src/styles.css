@@ -3038,6 +3038,23 @@ button.view-tab.active:hover:not(:disabled) {
   margin-left: auto;
 }
 
+.db-table svg.db-table-pin {
+  width: 0.95rem;
+  height: 0.95rem;
+  margin-left: auto;
+  stroke: var(--muted);
+}
+
+.db-table .dirty-dot + .db-table-pin {
+  margin-left: 0;
+}
+
+.db-table-divider {
+  height: 1px;
+  margin: 0.3rem 0.45rem;
+  background: var(--border);
+}
+
 .connection-lost {
   display: flex;
   align-items: center;

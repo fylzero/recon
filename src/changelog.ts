@@ -16,6 +16,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       "An empty table no longer shows a No rows label over the grid.",
       "Sorting a table, changing pages, or applying a filter no longer scrolls the grid back to the first column. It only goes back to the top row.",
       "A custom auto refresh interval now shows in minutes and seconds, like 2m 30s, instead of only seconds. The intervals in the auto refresh menu are written without spaces, like 5s and 1m.",
+      "Right-click a table in the sidebar and choose Pin to top to keep it at the top of the table list, with a pin beside its name and a line below the pinned tables. Select several tables first to pin them together, and choose Unpin to put them back in order. Pins are saved for each database on each connection and also apply to the table list beside the diagram.",
     ],
   },
   {
