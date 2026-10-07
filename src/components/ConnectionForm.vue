@@ -113,14 +113,15 @@ const sshConfigHint = computed(() => {
   if (!resolved || !useSsh.value) {
     return "";
   }
-  const parts: string[] = [];
-  if (resolved.hostname && resolved.hostname !== sshHost.value.trim()) {
-    parts.push(`From ~/.ssh/config, connects to ${resolved.hostname}.`);
+  const renamed = resolved.hostname && resolved.hostname !== sshHost.value.trim() ? resolved.hostname : "";
+  const proxy = resolved.proxyCommand ? "its ProxyCommand" : resolved.proxyJump;
+  if (renamed && proxy) {
+    return `From ~/.ssh/config, connects to ${renamed} through ${proxy}.`;
   }
-  if (resolved.proxy) {
-    parts.push(`Its proxy (${resolved.proxy}) isn't used by Recon yet.`);
+  if (renamed) {
+    return `From ~/.ssh/config, connects to ${renamed}.`;
   }
-  return parts.join(" ");
+  return proxy ? `From ~/.ssh/config, connects through ${proxy}.` : "";
 });
 
 const sshSecretLabel = computed(() => (sshAuth.value === "key" ? "Key passphrase" : "SSH password"));

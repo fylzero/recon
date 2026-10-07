@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -6,18 +7,24 @@ use russh::client::{self, AuthResult, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::agent::client::AgentClient;
 use russh::keys::agent::AgentIdentity;
 use russh::keys::{known_hosts, load_secret_key, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
-use russh::{Disconnect, MethodKind};
+use russh::{Disconnect, MethodKind, MethodSet};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::Instant;
 
 use super::ssh_config::{self, expand_home, ResolvedHost};
+use super::ssh_proxy::{self, ProxyProcess, Target};
 use super::CONNECT_TIMEOUT;
 use crate::models::{ConnectionEntry, SshAuth, SshTunnel};
+use crate::prompts::Prompter;
 
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 const LOOPBACK: &str = "127.0.0.1";
 const PROMPT_ROUNDS: usize = 8;
+const MAX_AUTH_STEPS: usize = 4;
 const ALSO_PASSWORD_LABEL: &str = "Server also asks for a password";
+/// Words in a keyboard-interactive prompt that mean it wants a code, not the password.
+const CODE_WORDS: [&str; 7] = ["code", "passcode", "token", "otp", "verification", "one-time", "option"];
 
 #[derive(Debug, Default)]
 pub struct Credentials {
@@ -29,7 +36,8 @@ pub struct Credentials {
 
 enum Step {
     Done,
-    Partial,
+    /// Accepted, but the server wants another method from this set.
+    Partial(MethodSet),
     Rejected,
 }
 
@@ -37,10 +45,38 @@ impl From<AuthResult> for Step {
     fn from(result: AuthResult) -> Self {
         match result {
             AuthResult::Success => Step::Done,
-            AuthResult::Failure { partial_success: true, .. } => Step::Partial,
+            AuthResult::Failure {
+                partial_success: true,
+                remaining_methods,
+            } => Step::Partial(remaining_methods),
             AuthResult::Failure { .. } => Step::Rejected,
         }
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NextMethod {
+    Password,
+    KeyboardInteractive,
+    NeedsSavedPassword,
+    Unsupported,
+}
+
+fn next_method(methods: &[MethodKind], password_ready: bool) -> NextMethod {
+    if password_ready && methods.contains(&MethodKind::Password) {
+        NextMethod::Password
+    } else if methods.contains(&MethodKind::KeyboardInteractive) {
+        NextMethod::KeyboardInteractive
+    } else if methods.contains(&MethodKind::Password) {
+        NextMethod::NeedsSavedPassword
+    } else {
+        NextMethod::Unsupported
+    }
+}
+
+fn looks_like_code(prompt: &str) -> bool {
+    let prompt = prompt.to_ascii_lowercase();
+    CODE_WORDS.iter().any(|word| prompt.contains(word))
 }
 
 type ErrorSlot = Arc<Mutex<Option<String>>>;
@@ -99,9 +135,21 @@ pub struct Tunnel {
     session: Arc<Handle<HostKeyCheck>>,
     forwarder: JoinHandle<()>,
     last_error: ErrorSlot,
+    proxy: Option<ProxyProcess>,
+}
+
+/// Closes a shared tunnel once no other session holds it.
+pub async fn release(tunnel: &Arc<Tunnel>) {
+    if Arc::strong_count(tunnel) == 1 {
+        tunnel.close().await;
+    }
 }
 
 impl Tunnel {
+    pub fn is_alive(&self) -> bool {
+        !self.session.is_closed() && !self.forwarder.is_finished()
+    }
+
     pub fn local_entry(&self, entry: &ConnectionEntry) -> ConnectionEntry {
         ConnectionEntry {
             host: LOOPBACK.into(),
@@ -123,6 +171,9 @@ impl Tunnel {
             .session
             .disconnect(Disconnect::ByApplication, "", "en")
             .await;
+        if let Some(proxy) = &self.proxy {
+            proxy.stop();
+        }
     }
 }
 
@@ -132,7 +183,7 @@ impl Drop for Tunnel {
     }
 }
 
-pub async fn open(entry: &ConnectionEntry, credentials: &Credentials) -> Result<Tunnel, String> {
+pub async fn open(entry: &ConnectionEntry, credentials: &Credentials, prompter: &Prompter) -> Result<Tunnel, String> {
     let ssh = &entry.ssh;
     let resolved = ssh_config::resolve(&ssh.host).await.unwrap_or_default();
     let address = if resolved.hostname.is_empty() || resolved.hostname.eq_ignore_ascii_case(&ssh.host) {
@@ -153,23 +204,20 @@ pub async fn open(entry: &ConnectionEntry, credentials: &Credentials) -> Result<
         ..Default::default()
     });
     let connecting = async {
-        let mut handle = client::connect(config, (address.as_str(), ssh.port), handler)
-            .await
-            .map_err(|err| {
-                take(&rejection).unwrap_or_else(|| with_proxy_hint(connect_error(ssh, err), &resolved))
-            })?;
-        authenticate(&mut handle, ssh, credentials, &resolved.identity_agent).await?;
-        Ok::<_, String>(handle)
+        let (mut handle, proxy) =
+            connect_session(ssh, &address, &resolved, config, handler, &rejection, prompter).await?;
+        authenticate(&mut handle, ssh, credentials, &resolved.identity_agent, prompter).await?;
+        Ok::<_, String>((handle, proxy))
     };
-    let session = match tokio::time::timeout(CONNECT_TIMEOUT, connecting).await {
-        Ok(result) => Arc::new(result?),
-        Err(_) => {
-            return Err(with_proxy_hint(
-                format!("Timed out connecting to the SSH server {}:{}.", ssh.host, ssh.port),
-                &resolved,
-            ))
-        }
+    let Some(connected) = within_connect_timeout(connecting, prompter).await else {
+        let through = if resolved.has_proxy() { " through its proxy" } else { "" };
+        return Err(format!(
+            "Timed out connecting to the SSH server {}:{}{through}.",
+            ssh.host, ssh.port
+        ));
     };
+    let (handle, proxy) = connected?;
+    let session = Arc::new(handle);
     let listener = TcpListener::bind((LOOPBACK, 0))
         .await
         .map_err(|err| format!("Could not open a local port for the SSH tunnel: {err}"))?;
@@ -190,24 +238,64 @@ pub async fn open(entry: &ConnectionEntry, credentials: &Credentials) -> Result<
         session,
         forwarder,
         last_error,
+        proxy,
     })
+}
+
+/**
+ * Runs `future` under the connect timeout, except that time spent in a
+ * sign-in prompt doesn't count: the deadline moves while someone is typing.
+ */
+async fn within_connect_timeout<T>(future: impl Future<Output = T>, prompter: &Prompter) -> Option<T> {
+    let mut future = std::pin::pin!(future);
+    let mut seen = 0;
+    prompter.busy_since(&mut seen);
+    let mut deadline = Instant::now() + CONNECT_TIMEOUT;
+    loop {
+        match tokio::time::timeout_at(deadline, &mut future).await {
+            Ok(value) => return Some(value),
+            Err(_) if prompter.busy_since(&mut seen) => deadline = Instant::now() + CONNECT_TIMEOUT,
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Connects directly, or through the ProxyJump or ProxyCommand from ~/.ssh/config.
+async fn connect_session(
+    ssh: &SshTunnel,
+    address: &str,
+    resolved: &ResolvedHost,
+    config: Arc<client::Config>,
+    handler: HostKeyCheck,
+    rejection: &ErrorSlot,
+    prompter: &Prompter,
+) -> Result<(Handle<HostKeyCheck>, Option<ProxyProcess>), String> {
+    if !resolved.has_proxy() {
+        let handle = client::connect(config, (address, ssh.port), handler)
+            .await
+            .map_err(|err| take(rejection).unwrap_or_else(|| connect_error(ssh, err)))?;
+        return Ok((handle, None));
+    }
+    let target = Target {
+        alias: &ssh.host,
+        address,
+        port: ssh.port,
+        user: &ssh.user,
+    };
+    let (proxy, stream) = ssh_proxy::spawn(resolved, &target, prompter).await?;
+    match client::connect_stream(config, stream, handler).await {
+        Ok(handle) => Ok((handle, Some(proxy))),
+        Err(err) => match take(rejection) {
+            Some(reason) => Err(reason),
+            None => Err(proxy.explain(connect_error(ssh, err)).await),
+        },
+    }
 }
 
 fn connect_error(ssh: &SshTunnel, err: russh::Error) -> String {
     match err {
         russh::Error::IO(io) => format!("Could not reach the SSH server {}:{}: {io}", ssh.host, ssh.port),
         other => format!("SSH connection to {}:{} failed: {other}", ssh.host, ssh.port),
-    }
-}
-
-fn with_proxy_hint(message: String, resolved: &ResolvedHost) -> String {
-    if resolved.proxy.is_empty() {
-        message
-    } else {
-        format!(
-            "{message} Your ~/.ssh/config reaches this host through a proxy ({}), which Recon doesn't use yet.",
-            resolved.proxy
-        )
     }
 }
 
@@ -267,94 +355,128 @@ fn filled(value: &Option<String>) -> Option<&str> {
 }
 
 /**
- * Logs in with the chosen method, then with the SSH password when the server
- * accepts that method but wants more (OpenSSH's `AuthenticationMethods
- * publickey,password`).
+ * Logs in with the chosen method, then keeps going while the server accepts
+ * a step but wants another (OpenSSH's `AuthenticationMethods`), like a key
+ * and then a password, or a password and then a Duo or authenticator code.
  */
 async fn authenticate(
     handle: &mut Handle<HostKeyCheck>,
     ssh: &SshTunnel,
     credentials: &Credentials,
     identity_agent: &str,
+    prompter: &Prompter,
 ) -> Result<(), String> {
     let secret = filled(&credentials.secret);
-    let first = match ssh.auth {
+    let mut password = match ssh.auth {
+        SshAuth::Password => None,
+        SshAuth::Key | SshAuth::Agent => filled(&credentials.password),
+    };
+    let mut step = match ssh.auth {
         SshAuth::Password => {
             let password = secret.ok_or_else(|| "Enter the SSH password.".to_string())?;
-            password_login(handle, &ssh.user, password).await?
+            password_login(handle, &ssh.user, password, prompter).await?
         }
         SshAuth::Key => key_login(handle, ssh, secret).await?,
         SshAuth::Agent => agent_login(handle, &ssh.user, identity_agent).await?,
     };
-    let outcome = match first {
-        Step::Partial if ssh.auth != SshAuth::Password => {
-            let password = filled(&credentials.password).ok_or_else(|| {
-                format!(
+    for _ in 0..MAX_AUTH_STEPS {
+        let methods = match step {
+            Step::Done => return Ok(()),
+            Step::Rejected => {
+                return Err(format!(
+                    "The SSH server {} rejected the credentials for {}.",
+                    ssh.host, ssh.user
+                ))
+            }
+            Step::Partial(methods) => methods,
+        };
+        step = match next_method(&methods, password.is_some()) {
+            NextMethod::Password => {
+                let password = password.take().unwrap_or_default();
+                password_login(handle, &ssh.user, password, prompter).await?
+            }
+            NextMethod::KeyboardInteractive => {
+                keyboard_interactive_login(handle, &ssh.user, password.take(), prompter).await?
+            }
+            NextMethod::NeedsSavedPassword => {
+                return Err(format!(
                     "The SSH server accepted the key but also asks for a password. \
                      Turn on \u{201c}{ALSO_PASSWORD_LABEL}\u{201d} and enter it."
-                )
-            })?;
-            password_login(handle, &ssh.user, password).await?
-        }
-        step => step,
-    };
-    match outcome {
-        Step::Done => Ok(()),
-        Step::Partial => Err(format!(
-            "The SSH server {} accepted the login but asks for another step, like a one-time code, \
-             which Recon can't answer yet.",
-            ssh.host
-        )),
-        Step::Rejected => Err(format!(
-            "The SSH server {} rejected the credentials for {}.",
-            ssh.host, ssh.user
-        )),
+                ))
+            }
+            NextMethod::Unsupported => {
+                let names: Vec<String> = methods.iter().map(String::from).collect();
+                return Err(format!(
+                    "The SSH server {} asks for another sign-in step Recon doesn't support ({}).",
+                    ssh.host,
+                    names.join(", ")
+                ));
+            }
+        };
     }
+    Err(format!("The SSH server {} kept asking for more sign-in steps.", ssh.host))
 }
 
 /// Many servers only take passwords through keyboard-interactive, so that's tried next.
-async fn password_login(handle: &mut Handle<HostKeyCheck>, user: &str, password: &str) -> Result<Step, String> {
+async fn password_login(
+    handle: &mut Handle<HostKeyCheck>,
+    user: &str,
+    password: &str,
+    prompter: &Prompter,
+) -> Result<Step, String> {
     match handle.authenticate_password(user, password).await.map_err(auth_error)? {
         AuthResult::Failure {
             partial_success: false,
             remaining_methods,
         } if remaining_methods.contains(&MethodKind::KeyboardInteractive) => {
-            keyboard_interactive_login(handle, user, password).await
+            keyboard_interactive_login(handle, user, Some(password), prompter).await
         }
         result => Ok(result.into()),
     }
 }
 
-/// Answers a single hidden prompt with the password. Anything else needs a person.
+/**
+ * Answers the server's prompts: the first hidden one that isn't asking for a
+ * code gets the saved password, and the rest (Duo, authenticator codes) are
+ * asked in Recon's sign-in window.
+ */
 async fn keyboard_interactive_login(
     handle: &mut Handle<HostKeyCheck>,
     user: &str,
-    password: &str,
+    mut password: Option<&str>,
+    prompter: &Prompter,
 ) -> Result<Step, String> {
     let mut reply = handle
         .authenticate_keyboard_interactive_start(user, None)
         .await
         .map_err(auth_error)?;
-    let mut answered = false;
     for _ in 0..PROMPT_ROUNDS {
         let responses = match reply {
             KeyboardInteractiveAuthResponse::Success => return Ok(Step::Done),
-            KeyboardInteractiveAuthResponse::Failure { partial_success, .. } => {
-                return Ok(if partial_success { Step::Partial } else { Step::Rejected });
+            KeyboardInteractiveAuthResponse::Failure {
+                partial_success: true,
+                remaining_methods,
+            } => return Ok(Step::Partial(remaining_methods)),
+            KeyboardInteractiveAuthResponse::Failure { .. } => return Ok(Step::Rejected),
+            KeyboardInteractiveAuthResponse::InfoRequest {
+                name,
+                instructions,
+                prompts,
+            } => {
+                let context = if instructions.trim().is_empty() { name } else { instructions };
+                let mut responses = Vec::with_capacity(prompts.len());
+                for prompt in &prompts {
+                    let answer = match password {
+                        Some(saved) if !prompt.echo && !looks_like_code(&prompt.prompt) => {
+                            password = None;
+                            saved.to_string()
+                        }
+                        _ => prompter.ask(&context, &prompt.prompt, !prompt.echo).await?,
+                    };
+                    responses.push(answer);
+                }
+                responses
             }
-            KeyboardInteractiveAuthResponse::InfoRequest { prompts, .. } => match prompts.as_slice() {
-                [] => Vec::new(),
-                [prompt] if !prompt.echo && !answered => {
-                    answered = true;
-                    vec![password.to_string()]
-                }
-                [prompt, ..] => {
-                    return Err(format!(
-                        "The SSH server asked \u{201c}{}\u{201d}, which Recon can't answer yet.",
-                        prompt.prompt.trim()
-                    ))
-                }
-            },
         };
         reply = handle
             .authenticate_keyboard_interactive_respond(responses)
@@ -420,7 +542,10 @@ async fn agent_login(handle: &mut Handle<HostKeyCheck>, user: &str, identity_age
         };
         match handle.authenticate_publickey_with(user, key, hash, &mut agent).await {
             Ok(AuthResult::Success) => return Ok(Step::Done),
-            Ok(AuthResult::Failure { partial_success: true, .. }) => return Ok(Step::Partial),
+            Ok(AuthResult::Failure {
+                partial_success: true,
+                remaining_methods,
+            }) => return Ok(Step::Partial(remaining_methods)),
             Ok(_) => continue,
             Err(err) => return Err(format!("The SSH agent could not sign in: {err}")),
         }
@@ -488,6 +613,26 @@ mod tests {
         let home = std::env::var("HOME").unwrap();
         assert_eq!(expand_home("~/.ssh/id_ed25519"), PathBuf::from(home).join(".ssh/id_ed25519"));
         assert_eq!(expand_home("/keys/id_rsa"), PathBuf::from("/keys/id_rsa"));
+    }
+
+    #[test]
+    fn routes_the_next_sign_in_step() {
+        use MethodKind::{KeyboardInteractive, Password, PublicKey};
+        assert_eq!(next_method(&[Password, KeyboardInteractive], true), NextMethod::Password);
+        assert_eq!(next_method(&[Password, KeyboardInteractive], false), NextMethod::KeyboardInteractive);
+        assert_eq!(next_method(&[KeyboardInteractive], true), NextMethod::KeyboardInteractive);
+        assert_eq!(next_method(&[Password], false), NextMethod::NeedsSavedPassword);
+        assert_eq!(next_method(&[PublicKey], true), NextMethod::Unsupported);
+    }
+
+    #[test]
+    fn tells_codes_from_passwords() {
+        assert!(!looks_like_code("Password: "));
+        assert!(!looks_like_code("deploy@bastion's password:"));
+        assert!(looks_like_code("Verification code: "));
+        assert!(looks_like_code("Passcode or option (1-3): "));
+        assert!(looks_like_code("Enter your OTP:"));
+        assert!(looks_like_code("One-time password (OATH) for `deploy':"));
     }
 
     #[test]

@@ -7,6 +7,7 @@ pub mod sql_split;
 pub mod sqlite;
 pub mod ssh;
 pub mod ssh_config;
+pub mod ssh_proxy;
 pub mod table_ops;
 pub mod tabular;
 
@@ -1152,7 +1153,8 @@ pub struct Session {
     pub cancel: AtomicBool,
     pub lost: AtomicBool,
     pub namespace: Mutex<String>,
-    pub tunnel: Option<ssh::Tunnel>,
+    /// Shared with the session that replaces this one when a reconnect reuses it.
+    pub tunnel: Option<Arc<ssh::Tunnel>>,
     /// Column lists by namespace and table, so filters can be checked without a catalog query each time.
     pub columns: Mutex<HashMap<(String, String), Arc<Vec<ColumnDetail>>>>,
     /// Backend ids of browse queries that can be cancelled, by request id.
@@ -1213,7 +1215,7 @@ impl Session {
         }
         self.pool.close().await;
         if let Some(tunnel) = &self.tunnel {
-            tunnel.close().await;
+            ssh::release(tunnel).await;
         }
     }
 }

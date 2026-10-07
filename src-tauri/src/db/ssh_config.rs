@@ -5,9 +5,11 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tokio::process::Command;
+use tokio::sync::OnceCell;
 
 /// The system OpenSSH, since apps opened from Finder don't get the shell's PATH.
-const SSH: &str = "/usr/bin/ssh";
+pub const SSH: &str = "/usr/bin/ssh";
+const FALLBACK_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_INCLUDE_DEPTH: usize = 8;
 /// What `ssh -G` lists when a host sets no IdentityFile of its own.
@@ -33,7 +35,14 @@ pub struct ResolvedHost {
     pub user: String,
     pub identity_files: Vec<String>,
     pub identity_agent: String,
-    pub proxy: String,
+    pub proxy_jump: String,
+    pub proxy_command: String,
+}
+
+impl ResolvedHost {
+    pub fn has_proxy(&self) -> bool {
+        !self.proxy_jump.is_empty() || !self.proxy_command.is_empty()
+    }
 }
 
 fn home() -> Option<PathBuf> {
@@ -76,9 +85,8 @@ fn parse_resolved(output: &str, local_user: &str, home: &Path) -> ResolvedHost {
             "identityagent" if !value.eq_ignore_ascii_case("none") && value != "SSH_AUTH_SOCK" => {
                 resolved.identity_agent = abbreviate_home(value, home);
             }
-            "proxyjump" | "proxycommand" if !value.eq_ignore_ascii_case("none") => {
-                resolved.proxy = value.to_string();
-            }
+            "proxyjump" if !value.eq_ignore_ascii_case("none") => resolved.proxy_jump = value.to_string(),
+            "proxycommand" if !value.eq_ignore_ascii_case("none") => resolved.proxy_command = value.to_string(),
             _ => {}
         }
     }
@@ -121,6 +129,38 @@ pub async fn resolve(host: &str) -> Option<ResolvedHost> {
     let local_user = std::env::var("USER").unwrap_or_default();
     let home = home().unwrap_or_default();
     Some(parse_resolved(&String::from_utf8_lossy(&output.stdout), &local_user, &home))
+}
+
+static LOGIN_PATH: OnceCell<String> = OnceCell::const_new();
+
+/**
+ * The PATH a login shell would have, so proxy commands like `aws` or
+ * `cloudflared` are found even when Recon was opened from Finder. Read once
+ * and kept apart from the proxy's own output, where a profile that prints
+ * something would corrupt the SSH stream.
+ */
+pub async fn login_path() -> &'static str {
+    LOGIN_PATH
+        .get_or_init(|| async {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+            let run = Command::new(shell)
+                .args(["-lc", "printf '\\n%s' \"$PATH\""])
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .output();
+            let printed = match tokio::time::timeout(RESOLVE_TIMEOUT, run).await {
+                Ok(Ok(output)) if output.status.success() => String::from_utf8_lossy(&output.stdout).into_owned(),
+                _ => String::new(),
+            };
+            let path = printed.rsplit('\n').next().unwrap_or_default().trim();
+            if path.is_empty() {
+                FALLBACK_PATH.to_string()
+            } else {
+                path.to_string()
+            }
+        })
+        .await
 }
 
 fn directive(line: &str) -> Option<(String, Vec<String>)> {
@@ -256,7 +296,13 @@ mod tests {
         assert_eq!(resolved.user, "deploy");
         assert_eq!(resolved.identity_files, ["~/work_key"]);
         assert_eq!(resolved.identity_agent, "~/agent.sock");
-        assert_eq!(resolved.proxy, "jump.example.com");
+        assert_eq!(resolved.proxy_jump, "jump.example.com");
+        assert_eq!(resolved.proxy_command, "");
+        assert!(resolved.has_proxy());
+
+        let command = parse_resolved("hostname db\nproxycommand cloudflared access ssh --hostname %h\n", "me", &dir);
+        assert_eq!(command.proxy_command, "cloudflared access ssh --hostname %h");
+        assert_eq!(command.proxy_jump, "");
 
         let defaults = "user me\nhostname example.com\nport 22\nidentityfile ~/.ssh/id_rsa\n\
                         identityfile ~/.ssh/id_ed25519\nidentityagent SSH_AUTH_SOCK\n";
@@ -264,7 +310,7 @@ mod tests {
         assert_eq!(resolved.user, "");
         assert!(resolved.identity_files.is_empty());
         assert_eq!(resolved.identity_agent, "");
-        assert_eq!(resolved.proxy, "");
+        assert!(!resolved.has_proxy());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -18,6 +18,7 @@ use crate::db::{
     SchemaColumn, SchemaDiagram, Session, SessionStore, TableInfo, TableStructure,
 };
 use crate::models::{ConnectionEntry, Driver};
+use crate::prompts::Prompter;
 use crate::query_log::{self, QueryOrigin, QueryRecord};
 use crate::secrets;
 
@@ -98,7 +99,8 @@ async fn open_tunnel(
     entry: &ConnectionEntry,
     ssh_secret: Option<String>,
     ssh_password: Option<String>,
-) -> Result<(ConnectionEntry, Option<Tunnel>), String> {
+    prompter: &Prompter,
+) -> Result<(ConnectionEntry, Option<Arc<Tunnel>>), String> {
     if !entry.ssh.enabled || entry.driver == Driver::Sqlite {
         return Ok((entry.clone(), None));
     }
@@ -111,8 +113,21 @@ async fn open_tunnel(
             secrets::ssh_password_account,
         )?,
     };
-    let tunnel = db::ssh::open(entry, &credentials).await?;
-    Ok((tunnel.local_entry(entry), Some(tunnel)))
+    let tunnel = db::ssh::open(entry, &credentials, prompter).await?;
+    Ok((tunnel.local_entry(entry), Some(Arc::new(tunnel))))
+}
+
+/**
+ * The live tunnel of the session being replaced, if the new session can use
+ * it: reconnecting then needs no new SSH sign-in, and so no one-time code.
+ */
+fn reusable_tunnel(stale: &Session, entry: &ConnectionEntry) -> Option<Arc<Tunnel>> {
+    let same_route = stale.entry.ssh == entry.ssh && stale.entry.host == entry.host && stale.entry.port == entry.port;
+    stale
+        .tunnel
+        .as_ref()
+        .filter(|tunnel| same_route && tunnel.is_alive())
+        .cloned()
 }
 
 fn explain(tunnel: Option<&Tunnel>, err: String) -> String {
@@ -198,6 +213,7 @@ fn pick_namespace(items: &[String], reported: &str, system: &[&str], preferred: 
 
 #[tauri::command]
 pub async fn test_connection(
+    app: AppHandle,
     connection: ConnectionEntry,
     password: Option<String>,
     ssh_secret: Option<String>,
@@ -205,13 +221,14 @@ pub async fn test_connection(
 ) -> Result<String, String> {
     let entry = sanitize_connection(connection)?;
     let password = resolve_password(&entry, password)?;
-    let (target, tunnel) = open_tunnel(&entry, ssh_secret, ssh_password).await?;
+    let prompter = Prompter::interactive(&app, entry.name.clone());
+    let (target, tunnel) = open_tunnel(&entry, ssh_secret, ssh_password, &prompter).await?;
     let outcome = match target.driver {
         Driver::Mysql => db::mysql::test(&target, password.as_deref()).await,
         Driver::Postgres => db::postgres::test(&target, password.as_deref()).await,
         Driver::Sqlite => db::sqlite::test(&target).await,
     };
-    let outcome = outcome.map_err(|err| explain(tunnel.as_ref(), err));
+    let outcome = outcome.map_err(|err| explain(tunnel.as_deref(), err));
     if let Some(tunnel) = tunnel {
         tunnel.close().await;
     }
@@ -228,6 +245,7 @@ pub async fn create_sqlite_database(path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn connect(
+    app: AppHandle,
     state: State<'_, AppState>,
     sessions: State<'_, SessionStore>,
     results: State<'_, ResultStore>,
@@ -248,7 +266,9 @@ pub async fn connect(
         previous.close().await;
         results.remove_connection(&key);
     }
-    let (session, info) = open_session(entry, password, namespace.as_deref().unwrap_or_default()).await?;
+    let prompter = Prompter::interactive(&app, entry.name.clone());
+    let restore = namespace.as_deref().unwrap_or_default();
+    let (session, info) = open_session(entry, password, restore, &prompter, None).await?;
     if let Some(stale) = sessions.insert(&key, session).await {
         stale.close().await;
     }
@@ -258,14 +278,20 @@ pub async fn connect(
 /**
  * Opens the tunnel, pool, and editor connection for `entry`. A non-empty
  * `restore` namespace is selected in place of the server's default so a
- * reconnect lands back where the user was.
+ * reconnect lands back where the user was. A `reuse` tunnel is used instead
+ * of signing in to SSH again.
  */
 async fn open_session(
     entry: ConnectionEntry,
     password: Option<String>,
     restore: &str,
+    prompter: &Prompter,
+    reuse: Option<Arc<Tunnel>>,
 ) -> Result<(Session, SessionInfo), String> {
-    let (target, tunnel) = open_tunnel(&entry, None, None).await?;
+    let (target, tunnel) = match reuse {
+        Some(tunnel) => (tunnel.local_entry(&entry), Some(tunnel)),
+        None => open_tunnel(&entry, None, None, prompter).await?,
+    };
     let opened = match target.driver {
         Driver::Mysql => db::mysql::open(&target, password.as_deref()).await,
         Driver::Postgres => db::postgres::open(&target, password.as_deref()).await,
@@ -274,9 +300,9 @@ async fn open_session(
     let opened = match opened {
         Ok(opened) => opened,
         Err(err) => {
-            let err = explain(tunnel.as_ref(), err);
+            let err = explain(tunnel.as_deref(), err);
             if let Some(tunnel) = tunnel {
-                tunnel.close().await;
+                db::ssh::release(&tunnel).await;
             }
             return Err(err);
         }
@@ -354,10 +380,12 @@ async fn rebuild(
     connection_id: &str,
     stale: &Arc<Session>,
     password: Option<String>,
+    prompter: &Prompter,
 ) -> Result<(Arc<Session>, SessionInfo), String> {
     let (entry, saved) = reopen_credentials(app, stale)?;
     let password = password.filter(|value| !value.is_empty()).or(saved);
-    let (session, info) = open_session(entry, password, &stale.namespace()).await?;
+    let reuse = reusable_tunnel(stale, &entry);
+    let (session, info) = open_session(entry, password, &stale.namespace(), prompter, reuse).await?;
     match app.state::<SessionStore>().replace(connection_id, stale, session).await {
         Ok(next) => {
             let stale = stale.clone();
@@ -382,7 +410,7 @@ async fn recover(app: &AppHandle, connection_id: &str, stale: &Arc<Session>) -> 
     if !Arc::ptr_eq(&current, stale) || current.is_lost() {
         return (!current.is_lost()).then_some(current);
     }
-    match rebuild(app, connection_id, stale, None).await {
+    match rebuild(app, connection_id, stale, None, &Prompter::background()).await {
         Ok((session, _)) => {
             let event = ConnectionEvent { connection_id, error: None };
             let _ = app.emit(CONNECTION_RESTORED_EVENT, event);
@@ -429,7 +457,8 @@ pub async fn reconnect(
         .current(&connection_id)
         .await
         .ok_or_else(|| "This connection is not open.".to_string())?;
-    let (_, info) = rebuild(&app, &connection_id, &stale, password).await?;
+    let prompter = Prompter::interactive(&app, stale.name.clone());
+    let (_, info) = rebuild(&app, &connection_id, &stale, password, &prompter).await?;
     Ok(info)
 }
 

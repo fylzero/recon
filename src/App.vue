@@ -9,6 +9,7 @@ import TabBar from "./components/TabBar.vue";
 import Toast from "./components/Toast.vue";
 import Modal from "./components/Modal.vue";
 import ConnectionForm from "./components/ConnectionForm.vue";
+import AuthPromptDialog from "./components/AuthPromptDialog.vue";
 import ConnectionsView from "./views/ConnectionsView.vue";
 
 const ConnectionPane = defineAsyncComponent(() => import("./components/ConnectionPane.vue"));
@@ -272,5 +273,6 @@ watch([groups, standaloneConnections], () => {
         </button>
       </template>
     </Modal>
+    <AuthPromptDialog />
   </div>
 </template>

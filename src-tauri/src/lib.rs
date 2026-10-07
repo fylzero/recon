@@ -1,9 +1,11 @@
+pub mod askpass;
 mod commands;
 mod db;
 mod db_commands;
 mod menu;
 mod models;
 mod persist;
+mod prompts;
 mod query_log;
 mod secrets;
 mod tabular_commands;
@@ -42,6 +44,7 @@ pub fn run() {
             app.manage(SessionStore::default());
             app.manage(ResultStore::default());
             app.manage(TransferStore::default());
+            app.manage(prompts::PromptStore::default());
             if let (Some(window), Some(bounds)) = (app.get_webview_window("main"), bounds) {
                 window_state::apply(&window, &bounds);
             }
@@ -83,6 +86,7 @@ pub fn run() {
             commands::clear_query_history,
             window_state::get_window_state,
             window_state::update_window_state,
+            prompts::answer_prompt,
             db_commands::test_connection,
             db_commands::create_sqlite_database,
             db_commands::connect,

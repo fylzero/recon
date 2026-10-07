@@ -32,7 +32,16 @@ export interface ResolvedSshHost {
   user: string;
   identityFiles: string[];
   identityAgent: string;
-  proxy: string;
+  proxyJump: string;
+  proxyCommand: string;
+}
+
+export interface AuthPrompt {
+  id: string;
+  title: string;
+  instructions: string;
+  prompt: string;
+  secret: boolean;
 }
 
 export const DEFAULT_SSH_PORT = 22;

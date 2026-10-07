@@ -2374,6 +2374,18 @@ button.link-button:hover:not(:disabled) {
   margin: 0;
 }
 
+.auth-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.auth-prompt-instructions {
+  margin: 0;
+  font-size: 12.5px;
+  white-space: pre-wrap;
+}
+
 .color-choice {
   display: flex;
   align-items: center;

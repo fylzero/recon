@@ -124,6 +124,10 @@ export function resolveSshHost(host: string) {
   return invoke<ResolvedSshHost | null>("resolve_ssh_host", { host });
 }
 
+export function answerPrompt(id: string, answer: string | null) {
+  return invoke<void>("answer_prompt", { id, answer });
+}
+
 export function updatePreferences(patch: PreferencesPatch) {
   return invoke<AppData>("update_preferences", { patch });
 }
