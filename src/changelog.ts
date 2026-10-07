@@ -6,6 +6,18 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.6.0",
+    date: "October 7, 2026",
+    notes: [
+      "The SSH host field suggests the hosts from your ~/.ssh/config, including files it includes. Picking one fills in its port, its user, and the key it names, or switches to SSH agent if it names an agent like 1Password's. A note under the field shows the address it really connects to.",
+      "SSH tunnels resolve hosts the way OpenSSH does, so an alias from ~/.ssh/config works in the SSH host field, along with Include, Match, and wildcard blocks. An IdentityAgent set for the host is used for SSH agent logins.",
+      "For SSH servers that want a key and then a password, turn on Server also asks for a password under a private key or SSH agent login and enter the password. It's saved in the macOS Keychain. If the server asks for one and the option is off, the error says to turn it on.",
+      "SSH password logins also work on servers that only take passwords through a typed prompt (keyboard-interactive), which many PAM setups use. If a server asks for something else, like a one-time code, the error shows the server's question.",
+      "If ~/.ssh/config reaches a host through ProxyJump or ProxyCommand, the connection form and any connection error say so, since Recon doesn't follow those yet.",
+      "New Send password in clear text option for MySQL connections, for servers that check passwords with PAM, LDAP, or AWS IAM (mysql_clear_password). The password is only sent this way with SSL set to Require or through an SSH tunnel, and turning it on sets SSL to Require.",
+    ],
+  },
+  {
     version: "1.5.0",
     date: "October 4, 2026",
     notes: [

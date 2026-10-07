@@ -13,6 +13,7 @@ import {
   defaultSshTunnel,
   type ConnectionEntry,
   type Driver,
+  type ResolvedSshHost,
   type SshAuth,
   type SslMode,
 } from "../types";
@@ -40,6 +41,7 @@ const savePassword = ref(initial?.savePassword ?? true);
 const database = ref(initial?.database ?? "");
 const filePath = ref(initial?.filePath ?? "");
 const sslMode = ref<SslMode>(initial?.sslMode ?? "prefer");
+const cleartextAuth = ref(initial?.cleartextAuth ?? false);
 const groupId = ref<string>(formState.value?.groupId ?? "");
 const colorPicked = ref(Boolean(initial?.headerColor));
 const headerColor = ref(initial?.headerColor || groupColor());
@@ -54,7 +56,13 @@ const sshAuth = ref<SshAuth>(initialSsh.auth);
 const sshKeyPath = ref(initialSsh.keyPath);
 const sshSecret = ref("");
 const hasSavedSshSecret = ref(false);
+const sshAlsoPassword = ref(initialSsh.alsoPassword ?? false);
+const sshPassword = ref("");
+const hasSavedSshPassword = ref(false);
 const sshKeys = ref<string[]>([]);
+const sshHosts = ref<string[]>([]);
+const sshResolved = ref<ResolvedSshHost | null>(null);
+let resolveToken = 0;
 
 const keyChoice = computed({
   get: () => (sshKeys.value.includes(sshKeyPath.value) ? sshKeyPath.value : ""),
@@ -84,11 +92,36 @@ const sshReady = computed(
     ),
 );
 
+const usesCleartext = computed(() => driver.value === "mysql" && cleartextAuth.value);
+
+const cleartextBlocked = computed(
+  () => usesCleartext.value && !useSsh.value && sslMode.value !== "require",
+);
+
 const canSubmit = computed(() =>
   isSqlite.value
     ? Boolean(filePath.value.trim())
-    : Boolean(host.value.trim() && user.value.trim() && sshReady.value),
+    : Boolean(host.value.trim() && user.value.trim() && sshReady.value && !cleartextBlocked.value),
 );
+
+const usesSshPassword = computed(
+  () => useSsh.value && sshAuth.value !== "password" && sshAlsoPassword.value,
+);
+
+const sshConfigHint = computed(() => {
+  const resolved = sshResolved.value;
+  if (!resolved || !useSsh.value) {
+    return "";
+  }
+  const parts: string[] = [];
+  if (resolved.hostname && resolved.hostname !== sshHost.value.trim()) {
+    parts.push(`From ~/.ssh/config, connects to ${resolved.hostname}.`);
+  }
+  if (resolved.proxy) {
+    parts.push(`Its proxy (${resolved.proxy}) isn't used by Recon yet.`);
+  }
+  return parts.join(" ");
+});
 
 const sshSecretLabel = computed(() => (sshAuth.value === "key" ? "Key passphrase" : "SSH password"));
 
@@ -134,6 +167,7 @@ watch(
     database,
     filePath,
     sslMode,
+    cleartextAuth,
     sshEnabled,
     sshHost,
     sshPort,
@@ -141,6 +175,8 @@ watch(
     sshAuth,
     sshKeyPath,
     sshSecret,
+    sshAlsoPassword,
+    sshPassword,
   ],
   () => {
     testResult.value = null;
@@ -154,6 +190,54 @@ watch(sshAuth, (next) => {
     sshKeyPath.value = sshKeys.value[0];
   }
 });
+
+watch(cleartextAuth, (enabled) => {
+  if (enabled && !useSsh.value && sslMode.value !== "require") {
+    sslMode.value = "require";
+  }
+});
+
+watch(sshHost, () => {
+  void resolveSshHost(true);
+});
+
+/**
+ * Looks up a ~/.ssh/config alias so the form shows where it really connects.
+ * With `fill`, the alias's port, user, and key are copied into the form.
+ */
+async function resolveSshHost(fill: boolean) {
+  const token = ++resolveToken;
+  const alias = sshHost.value.trim();
+  if (!sshHosts.value.includes(alias)) {
+    sshResolved.value = null;
+    return;
+  }
+  const resolved = await api.resolveSshHost(alias).catch(() => null);
+  if (token !== resolveToken) {
+    return;
+  }
+  sshResolved.value = resolved;
+  if (!resolved || !fill) {
+    return;
+  }
+  if (resolved.port) {
+    sshPort.value = resolved.port;
+  }
+  if (resolved.user && !sshUser.value.trim()) {
+    sshUser.value = resolved.user;
+  }
+  if (resolved.identityFiles.length) {
+    sshAuth.value = "key";
+    sshKeyPath.value = resolved.identityFiles[0];
+  } else if (resolved.identityAgent) {
+    sshAuth.value = "agent";
+  }
+}
+
+async function loadSshHosts() {
+  sshHosts.value = await api.listSshHosts().catch(() => []);
+  void resolveSshHost(false);
+}
 
 async function loadSshKeys() {
   try {
@@ -170,6 +254,7 @@ onMounted(async () => {
   await nextTick();
   nameInput.value?.focus();
   void loadSshKeys();
+  void loadSshHosts();
   if (initial?.id && initial.driver !== "sqlite" && initial.savePassword) {
     try {
       hasSavedPassword.value = await api.hasSavedPassword(initial.id);
@@ -183,6 +268,9 @@ onMounted(async () => {
     } catch {
       hasSavedSshSecret.value = false;
     }
+  }
+  if (initial?.id && initialSsh.enabled && initialSsh.alsoPassword) {
+    hasSavedSshPassword.value = await api.hasSavedSshPassword(initial.id).catch(() => false);
   }
 });
 
@@ -203,6 +291,7 @@ function buildEntry(): ConnectionEntry {
     sslMode: sslMode.value,
     headerColor: colorPicked.value ? headerColor.value : "",
     savePassword: isSqlite.value ? false : savePassword.value,
+    cleartextAuth: usesCleartext.value,
     ssh: isSqlite.value
       ? defaultSshTunnel()
       : {
@@ -212,6 +301,7 @@ function buildEntry(): ConnectionEntry {
           user: sshUser.value.trim(),
           auth: sshAuth.value,
           keyPath: sshAuth.value === "key" ? sshKeyPath.value.trim() : "",
+          alsoPassword: sshAuth.value !== "password" && sshAlsoPassword.value,
         },
   };
 }
@@ -228,6 +318,10 @@ function sshSecretArg() {
     return null;
   }
   return sshSecret.value ? sshSecret.value : null;
+}
+
+function sshPasswordArg() {
+  return usesSshPassword.value && sshPassword.value ? sshPassword.value : null;
 }
 
 async function browseKey() {
@@ -288,7 +382,12 @@ async function testConnection() {
   testResult.value = null;
   formError.value = "";
   try {
-    const version = await api.testConnection(buildEntry(), passwordArg(), sshSecretArg());
+    const version = await api.testConnection(
+      buildEntry(),
+      passwordArg(),
+      sshSecretArg(),
+      sshPasswordArg(),
+    );
     const via = useSsh.value ? ` · via SSH ${sshHost.value.trim()}` : "";
     testResult.value = { ok: true, text: `Connected · ${version}${via}` };
   } catch (err) {
@@ -310,6 +409,7 @@ async function submit(connectAfter: boolean) {
       buildEntry(),
       passwordArg(),
       sshSecretArg(),
+      sshPasswordArg(),
     );
     closeConnectionForm();
     if (connectAfter) {
@@ -418,6 +518,18 @@ async function submit(connectAfter: boolean) {
               <option value="disable">Disable</option>
             </select>
           </label>
+          <template v-if="driver === 'mysql'">
+            <label class="checkbox-row span-2">
+              <input v-model="cleartextAuth" type="checkbox" />
+              <span>Send password in clear text</span>
+            </label>
+            <p v-if="cleartextBlocked" class="settings-error span-2">
+              Set SSL to Require or connect through an SSH tunnel to send the password in clear text.
+            </p>
+            <p v-else-if="cleartextAuth" class="muted tiny span-2 ssh-hint">
+              For servers that check passwords with PAM, LDAP, or AWS IAM (mysql_clear_password).
+            </p>
+          </template>
 
           <label class="checkbox-row span-2 ssh-toggle">
             <input v-model="sshEnabled" type="checkbox" />
@@ -429,7 +541,17 @@ async function submit(connectAfter: boolean) {
             </p>
             <label class="modal-label">
               <span class="muted tiny">SSH host</span>
-              <input v-model="sshHost" type="text" spellcheck="false" placeholder="bastion.example.com" />
+              <input
+                v-model="sshHost"
+                type="text"
+                spellcheck="false"
+                autocomplete="off"
+                list="ssh-config-hosts"
+                :placeholder="sshHosts.length ? 'Host or ~/.ssh/config alias' : 'bastion.example.com'"
+              />
+              <datalist id="ssh-config-hosts">
+                <option v-for="alias in sshHosts" :key="alias" :value="alias" />
+              </datalist>
             </label>
             <label class="modal-label port-field">
               <span class="muted tiny">SSH port</span>
@@ -447,6 +569,7 @@ async function submit(connectAfter: boolean) {
                 <option value="agent">SSH agent</option>
               </select>
             </label>
+            <p v-if="sshConfigHint" class="muted tiny span-2 ssh-hint">{{ sshConfigHint }}</p>
             <label v-if="sshAuth === 'key'" class="modal-label span-2">
               <span class="muted tiny">Private key</span>
               <div class="file-picker">
@@ -476,6 +599,21 @@ async function submit(connectAfter: boolean) {
             <p v-else class="muted tiny span-2 ssh-hint">
               Uses the keys loaded in your SSH agent (ssh-add). Unknown hosts are added to ~/.ssh/known_hosts.
             </p>
+            <template v-if="sshAuth !== 'password'">
+              <label class="checkbox-row span-2">
+                <input v-model="sshAlsoPassword" type="checkbox" />
+                <span>Server also asks for a password</span>
+              </label>
+              <label v-if="sshAlsoPassword" class="modal-label span-2">
+                <span class="muted tiny">SSH password</span>
+                <input
+                  v-model="sshPassword"
+                  type="password"
+                  autocomplete="new-password"
+                  :placeholder="hasSavedSshPassword ? 'Saved in Keychain' : 'Password'"
+                />
+              </label>
+            </template>
           </template>
         </template>
 

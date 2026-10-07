@@ -6,6 +6,7 @@ pub mod restore;
 pub mod sql_split;
 pub mod sqlite;
 pub mod ssh;
+pub mod ssh_config;
 pub mod table_ops;
 pub mod tabular;
 

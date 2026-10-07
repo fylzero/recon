@@ -8,7 +8,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::commands::{sanitize_connection, AppState};
-use crate::db::ssh::Tunnel;
+use crate::db::ssh::{Credentials, Tunnel};
 use crate::db::filter::{self, Fragment};
 use crate::db::table_ops::{self, DropOptions, TruncateOptions};
 use crate::db::{
@@ -75,28 +75,43 @@ fn resolve_password(entry: &ConnectionEntry, password: Option<String>) -> Result
     secrets::get(&entry.id)
 }
 
-fn resolve_ssh_secret(entry: &ConnectionEntry, secret: Option<String>) -> Result<Option<String>, String> {
-    if !entry.ssh.uses_secret() {
+/// A value typed into the form wins over the one saved in the Keychain.
+fn typed_or_saved(
+    entry: &ConnectionEntry,
+    needed: bool,
+    typed: Option<String>,
+    account: impl FnOnce(&str) -> String,
+) -> Result<Option<String>, String> {
+    if !needed {
         return Ok(None);
     }
-    if let Some(secret) = secret.filter(|value| !value.is_empty()) {
-        return Ok(Some(secret));
+    if let Some(value) = typed.filter(|value| !value.is_empty()) {
+        return Ok(Some(value));
     }
     if entry.id.is_empty() {
         return Ok(None);
     }
-    secrets::get(&secrets::ssh_account(&entry.id))
+    secrets::get(&account(&entry.id))
 }
 
 async fn open_tunnel(
     entry: &ConnectionEntry,
     ssh_secret: Option<String>,
+    ssh_password: Option<String>,
 ) -> Result<(ConnectionEntry, Option<Tunnel>), String> {
     if !entry.ssh.enabled || entry.driver == Driver::Sqlite {
         return Ok((entry.clone(), None));
     }
-    let secret = resolve_ssh_secret(entry, ssh_secret)?;
-    let tunnel = db::ssh::open(entry, secret.as_deref()).await?;
+    let credentials = Credentials {
+        secret: typed_or_saved(entry, entry.ssh.uses_secret(), ssh_secret, secrets::ssh_account)?,
+        password: typed_or_saved(
+            entry,
+            entry.ssh.uses_second_password(),
+            ssh_password,
+            secrets::ssh_password_account,
+        )?,
+    };
+    let tunnel = db::ssh::open(entry, &credentials).await?;
     Ok((tunnel.local_entry(entry), Some(tunnel)))
 }
 
@@ -186,10 +201,11 @@ pub async fn test_connection(
     connection: ConnectionEntry,
     password: Option<String>,
     ssh_secret: Option<String>,
+    ssh_password: Option<String>,
 ) -> Result<String, String> {
     let entry = sanitize_connection(connection)?;
     let password = resolve_password(&entry, password)?;
-    let (target, tunnel) = open_tunnel(&entry, ssh_secret).await?;
+    let (target, tunnel) = open_tunnel(&entry, ssh_secret, ssh_password).await?;
     let outcome = match target.driver {
         Driver::Mysql => db::mysql::test(&target, password.as_deref()).await,
         Driver::Postgres => db::postgres::test(&target, password.as_deref()).await,
@@ -249,7 +265,7 @@ async fn open_session(
     password: Option<String>,
     restore: &str,
 ) -> Result<(Session, SessionInfo), String> {
-    let (target, tunnel) = open_tunnel(&entry, None).await?;
+    let (target, tunnel) = open_tunnel(&entry, None, None).await?;
     let opened = match target.driver {
         Driver::Mysql => db::mysql::open(&target, password.as_deref()).await,
         Driver::Postgres => db::postgres::open(&target, password.as_deref()).await,

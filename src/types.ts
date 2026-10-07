@@ -23,12 +23,30 @@ export interface SshTunnel {
   user: string;
   auth: SshAuth;
   keyPath: string;
+  alsoPassword?: boolean;
+}
+
+export interface ResolvedSshHost {
+  hostname: string;
+  port: number | null;
+  user: string;
+  identityFiles: string[];
+  identityAgent: string;
+  proxy: string;
 }
 
 export const DEFAULT_SSH_PORT = 22;
 
 export function defaultSshTunnel(): SshTunnel {
-  return { enabled: false, host: "", port: DEFAULT_SSH_PORT, user: "", auth: "password", keyPath: "" };
+  return {
+    enabled: false,
+    host: "",
+    port: DEFAULT_SSH_PORT,
+    user: "",
+    auth: "password",
+    keyPath: "",
+    alsoPassword: false,
+  };
 }
 
 export interface ConnectionEntry {
@@ -43,6 +61,7 @@ export interface ConnectionEntry {
   sslMode: SslMode;
   headerColor: string;
   savePassword: boolean;
+  cleartextAuth?: boolean;
   ssh?: SshTunnel;
 }
 

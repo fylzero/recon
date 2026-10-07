@@ -16,6 +16,8 @@ use crate::{persist, query_log, secrets};
 
 const DEFAULT_GROUP_COLOR: &str = "#16323c";
 const SSL_MODES: [&str; 3] = ["disable", "prefer", "require"];
+const CLEARTEXT_NEEDS_ENCRYPTION: &str =
+    "Sending the password in clear text needs SSL set to Require, or an SSH tunnel.";
 
 pub struct AppState {
     pub data: Mutex<AppData>,
@@ -81,6 +83,9 @@ fn sanitize_ssh(ssh: &mut SshTunnel) -> Result<(), String> {
     if ssh.port == 0 {
         ssh.port = DEFAULT_SSH_PORT;
     }
+    if ssh.auth == SshAuth::Password {
+        ssh.also_password = false;
+    }
     if !ssh.enabled {
         return Ok(());
     }
@@ -119,6 +124,7 @@ pub fn sanitize_connection(mut entry: ConnectionEntry) -> Result<ConnectionEntry
             entry.user.clear();
             entry.database.clear();
             entry.save_password = false;
+            entry.cleartext_auth = false;
             entry.ssh = SshTunnel::default();
             if entry.name.is_empty() {
                 entry.name = Path::new(&entry.file_path)
@@ -139,6 +145,12 @@ pub fn sanitize_connection(mut entry: ConnectionEntry) -> Result<ConnectionEntry
             }
             entry.file_path.clear();
             sanitize_ssh(&mut entry.ssh)?;
+            if entry.driver != Driver::Mysql {
+                entry.cleartext_auth = false;
+            }
+            if entry.cleartext_auth && !entry.ssh.enabled && entry.ssl_mode != "require" {
+                return Err(CLEARTEXT_NEEDS_ENCRYPTION.into());
+            }
             if entry.name.is_empty() {
                 entry.name = if entry.database.is_empty() {
                     entry.host.clone()
@@ -399,6 +411,7 @@ pub fn save_connection(
     connection: ConnectionEntry,
     password: Option<String>,
     ssh_secret: Option<String>,
+    ssh_password: Option<String>,
 ) -> Result<ConnectionEntry, String> {
     let mut entry = sanitize_connection(connection)?;
     let is_new = entry.id.trim().is_empty();
@@ -437,6 +450,12 @@ pub fn save_connection(
         secrets::delete(&ssh_account)?;
     } else if let Some(secret) = ssh_secret.filter(|value| !value.is_empty()) {
         secrets::set(&ssh_account, &secret)?;
+    }
+    let ssh_password_account = secrets::ssh_password_account(&entry.id);
+    if !entry.ssh.uses_second_password() {
+        secrets::delete(&ssh_password_account)?;
+    } else if let Some(password) = ssh_password.filter(|value| !value.is_empty()) {
+        secrets::set(&ssh_password_account, &password)?;
     }
     Ok(entry)
 }
@@ -536,6 +555,21 @@ pub fn list_ssh_keys() -> Vec<String> {
 #[tauri::command]
 pub fn has_saved_ssh_secret(connection_id: String) -> Result<bool, String> {
     Ok(secrets::get(&secrets::ssh_account(&connection_id))?.is_some())
+}
+
+#[tauri::command]
+pub fn has_saved_ssh_password(connection_id: String) -> Result<bool, String> {
+    Ok(secrets::get(&secrets::ssh_password_account(&connection_id))?.is_some())
+}
+
+#[tauri::command]
+pub fn list_ssh_hosts() -> Vec<String> {
+    crate::db::ssh_config::list_hosts()
+}
+
+#[tauri::command]
+pub async fn resolve_ssh_host(host: String) -> Option<crate::db::ssh_config::ResolvedHost> {
+    crate::db::ssh_config::resolve(&host).await
 }
 
 #[tauri::command]
@@ -704,6 +738,7 @@ mod tests {
             ssl_mode: "bogus".into(),
             header_color: "nope".into(),
             save_password: true,
+            cleartext_auth: false,
             ssh: SshTunnel::default(),
         }
     }
@@ -722,12 +757,35 @@ mod tests {
         mysql.ssh.auth = SshAuth::Key;
         assert!(sanitize_connection(mysql.clone()).is_err());
         mysql.ssh.key_path = "~/.ssh/id_ed25519".into();
-        assert!(sanitize_connection(mysql).is_ok());
+        mysql.ssh.also_password = true;
+        assert!(sanitize_connection(mysql.clone()).unwrap().ssh.uses_second_password());
+        mysql.ssh.auth = SshAuth::Password;
+        assert!(!sanitize_connection(mysql).unwrap().ssh.also_password);
 
         let mut lite = entry(Driver::Sqlite);
         lite.file_path = "/tmp/app.db".into();
         lite.ssh.enabled = true;
         assert!(!sanitize_connection(lite).unwrap().ssh.enabled);
+    }
+
+    #[test]
+    fn cleartext_auth_is_mysql_only_and_needs_encryption() {
+        let mut mysql = entry(Driver::Mysql);
+        mysql.cleartext_auth = true;
+        mysql.ssl_mode = "prefer".into();
+        assert_eq!(sanitize_connection(mysql.clone()).unwrap_err(), CLEARTEXT_NEEDS_ENCRYPTION);
+        mysql.ssl_mode = "require".into();
+        assert!(sanitize_connection(mysql.clone()).unwrap().cleartext_auth);
+
+        mysql.ssl_mode = "disable".into();
+        mysql.ssh.enabled = true;
+        mysql.ssh.host = "bastion.example.com".into();
+        mysql.ssh.user = "deploy".into();
+        assert!(sanitize_connection(mysql).unwrap().cleartext_auth);
+
+        let mut postgres = entry(Driver::Postgres);
+        postgres.cleartext_auth = true;
+        assert!(!sanitize_connection(postgres).unwrap().cleartext_auth);
     }
 
     #[test]

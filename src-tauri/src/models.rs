@@ -194,6 +194,9 @@ pub struct SshTunnel {
     pub auth: SshAuth,
     #[serde(default)]
     pub key_path: String,
+    /// The server asks for the SSH password after accepting the key or agent login.
+    #[serde(default)]
+    pub also_password: bool,
 }
 
 impl Default for SshTunnel {
@@ -205,6 +208,7 @@ impl Default for SshTunnel {
             user: String::new(),
             auth: SshAuth::default(),
             key_path: String::new(),
+            also_password: false,
         }
     }
 }
@@ -212,6 +216,10 @@ impl Default for SshTunnel {
 impl SshTunnel {
     pub fn uses_secret(&self) -> bool {
         self.enabled && self.auth != SshAuth::Agent
+    }
+
+    pub fn uses_second_password(&self) -> bool {
+        self.enabled && self.auth != SshAuth::Password && self.also_password
     }
 }
 
@@ -238,6 +246,9 @@ pub struct ConnectionEntry {
     pub header_color: String,
     #[serde(default = "default_true")]
     pub save_password: bool,
+    /// MySQL only: allow mysql_clear_password, for PAM, LDAP, and AWS IAM logins.
+    #[serde(default)]
+    pub cleartext_auth: bool,
     #[serde(default)]
     pub ssh: SshTunnel,
 }
@@ -407,6 +418,7 @@ mod tests {
                 ssl_mode: "prefer".into(),
                 header_color: String::new(),
                 save_password: true,
+                cleartext_auth: false,
                 ssh: SshTunnel::default(),
             }],
         });
@@ -436,6 +448,8 @@ mod tests {
         assert!(!entry.ssh.enabled);
         assert_eq!(entry.ssh.port, 22);
         assert_eq!(entry.ssh.auth, SshAuth::Password);
+        assert!(!entry.ssh.also_password);
+        assert!(!entry.cleartext_auth);
     }
 
     #[test]

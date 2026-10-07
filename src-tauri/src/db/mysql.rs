@@ -24,7 +24,8 @@ fn options(entry: &ConnectionEntry, password: Option<&str>) -> MySqlConnectOptio
         .host(&entry.host)
         .port(entry.port)
         .username(&entry.user)
-        .ssl_mode(ssl_mode(&entry.ssl_mode));
+        .ssl_mode(ssl_mode(&entry.ssl_mode))
+        .enable_cleartext_plugin(entry.cleartext_auth);
     if let Some(password) = password.filter(|value| !value.is_empty()) {
         options = options.password(password);
     }

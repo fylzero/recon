@@ -2,19 +2,46 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use russh::client::{self, Handle};
+use russh::client::{self, AuthResult, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::agent::client::AgentClient;
 use russh::keys::agent::AgentIdentity;
 use russh::keys::{known_hosts, load_secret_key, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
-use russh::Disconnect;
+use russh::{Disconnect, MethodKind};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinHandle, JoinSet};
 
+use super::ssh_config::{self, expand_home, ResolvedHost};
 use super::CONNECT_TIMEOUT;
 use crate::models::{ConnectionEntry, SshAuth, SshTunnel};
 
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 const LOOPBACK: &str = "127.0.0.1";
+const PROMPT_ROUNDS: usize = 8;
+const ALSO_PASSWORD_LABEL: &str = "Server also asks for a password";
+
+#[derive(Debug, Default)]
+pub struct Credentials {
+    /// The SSH password, or the private key's passphrase.
+    pub secret: Option<String>,
+    /// The password a server asks for after accepting a key or agent login.
+    pub password: Option<String>,
+}
+
+enum Step {
+    Done,
+    Partial,
+    Rejected,
+}
+
+impl From<AuthResult> for Step {
+    fn from(result: AuthResult) -> Self {
+        match result {
+            AuthResult::Success => Step::Done,
+            AuthResult::Failure { partial_success: true, .. } => Step::Partial,
+            AuthResult::Failure { .. } => Step::Rejected,
+        }
+    }
+}
 
 type ErrorSlot = Arc<Mutex<Option<String>>>;
 
@@ -105,11 +132,17 @@ impl Drop for Tunnel {
     }
 }
 
-pub async fn open(entry: &ConnectionEntry, secret: Option<&str>) -> Result<Tunnel, String> {
+pub async fn open(entry: &ConnectionEntry, credentials: &Credentials) -> Result<Tunnel, String> {
     let ssh = &entry.ssh;
+    let resolved = ssh_config::resolve(&ssh.host).await.unwrap_or_default();
+    let address = if resolved.hostname.is_empty() || resolved.hostname.eq_ignore_ascii_case(&ssh.host) {
+        ssh.host.clone()
+    } else {
+        resolved.hostname.clone()
+    };
     let rejection = ErrorSlot::default();
     let handler = HostKeyCheck {
-        host: ssh.host.clone(),
+        host: address.clone(),
         port: ssh.port,
         rejection: rejection.clone(),
     };
@@ -120,18 +153,20 @@ pub async fn open(entry: &ConnectionEntry, secret: Option<&str>) -> Result<Tunne
         ..Default::default()
     });
     let connecting = async {
-        let mut handle = client::connect(config, (ssh.host.as_str(), ssh.port), handler)
+        let mut handle = client::connect(config, (address.as_str(), ssh.port), handler)
             .await
-            .map_err(|err| take(&rejection).unwrap_or_else(|| connect_error(ssh, err)))?;
-        authenticate(&mut handle, ssh, secret).await?;
+            .map_err(|err| {
+                take(&rejection).unwrap_or_else(|| with_proxy_hint(connect_error(ssh, err), &resolved))
+            })?;
+        authenticate(&mut handle, ssh, credentials, &resolved.identity_agent).await?;
         Ok::<_, String>(handle)
     };
     let session = match tokio::time::timeout(CONNECT_TIMEOUT, connecting).await {
         Ok(result) => Arc::new(result?),
         Err(_) => {
-            return Err(format!(
-                "Timed out connecting to the SSH server {}:{}.",
-                ssh.host, ssh.port
+            return Err(with_proxy_hint(
+                format!("Timed out connecting to the SSH server {}:{}.", ssh.host, ssh.port),
+                &resolved,
             ))
         }
     };
@@ -162,6 +197,17 @@ fn connect_error(ssh: &SshTunnel, err: russh::Error) -> String {
     match err {
         russh::Error::IO(io) => format!("Could not reach the SSH server {}:{}: {io}", ssh.host, ssh.port),
         other => format!("SSH connection to {}:{} failed: {other}", ssh.host, ssh.port),
+    }
+}
+
+fn with_proxy_hint(message: String, resolved: &ResolvedHost) -> String {
+    if resolved.proxy.is_empty() {
+        message
+    } else {
+        format!(
+            "{message} Your ~/.ssh/config reaches this host through a proxy ({}), which Recon doesn't use yet.",
+            resolved.proxy
+        )
     }
 }
 
@@ -212,60 +258,129 @@ pub fn find_private_keys() -> Vec<String> {
         .collect()
 }
 
-fn expand_home(path: &str) -> PathBuf {
-    match (path.strip_prefix("~/"), std::env::var_os("HOME")) {
-        (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
-        _ => PathBuf::from(path),
-    }
+fn auth_error(err: russh::Error) -> String {
+    format!("SSH authentication failed: {err}")
 }
 
+fn filled(value: &Option<String>) -> Option<&str> {
+    value.as_deref().filter(|value| !value.is_empty())
+}
+
+/**
+ * Logs in with the chosen method, then with the SSH password when the server
+ * accepts that method but wants more (OpenSSH's `AuthenticationMethods
+ * publickey,password`).
+ */
 async fn authenticate(
     handle: &mut Handle<HostKeyCheck>,
     ssh: &SshTunnel,
-    secret: Option<&str>,
+    credentials: &Credentials,
+    identity_agent: &str,
 ) -> Result<(), String> {
-    let secret = secret.filter(|value| !value.is_empty());
-    let accepted = match ssh.auth {
+    let secret = filled(&credentials.secret);
+    let first = match ssh.auth {
         SshAuth::Password => {
             let password = secret.ok_or_else(|| "Enter the SSH password.".to_string())?;
-            handle
-                .authenticate_password(ssh.user.as_str(), password)
-                .await
-                .map_err(|err| format!("SSH authentication failed: {err}"))?
-                .success()
+            password_login(handle, &ssh.user, password).await?
         }
-        SshAuth::Key => {
-            let path = expand_home(&ssh.key_path);
-            let key = load_secret_key(&path, secret).map_err(|err| match err {
-                russh::keys::Error::KeyIsEncrypted => {
-                    "This SSH key is encrypted. Enter its passphrase.".to_string()
-                }
-                russh::keys::Error::IO(io) => {
-                    format!("Could not read the SSH key at {}: {io}", path.display())
-                }
-                other => format!("Could not load the SSH key: {other}"),
-            })?;
-            let hash = if key.algorithm().is_rsa() {
-                rsa_hash(handle).await?
-            } else {
-                None
-            };
-            handle
-                .authenticate_publickey(ssh.user.as_str(), PrivateKeyWithHashAlg::new(Arc::new(key), hash))
-                .await
-                .map_err(|err| format!("SSH authentication failed: {err}"))?
-                .success()
-        }
-        SshAuth::Agent => authenticate_with_agent(handle, &ssh.user).await?,
+        SshAuth::Key => key_login(handle, ssh, secret).await?,
+        SshAuth::Agent => agent_login(handle, &ssh.user, identity_agent).await?,
     };
-    if accepted {
-        Ok(())
-    } else {
-        Err(format!(
+    let outcome = match first {
+        Step::Partial if ssh.auth != SshAuth::Password => {
+            let password = filled(&credentials.password).ok_or_else(|| {
+                format!(
+                    "The SSH server accepted the key but also asks for a password. \
+                     Turn on \u{201c}{ALSO_PASSWORD_LABEL}\u{201d} and enter it."
+                )
+            })?;
+            password_login(handle, &ssh.user, password).await?
+        }
+        step => step,
+    };
+    match outcome {
+        Step::Done => Ok(()),
+        Step::Partial => Err(format!(
+            "The SSH server {} accepted the login but asks for another step, like a one-time code, \
+             which Recon can't answer yet.",
+            ssh.host
+        )),
+        Step::Rejected => Err(format!(
             "The SSH server {} rejected the credentials for {}.",
             ssh.host, ssh.user
-        ))
+        )),
     }
+}
+
+/// Many servers only take passwords through keyboard-interactive, so that's tried next.
+async fn password_login(handle: &mut Handle<HostKeyCheck>, user: &str, password: &str) -> Result<Step, String> {
+    match handle.authenticate_password(user, password).await.map_err(auth_error)? {
+        AuthResult::Failure {
+            partial_success: false,
+            remaining_methods,
+        } if remaining_methods.contains(&MethodKind::KeyboardInteractive) => {
+            keyboard_interactive_login(handle, user, password).await
+        }
+        result => Ok(result.into()),
+    }
+}
+
+/// Answers a single hidden prompt with the password. Anything else needs a person.
+async fn keyboard_interactive_login(
+    handle: &mut Handle<HostKeyCheck>,
+    user: &str,
+    password: &str,
+) -> Result<Step, String> {
+    let mut reply = handle
+        .authenticate_keyboard_interactive_start(user, None)
+        .await
+        .map_err(auth_error)?;
+    let mut answered = false;
+    for _ in 0..PROMPT_ROUNDS {
+        let responses = match reply {
+            KeyboardInteractiveAuthResponse::Success => return Ok(Step::Done),
+            KeyboardInteractiveAuthResponse::Failure { partial_success, .. } => {
+                return Ok(if partial_success { Step::Partial } else { Step::Rejected });
+            }
+            KeyboardInteractiveAuthResponse::InfoRequest { prompts, .. } => match prompts.as_slice() {
+                [] => Vec::new(),
+                [prompt] if !prompt.echo && !answered => {
+                    answered = true;
+                    vec![password.to_string()]
+                }
+                [prompt, ..] => {
+                    return Err(format!(
+                        "The SSH server asked \u{201c}{}\u{201d}, which Recon can't answer yet.",
+                        prompt.prompt.trim()
+                    ))
+                }
+            },
+        };
+        reply = handle
+            .authenticate_keyboard_interactive_respond(responses)
+            .await
+            .map_err(auth_error)?;
+    }
+    Err("The SSH server kept asking for more information.".into())
+}
+
+async fn key_login(handle: &mut Handle<HostKeyCheck>, ssh: &SshTunnel, passphrase: Option<&str>) -> Result<Step, String> {
+    let path = expand_home(&ssh.key_path);
+    let key = load_secret_key(&path, passphrase).map_err(|err| match err {
+        russh::keys::Error::KeyIsEncrypted => "This SSH key is encrypted. Enter its passphrase.".to_string(),
+        russh::keys::Error::IO(io) => format!("Could not read the SSH key at {}: {io}", path.display()),
+        other => format!("Could not load the SSH key: {other}"),
+    })?;
+    let hash = if key.algorithm().is_rsa() {
+        rsa_hash(handle).await?
+    } else {
+        None
+    };
+    let result = handle
+        .authenticate_publickey(ssh.user.as_str(), PrivateKeyWithHashAlg::new(Arc::new(key), hash))
+        .await
+        .map_err(auth_error)?;
+    Ok(result.into())
 }
 
 async fn rsa_hash(handle: &Handle<HostKeyCheck>) -> Result<Option<russh::keys::HashAlg>, String> {
@@ -276,10 +391,17 @@ async fn rsa_hash(handle: &Handle<HostKeyCheck>) -> Result<Option<russh::keys::H
         .map_err(|err| format!("SSH negotiation failed: {err}"))
 }
 
-async fn authenticate_with_agent(handle: &mut Handle<HostKeyCheck>, user: &str) -> Result<bool, String> {
-    let mut agent = AgentClient::connect_env()
-        .await
-        .map_err(|err| format!("Could not reach the SSH agent ({err}). Is SSH_AUTH_SOCK set?"))?;
+/// `identity_agent` is the IdentityAgent socket from ~/.ssh/config, like 1Password's.
+async fn agent_login(handle: &mut Handle<HostKeyCheck>, user: &str, identity_agent: &str) -> Result<Step, String> {
+    let mut agent = if identity_agent.is_empty() {
+        AgentClient::connect_env()
+            .await
+            .map_err(|err| format!("Could not reach the SSH agent ({err}). Is SSH_AUTH_SOCK set?"))?
+    } else {
+        AgentClient::connect_uds(expand_home(identity_agent))
+            .await
+            .map_err(|err| format!("Could not reach the SSH agent at {identity_agent}: {err}"))?
+    };
     let identities = agent
         .request_identities()
         .await
@@ -297,12 +419,13 @@ async fn authenticate_with_agent(handle: &mut Handle<HostKeyCheck>, user: &str) 
             None
         };
         match handle.authenticate_publickey_with(user, key, hash, &mut agent).await {
-            Ok(result) if result.success() => return Ok(true),
+            Ok(AuthResult::Success) => return Ok(Step::Done),
+            Ok(AuthResult::Failure { partial_success: true, .. }) => return Ok(Step::Partial),
             Ok(_) => continue,
             Err(err) => return Err(format!("The SSH agent could not sign in: {err}")),
         }
     }
-    Ok(false)
+    Ok(Step::Rejected)
 }
 
 async fn forward(

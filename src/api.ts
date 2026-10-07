@@ -17,6 +17,7 @@ import type {
   NamespaceList,
   PreferencesPatch,
   QueryLogEntry,
+  ResolvedSshHost,
   RowValues,
   SavedQuery,
   SaveRequest,
@@ -64,8 +65,15 @@ export function saveConnection(
   connection: ConnectionEntry,
   password: string | null,
   sshSecret: string | null = null,
+  sshPassword: string | null = null,
 ) {
-  return invoke<ConnectionEntry>("save_connection", { groupId, connection, password, sshSecret });
+  return invoke<ConnectionEntry>("save_connection", {
+    groupId,
+    connection,
+    password,
+    sshSecret,
+    sshPassword,
+  });
 }
 
 export function removeConnection(connectionId: string) {
@@ -102,6 +110,18 @@ export function listSshKeys() {
 
 export function hasSavedSshSecret(connectionId: string) {
   return invoke<boolean>("has_saved_ssh_secret", { connectionId });
+}
+
+export function hasSavedSshPassword(connectionId: string) {
+  return invoke<boolean>("has_saved_ssh_password", { connectionId });
+}
+
+export function listSshHosts() {
+  return invoke<string[]>("list_ssh_hosts");
+}
+
+export function resolveSshHost(host: string) {
+  return invoke<ResolvedSshHost | null>("resolve_ssh_host", { host });
 }
 
 export function updatePreferences(patch: PreferencesPatch) {
@@ -160,8 +180,9 @@ export function testConnection(
   connection: ConnectionEntry,
   password: string | null,
   sshSecret: string | null = null,
+  sshPassword: string | null = null,
 ) {
-  return invoke<string>("test_connection", { connection, password, sshSecret });
+  return invoke<string>("test_connection", { connection, password, sshSecret, sshPassword });
 }
 
 export function createSqliteDatabase(path: string) {
