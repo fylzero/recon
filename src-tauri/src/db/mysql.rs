@@ -9,7 +9,7 @@ use super::{
     quote_backtick, run_raw, text_at, with_timeout, CellValue, ColumnChange, Conn, Dialect, Opened,
     Pool, RawOutput, CONNECT_TIMEOUT,
 };
-use super::ssh_config::expand_home;
+use super::tls::TlsMaterial;
 use crate::models::ConnectionEntry;
 
 fn ssl_mode(mode: &str) -> MySqlSslMode {
@@ -22,20 +22,18 @@ fn ssl_mode(mode: &str) -> MySqlSslMode {
     }
 }
 
-pub(super) fn options(entry: &ConnectionEntry, password: Option<&str>) -> MySqlConnectOptions {
+pub(super) fn options(entry: &ConnectionEntry, password: Option<&str>, tls: &TlsMaterial) -> MySqlConnectOptions {
     let mut options = MySqlConnectOptions::new()
         .host(&entry.host)
         .port(entry.port)
         .username(&entry.user)
         .ssl_mode(ssl_mode(&entry.ssl_mode))
         .enable_cleartext_plugin(entry.cleartext_auth);
-    if !entry.ssl_ca_path.is_empty() {
-        options = options.ssl_ca(expand_home(&entry.ssl_ca_path));
+    if let Some(ca) = &tls.ca {
+        options = options.ssl_ca_from_pem(ca.clone());
     }
-    if !entry.ssl_cert_path.is_empty() && !entry.ssl_key_path.is_empty() {
-        options = options
-            .ssl_client_cert(expand_home(&entry.ssl_cert_path))
-            .ssl_client_key(expand_home(&entry.ssl_key_path));
+    if let (Some(cert), Some(key)) = (&tls.cert, &tls.key) {
+        options = options.ssl_client_cert_from_pem(cert).ssl_client_key_from_pem(key);
     }
     if let Some(password) = password.filter(|value| !value.is_empty()) {
         options = options.password(password);
@@ -46,8 +44,8 @@ pub(super) fn options(entry: &ConnectionEntry, password: Option<&str>) -> MySqlC
     options
 }
 
-pub async fn open(entry: &ConnectionEntry, password: Option<&str>) -> Result<Opened, String> {
-    let options = options(entry, password);
+pub async fn open(entry: &ConnectionEntry, password: Option<&str>, tls: &TlsMaterial) -> Result<Opened, String> {
+    let options = options(entry, password, tls);
     let pool = with_timeout(
         MySqlPoolOptions::new()
             .max_connections(4)
@@ -67,8 +65,8 @@ pub async fn open(entry: &ConnectionEntry, password: Option<&str>) -> Result<Ope
     })
 }
 
-pub async fn test(entry: &ConnectionEntry, password: Option<&str>) -> Result<String, String> {
-    let mut conn = with_timeout(MySqlConnection::connect_with(&options(entry, password))).await?;
+pub async fn test(entry: &ConnectionEntry, password: Option<&str>, tls: &TlsMaterial) -> Result<String, String> {
+    let mut conn = with_timeout(MySqlConnection::connect_with(&options(entry, password, tls))).await?;
     let version = run(&mut conn, MysqlDialect.version_sql(), 1, None).await;
     let _ = conn.close().await;
     Ok(super::first_text(&version?))
@@ -498,10 +496,10 @@ mod tests {
         let Some((entry, password)) = live_entry() else {
             return;
         };
-        let version = test(&entry, password.as_deref()).await.unwrap();
+        let version = test(&entry, password.as_deref(), &Default::default()).await.unwrap();
         assert!(!version.is_empty());
 
-        let opened = open(&entry, password.as_deref()).await.unwrap();
+        let opened = open(&entry, password.as_deref(), &Default::default()).await.unwrap();
         assert!(opened.backend_id.is_some());
         let Conn::MySql(mut conn) = opened.conn else {
             panic!("expected a MySQL connection");

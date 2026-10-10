@@ -37,30 +37,18 @@ fn last_lines(bytes: &[u8]) -> String {
     lines[lines.len().saturating_sub(ERROR_TAIL_LINES)..].join(" ")
 }
 
+pub(super) fn aws_command(args: impl IntoIterator<Item = String>) -> Command {
+    let mut command = Command::new("aws");
+    command.args(args);
+    command
+}
+
 /**
- * Gets the password for an entry whose password isn't typed or saved. Pass
- * the saved entry, not an SSH tunnel's local one: RDS signs the token for
- * the real host and port.
+ * Runs a helper tool with the login shell's PATH and returns what it printed.
+ * Failures name the tool through `label` and include the end of its stderr.
  */
-pub async fn fetch(entry: &ConnectionEntry) -> Result<String, String> {
-    let (mut command, label) = match entry.password_source {
-        PasswordSource::Password => return Err("This connection doesn't fetch its password.".into()),
-        PasswordSource::AwsIam => {
-            let mut command = Command::new("aws");
-            command.args(aws_args(entry));
-            (command, "The AWS CLI")
-        }
-        PasswordSource::Command => {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-            let mut command = Command::new(shell);
-            command
-                .args(["-c", &entry.password_command])
-                .env("RECON_DB_HOST", &entry.host)
-                .env("RECON_DB_PORT", entry.port.to_string())
-                .env("RECON_DB_USER", &entry.user);
-            (command, "The password command")
-        }
-    };
+pub(super) async fn run_tool(command: &mut Command, label: &str) -> Result<Vec<u8>, String> {
+    let program = command.as_std().get_program().to_string_lossy().into_owned();
     let run = command
         .env("PATH", ssh_config::login_path().await)
         .stdin(Stdio::null())
@@ -70,11 +58,8 @@ pub async fn fetch(entry: &ConnectionEntry) -> Result<String, String> {
         .output();
     let output = match tokio::time::timeout(FETCH_TIMEOUT, run).await {
         Err(_) => return Err(format!("{label} didn't finish within {} seconds.", FETCH_TIMEOUT.as_secs())),
-        Ok(Err(err)) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Err(match entry.password_source {
-                PasswordSource::AwsIam => "The AWS CLI (aws) wasn't found on your shell's PATH. Install it to use IAM logins.".into(),
-                _ => format!("{label} couldn't start: {err}"),
-            });
+        Ok(Err(err)) if err.kind() == std::io::ErrorKind::NotFound && program == "aws" => {
+            return Err("The AWS CLI (aws) wasn't found on your shell's PATH. Install it to use AWS features.".into());
         }
         Ok(Err(err)) => return Err(format!("{label} couldn't start: {err}")),
         Ok(Ok(output)) => output,
@@ -87,7 +72,31 @@ pub async fn fetch(entry: &ConnectionEntry) -> Result<String, String> {
             format!("{label} failed: {tail}")
         });
     }
-    let password = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(output.stdout)
+}
+
+/**
+ * Gets the password for an entry whose password isn't typed or saved. Pass
+ * the saved entry, not an SSH tunnel's local one: RDS signs the token for
+ * the real host and port.
+ */
+pub async fn fetch(entry: &ConnectionEntry) -> Result<String, String> {
+    let (mut command, label) = match entry.password_source {
+        PasswordSource::Password => return Err("This connection doesn't fetch its password.".into()),
+        PasswordSource::AwsIam => (aws_command(aws_args(entry)), "The AWS CLI"),
+        PasswordSource::Command => {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+            let mut command = Command::new(shell);
+            command
+                .args(["-c", &entry.password_command])
+                .env("RECON_DB_HOST", &entry.host)
+                .env("RECON_DB_PORT", entry.port.to_string())
+                .env("RECON_DB_USER", &entry.user);
+            (command, "The password command")
+        }
+    };
+    let stdout = run_tool(&mut command, label).await?;
+    let password = String::from_utf8_lossy(&stdout).trim().to_string();
     if password.is_empty() {
         return Err(format!("{label} printed nothing to use as the password."));
     }

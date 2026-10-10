@@ -551,10 +551,14 @@ mod tests {
         }))
         .unwrap();
         match driver {
-            "postgres" => super::super::postgres::open(&entry, None).await.unwrap(),
-            _ => super::super::mysql::open(&entry, std::env::var("RECON_TEST_MYSQL_PASSWORD").ok().as_deref())
-                .await
-                .unwrap(),
+            "postgres" => super::super::postgres::open(&entry, None, &Default::default()).await.unwrap(),
+            _ => super::super::mysql::open(
+                &entry,
+                std::env::var("RECON_TEST_MYSQL_PASSWORD").ok().as_deref(),
+                &Default::default(),
+            )
+            .await
+            .unwrap(),
         }
     }
 

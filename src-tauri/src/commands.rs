@@ -12,6 +12,7 @@ use crate::models::{
     MAX_AUTO_COLUMN_WIDTH_MAX, MAX_AUTO_COLUMN_WIDTH_MIN, PAGE_SIZE_MAX, PAGE_SIZE_MIN,
     QUERY_ROW_LIMIT_MAX, QUERY_ROW_LIMIT_MIN, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
 };
+use crate::db::tls;
 use crate::{persist, query_log, secrets};
 
 const DEFAULT_GROUP_COLOR: &str = "#16323c";
@@ -118,10 +119,13 @@ fn sanitize_password_source(entry: &mut ConnectionEntry) -> Result<(), String> {
     entry.aws_region = entry.aws_region.trim().to_ascii_lowercase();
     entry.aws_profile = entry.aws_profile.trim().to_string();
     entry.password_command = entry.password_command.trim().to_string();
+    let keeps_aws = reads_from_s3(entry);
     match entry.password_source {
         PasswordSource::Password => {
-            entry.aws_region.clear();
-            entry.aws_profile.clear();
+            if !keeps_aws {
+                entry.aws_region.clear();
+                entry.aws_profile.clear();
+            }
             entry.password_command.clear();
         }
         PasswordSource::AwsIam => {
@@ -137,8 +141,10 @@ fn sanitize_password_source(entry: &mut ConnectionEntry) -> Result<(), String> {
             }
         }
         PasswordSource::Command => {
-            entry.aws_region.clear();
-            entry.aws_profile.clear();
+            if !keeps_aws {
+                entry.aws_region.clear();
+                entry.aws_profile.clear();
+            }
             if entry.password_command.is_empty() {
                 return Err("Enter the command that prints the password.".into());
             }
@@ -148,6 +154,13 @@ fn sanitize_password_source(entry: &mut ConnectionEntry) -> Result<(), String> {
         entry.save_password = false;
     }
     Ok(())
+}
+
+/// The AWS profile and region also tell the AWS CLI how to read certificates from S3.
+fn reads_from_s3(entry: &ConnectionEntry) -> bool {
+    [&entry.ssl_ca_path, &entry.ssl_cert_path, &entry.ssl_key_path]
+        .into_iter()
+        .any(|location| tls::is_s3(location))
 }
 
 fn sanitize_tls(entry: &mut ConnectionEntry) -> Result<(), String> {
@@ -160,6 +173,11 @@ fn sanitize_tls(entry: &mut ConnectionEntry) -> Result<(), String> {
     if !entry.requires_tls() {
         entry.ssl_cert_path.clear();
         entry.ssl_key_path.clear();
+    }
+    for location in [&entry.ssl_ca_path, &entry.ssl_cert_path, &entry.ssl_key_path] {
+        if !location.is_empty() {
+            tls::Location::parse(location)?;
+        }
     }
     if entry.ssl_mode == "verify-full" && entry.ssh.enabled {
         return Err(HOST_CHECK_THROUGH_TUNNEL.into());
@@ -215,8 +233,8 @@ pub fn sanitize_connection(mut entry: ConnectionEntry) -> Result<ConnectionEntry
             }
             entry.file_path.clear();
             sanitize_ssh(&mut entry.ssh)?;
-            sanitize_password_source(&mut entry)?;
             sanitize_tls(&mut entry)?;
+            sanitize_password_source(&mut entry)?;
             if entry.driver != Driver::Mysql {
                 entry.cleartext_auth = false;
             }
@@ -865,6 +883,36 @@ mod tests {
         assert_eq!(saved.password_command, "op read op://db/password");
         assert!(saved.aws_region.is_empty());
         assert!(!saved.save_password);
+    }
+
+    #[test]
+    fn validates_certificate_locations_and_keeps_aws_settings_for_s3() {
+        let mut pg = entry(Driver::Postgres);
+        pg.ssl_mode = "verify-ca".into();
+        pg.ssl_ca_path = "http://example.com/ca.pem".into();
+        assert_eq!(sanitize_connection(pg.clone()).unwrap_err(), tls::HTTP_NOT_ALLOWED);
+        pg.ssl_ca_path = "s3://team-certs".into();
+        assert!(sanitize_connection(pg.clone()).is_err());
+
+        pg.ssl_ca_path = "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem".into();
+        pg.aws_profile = "prod".into();
+        let saved = sanitize_connection(pg.clone()).unwrap();
+        assert!(saved.ssl_ca_path.starts_with("https://"));
+        assert!(saved.aws_profile.is_empty());
+
+        pg.ssl_ca_path = "s3://team-certs/db/ca.pem".into();
+        pg.aws_region = " EU-WEST-1 ".into();
+        let saved = sanitize_connection(pg.clone()).unwrap();
+        assert_eq!(saved.aws_profile, "prod");
+        assert_eq!(saved.aws_region, "eu-west-1");
+
+        pg.password_source = PasswordSource::Command;
+        pg.password_command = "op read op://db/password".into();
+        assert_eq!(sanitize_connection(pg.clone()).unwrap().aws_profile, "prod");
+
+        pg.ssl_mode = "prefer".into();
+        let saved = sanitize_connection(pg).unwrap();
+        assert!(saved.ssl_ca_path.is_empty() && saved.aws_profile.is_empty());
     }
 
     #[test]

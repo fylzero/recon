@@ -1624,7 +1624,7 @@ mod tests {
         }))
         .unwrap();
         let password = std::env::var("RECON_TEST_MYSQL_PASSWORD").ok();
-        let opened = mysql::open(&entry, password.as_deref()).await.unwrap();
+        let opened = mysql::open(&entry, password.as_deref(), &Default::default()).await.unwrap();
         let mut conn = opened.conn;
         for sql in [
             "DROP DATABASE IF EXISTS recon_dump_src",
@@ -1761,7 +1761,7 @@ mod tests {
             "savePassword": false,
         }))
         .unwrap();
-        postgres::open(&entry, None).await.unwrap()
+        postgres::open(&entry, None, &Default::default()).await.unwrap()
     }
 
     async fn export(conn: &mut Conn, namespace: &str, tables: &[DumpTable], options: DumpOptions) -> String {

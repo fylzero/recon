@@ -2,7 +2,6 @@
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { homeDir, join } from "@tauri-apps/api/path";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import * as api from "../api";
 import { DEFAULT_HEADER_COLOR } from "../color";
 import { useApp } from "../composables/useApp";
@@ -31,7 +30,7 @@ const CERT_FILTERS = [
   { name: "All files", extensions: ["*"] },
 ];
 
-const RDS_CERTS_URL = "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html";
+const RDS_BUNDLE_URL = "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem";
 const RDS_HOST_REGION = /\.([a-z]{2}(?:-[a-z]+)+-\d+)\.rds\.amazonaws\.com$/i;
 
 const { groups, saveConnection, showToast } = useApp();
@@ -127,6 +126,24 @@ const iamBlocked = computed(() => usesIam.value && !requiresTls.value);
 
 const hostCheckBlocked = computed(() => useSsh.value && sslMode.value === "verify-full");
 
+const certLocations = computed(() =>
+  [
+    verifiesCertificate.value ? sslCaPath.value : "",
+    requiresTls.value && useClientCert.value ? sslCertPath.value : "",
+    requiresTls.value && useClientCert.value ? sslKeyPath.value : "",
+  ].map((location) => location.trim().toLowerCase()),
+);
+
+const readsFromS3 = computed(
+  () => !isSqlite.value && certLocations.value.some((location) => location.startsWith("s3://")),
+);
+
+const httpBlocked = computed(
+  () => !isSqlite.value && certLocations.value.some((location) => location.startsWith("http://")),
+);
+
+const usesAwsSettings = computed(() => usesIam.value || readsFromS3.value);
+
 const clientCertIncomplete = computed(
   () => requiresTls.value && useClientCert.value && !(sslCertPath.value.trim() && sslKeyPath.value.trim()),
 );
@@ -152,7 +169,8 @@ const canSubmit = computed(() =>
           !cleartextBlocked.value &&
           !iamBlocked.value &&
           !hostCheckBlocked.value &&
-          !clientCertIncomplete.value,
+          !clientCertIncomplete.value &&
+          !httpBlocked.value,
       ),
 );
 
@@ -261,6 +279,16 @@ watch(cleartextAuth, (enabled) => {
 function regionFromHost() {
   return RDS_HOST_REGION.exec(host.value.trim())?.[1]?.toLowerCase() ?? "";
 }
+
+function useRdsBundle() {
+  sslCaPath.value = RDS_BUNDLE_URL;
+}
+
+watch(sslMode, (next) => {
+  if ((next === "verify-ca" || next === "verify-full") && !sslCaPath.value.trim() && regionFromHost()) {
+    useRdsBundle();
+  }
+});
 
 watch(passwordSource, (next) => {
   if (next !== "aws-iam") {
@@ -380,8 +408,8 @@ function buildEntry(): ConnectionEntry {
     savePassword: typesPassword.value && savePassword.value,
     cleartextAuth: usesCleartext.value,
     passwordSource: isSqlite.value ? "password" : passwordSource.value,
-    awsRegion: usesIam.value ? awsRegion.value.trim() : "",
-    awsProfile: usesIam.value ? awsProfile.value.trim() : "",
+    awsRegion: usesAwsSettings.value ? awsRegion.value.trim() : "",
+    awsProfile: usesAwsSettings.value ? awsProfile.value.trim() : "",
     passwordCommand: usesCommand.value ? passwordCommand.value.trim() : "",
     sslCaPath: verifiesCertificate.value ? sslCaPath.value.trim() : "",
     sslCertPath: requiresTls.value && useClientCert.value ? sslCertPath.value.trim() : "",
@@ -682,16 +710,17 @@ async function submit(connectAfter: boolean) {
                   v-model="sslCaPath"
                   type="text"
                   spellcheck="false"
-                  placeholder="Leave empty to use the public certificate authorities"
+                  placeholder="File, https:// URL, or s3:// URI"
                 />
                 <button class="ghost" type="button" @click="browseCertificate('ca', 'Choose CA certificate')">
                   Browse…
                 </button>
+                <button class="ghost" type="button" @click="useRdsBundle">AWS RDS bundle</button>
               </div>
             </label>
             <p class="muted tiny span-2 ssh-hint">
-              For Amazon RDS and Aurora, use AWS's
-              <button class="link-button" type="button" @click="openUrl(RDS_CERTS_URL)">certificate bundle</button>.
+              Leave empty to use the public certificate authorities. AWS RDS bundle uses AWS's global bundle for
+              RDS and Aurora, downloaded each time Recon connects so it stays current.
             </p>
           </template>
           <template v-if="requiresTls">
@@ -703,7 +732,12 @@ async function submit(connectAfter: boolean) {
               <label class="modal-label span-2">
                 <span class="muted tiny">Client certificate</span>
                 <div class="file-picker">
-                  <input v-model="sslCertPath" type="text" spellcheck="false" placeholder="~/certs/client-cert.pem" />
+                  <input
+                    v-model="sslCertPath"
+                    type="text"
+                    spellcheck="false"
+                    placeholder="File, https:// URL, or s3:// URI"
+                  />
                   <button
                     class="ghost"
                     type="button"
@@ -716,13 +750,36 @@ async function submit(connectAfter: boolean) {
               <label class="modal-label span-2">
                 <span class="muted tiny">Client key</span>
                 <div class="file-picker">
-                  <input v-model="sslKeyPath" type="text" spellcheck="false" placeholder="~/certs/client-key.pem" />
+                  <input
+                    v-model="sslKeyPath"
+                    type="text"
+                    spellcheck="false"
+                    placeholder="File, https:// URL, or s3:// URI"
+                  />
                   <button class="ghost" type="button" @click="browseCertificate('key', 'Choose client key')">
                     Browse…
                   </button>
                 </div>
               </label>
             </template>
+          </template>
+          <p v-if="httpBlocked" class="settings-error span-2">
+            Certificates can't be downloaded over http://, since anyone on the network could swap them. Use
+            https://.
+          </p>
+          <template v-if="readsFromS3 && !usesIam">
+            <label class="modal-label">
+              <span class="muted tiny">AWS region</span>
+              <input v-model="awsRegion" type="text" spellcheck="false" autocomplete="off" placeholder="Optional" />
+            </label>
+            <label class="modal-label">
+              <span class="muted tiny">AWS profile</span>
+              <input v-model="awsProfile" type="text" spellcheck="false" autocomplete="off" placeholder="Default" />
+            </label>
+            <p class="muted tiny span-2 ssh-hint">
+              The AWS CLI (aws s3 cp) reads files from S3 each time Recon connects, and keeps keys in memory
+              only. For SSO profiles, run aws sso login first.
+            </p>
           </template>
           <template v-if="driver === 'mysql' && passwordSource !== 'aws-iam'">
             <label class="checkbox-row span-2">

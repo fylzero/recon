@@ -12,6 +12,7 @@ pub mod ssh_config;
 pub mod ssh_proxy;
 pub mod table_ops;
 pub mod tabular;
+pub mod tls;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -934,10 +935,10 @@ pub enum Pool {
 
 impl Pool {
     /// Connections the pool opens from now on sign in with `password`.
-    pub fn refresh_password(&self, target: &ConnectionEntry, password: &str) {
+    pub fn refresh_password(&self, target: &ConnectionEntry, password: &str, tls: &tls::TlsMaterial) {
         match self {
-            Pool::MySql(pool) => pool.set_connect_options(mysql::options(target, Some(password))),
-            Pool::Postgres(pool) => pool.set_connect_options(postgres::options(target, Some(password))),
+            Pool::MySql(pool) => pool.set_connect_options(mysql::options(target, Some(password), tls)),
+            Pool::Postgres(pool) => pool.set_connect_options(postgres::options(target, Some(password), tls)),
             Pool::Sqlite(_) => {}
         }
     }

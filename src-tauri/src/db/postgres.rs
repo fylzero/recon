@@ -9,7 +9,7 @@ use super::{
     index_columns_from_definition, quote_double, quote_literal, run_raw, with_timeout, CellValue,
     Conn, Dialect, EditStatement, Opened, Pool, RawOutput, CONNECT_TIMEOUT,
 };
-use super::ssh_config::expand_home;
+use super::tls::TlsMaterial;
 use crate::models::ConnectionEntry;
 
 fn ssl_mode(mode: &str) -> PgSslMode {
@@ -22,20 +22,18 @@ fn ssl_mode(mode: &str) -> PgSslMode {
     }
 }
 
-pub(super) fn options(entry: &ConnectionEntry, password: Option<&str>) -> PgConnectOptions {
+pub(super) fn options(entry: &ConnectionEntry, password: Option<&str>, tls: &TlsMaterial) -> PgConnectOptions {
     let mut options = PgConnectOptions::new()
         .host(&entry.host)
         .port(entry.port)
         .username(&entry.user)
         .ssl_mode(ssl_mode(&entry.ssl_mode))
         .application_name("Recon");
-    if !entry.ssl_ca_path.is_empty() {
-        options = options.ssl_root_cert(expand_home(&entry.ssl_ca_path));
+    if let Some(ca) = &tls.ca {
+        options = options.ssl_root_cert_from_pem(ca.clone());
     }
-    if !entry.ssl_cert_path.is_empty() && !entry.ssl_key_path.is_empty() {
-        options = options
-            .ssl_client_cert(expand_home(&entry.ssl_cert_path))
-            .ssl_client_key(expand_home(&entry.ssl_key_path));
+    if let (Some(cert), Some(key)) = (&tls.cert, &tls.key) {
+        options = options.ssl_client_cert_from_pem(cert).ssl_client_key_from_pem(key);
     }
     if let Some(password) = password.filter(|value| !value.is_empty()) {
         options = options.password(password);
@@ -46,8 +44,8 @@ pub(super) fn options(entry: &ConnectionEntry, password: Option<&str>) -> PgConn
     options
 }
 
-pub async fn open(entry: &ConnectionEntry, password: Option<&str>) -> Result<Opened, String> {
-    let options = options(entry, password);
+pub async fn open(entry: &ConnectionEntry, password: Option<&str>, tls: &TlsMaterial) -> Result<Opened, String> {
+    let options = options(entry, password, tls);
     let pool = with_timeout(
         PgPoolOptions::new()
             .max_connections(4)
@@ -68,8 +66,8 @@ pub async fn open(entry: &ConnectionEntry, password: Option<&str>) -> Result<Ope
     })
 }
 
-pub async fn test(entry: &ConnectionEntry, password: Option<&str>) -> Result<String, String> {
-    let mut conn = with_timeout(PgConnection::connect_with(&options(entry, password))).await?;
+pub async fn test(entry: &ConnectionEntry, password: Option<&str>, tls: &TlsMaterial) -> Result<String, String> {
+    let mut conn = with_timeout(PgConnection::connect_with(&options(entry, password, tls))).await?;
     let version = run(&mut conn, PostgresDialect.version_sql(), 1, None).await;
     let _ = conn.close().await;
     Ok(super::first_text(&version?))

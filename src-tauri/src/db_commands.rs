@@ -232,11 +232,12 @@ pub async fn test_connection(
 ) -> Result<String, String> {
     let entry = sanitize_connection(connection)?;
     let password = password_for(&entry, password).await?;
+    let tls = db::tls::load(&entry).await?;
     let prompter = Prompter::interactive(&app, entry.name.clone());
     let (target, tunnel) = open_tunnel(&entry, ssh_secret, ssh_password, &prompter).await?;
     let outcome = match target.driver {
-        Driver::Mysql => db::mysql::test(&target, password.as_deref()).await,
-        Driver::Postgres => db::postgres::test(&target, password.as_deref()).await,
+        Driver::Mysql => db::mysql::test(&target, password.as_deref(), &tls).await,
+        Driver::Postgres => db::postgres::test(&target, password.as_deref(), &tls).await,
         Driver::Sqlite => db::sqlite::test(&target).await,
     };
     let outcome = outcome.map_err(|err| explain(tunnel.as_deref(), err));
@@ -293,12 +294,17 @@ pub async fn connect(
  * A failed fetch keeps the old password, and the reconnect that follows if
  * it expires fetches again.
  */
-fn spawn_refresher(entry: ConnectionEntry, target: ConnectionEntry, pool: Pool) -> tauri::async_runtime::JoinHandle<()> {
+fn spawn_refresher(
+    entry: ConnectionEntry,
+    target: ConnectionEntry,
+    pool: Pool,
+    tls: db::tls::TlsMaterial,
+) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(db::credentials::REFRESH_INTERVAL).await;
             if let Ok(password) = db::credentials::fetch(&entry).await {
-                pool.refresh_password(&target, &password);
+                pool.refresh_password(&target, &password, &tls);
             }
         }
     })
@@ -317,13 +323,14 @@ async fn open_session(
     prompter: &Prompter,
     reuse: Option<Arc<Tunnel>>,
 ) -> Result<(Session, SessionInfo), String> {
+    let tls = db::tls::load(&entry).await?;
     let (target, tunnel) = match reuse {
         Some(tunnel) => (tunnel.local_entry(&entry), Some(tunnel)),
         None => open_tunnel(&entry, None, None, prompter).await?,
     };
     let opened = match target.driver {
-        Driver::Mysql => db::mysql::open(&target, password.as_deref()).await,
-        Driver::Postgres => db::postgres::open(&target, password.as_deref()).await,
+        Driver::Mysql => db::mysql::open(&target, password.as_deref(), &tls).await,
+        Driver::Postgres => db::postgres::open(&target, password.as_deref(), &tls).await,
         Driver::Sqlite => db::sqlite::open(&target).await,
     };
     let opened = match opened {
@@ -339,7 +346,7 @@ async fn open_session(
     let refresher = entry
         .password_source
         .is_fetched()
-        .then(|| spawn_refresher(entry.clone(), target, opened.pool.clone()));
+        .then(|| spawn_refresher(entry.clone(), target, opened.pool.clone(), tls));
     let session = Session {
         name: entry.name.clone(),
         driver: entry.driver,
