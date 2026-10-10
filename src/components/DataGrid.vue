@@ -493,6 +493,11 @@ function isAutoColumn(row: number, col: number) {
   return props.newRowStart !== undefined && row >= props.newRowStart && Boolean(props.newRowAuto?.[col]);
 }
 
+/** A new row with no committed edits. Escape drops it. */
+function isUneditedNewRow(row: number) {
+  return props.newRowStart !== undefined && row >= props.newRowStart && !props.modified?.get(row)?.size;
+}
+
 function isAutoCell(row: number, col: number) {
   return isAutoColumn(row, col) && props.rows[row]?.[col] === null;
 }
@@ -579,7 +584,13 @@ function focusEditor(element: unknown) {
 
 function onEditorKeydown(event: KeyboardEvent) {
   event.stopPropagation();
-  if (onMenuKeydown(event)) {
+  const position = editing.value;
+  const dropNewRow = event.key === "Escape" && position !== null && isUneditedNewRow(position.row);
+  /*
+   * A blank new row opens with its suggestions showing. Escape cancels the
+   * row instead of only hiding that list, until the cell's text changes.
+   */
+  if (!(dropNewRow && draft.value === initialDraft.value) && onMenuKeydown(event)) {
     return;
   }
   if (event.key === "Enter" && !event.shiftKey && !event.altKey) {
@@ -588,7 +599,13 @@ function onEditorKeydown(event: KeyboardEvent) {
     scroller.value?.focus({ preventScroll: true });
   } else if (event.key === "Escape") {
     event.preventDefault();
+    const row = position?.row;
     cancelEdit();
+    if (dropNewRow && row !== undefined) {
+      anchor.value = null;
+      focus.value = null;
+      emit("deleteRows", [row]);
+    }
     scroller.value?.focus({ preventScroll: true });
   } else if (event.key === "Tab") {
     event.preventDefault();

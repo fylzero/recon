@@ -318,6 +318,26 @@ function changeAt(row: number, col: number, value: Cell): FieldChange | null {
   return { section: props.section, key, field, original, before, value };
 }
 
+function deleteRows(indexes: number[]) {
+  grid.value?.commitEdit();
+  const section = props.section;
+  const start = existingCount.value[section];
+  const keys = indexes
+    .filter((row) => row >= start)
+    .map((row) => sheetKeys.value[row])
+    .filter((key) => key !== undefined && isNewKey(key));
+  if (!keys.length) {
+    return;
+  }
+  const dropping = new Set(keys);
+  recordEntry({
+    changes: [...pending.value.values()]
+      .filter((edit) => edit.section === section && dropping.has(edit.key))
+      .map((edit) => ({ ...edit, before: edit.value, value: edit.original })),
+    removed: keys.map((key) => ({ section, key })),
+  });
+}
+
 function onEdit(row: number, col: number, text: string) {
   const field = sheet.value.fields[col];
   const value = field ? parseInput(field, text) : undefined;
@@ -475,6 +495,7 @@ defineExpose({ pendingChanges, markSaved, discard, undo, redo, create });
     :modified="modified"
     @edit="onEdit"
     @set-null="onSetNull"
+    @delete-rows="deleteRows"
     @create="create"
   />
 </template>
