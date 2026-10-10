@@ -340,7 +340,7 @@ impl Fragment {
         }
     }
 
-    fn push_value(&mut self, value: EditValue) {
+    pub(crate) fn push_value(&mut self, value: EditValue) {
         self.parts.push(Part::Value(value));
     }
 

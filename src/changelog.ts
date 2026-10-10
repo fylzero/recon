@@ -6,10 +6,11 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
-    version: "1.6.1",
+    version: "1.7.0",
     date: "October 9, 2026",
     notes: [
       "The button that shows or hides the table list stays in place on SQL and History, where there is no table list, and is disabled there. The Tables, SQL, Diagram, and History tabs no longer shift when you switch to those views.",
+      "Right-click a column header and choose Find and replace… to change text across a whole table at once. Replace the text wherever it appears in a value, like http:// with https://, or replace only values that are exactly the text, like draft with pending. With a filter applied, it can change only the matching rows. As you type, Recon shows how many rows will change and a few of them before and after, and Open in SQL tab shows the UPDATE it runs. Matching is case-sensitive on every database. It works on text and enum columns, and a table with unsaved changes has to be saved or discarded first.",
     ],
   },
   {

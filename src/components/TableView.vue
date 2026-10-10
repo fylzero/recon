@@ -65,6 +65,7 @@ import FilterPopover from "./FilterPopover.vue";
 import FilterSummary from "./FilterSummary.vue";
 import GridFind from "./GridFind.vue";
 import Modal from "./Modal.vue";
+import ReplaceDialog from "./ReplaceDialog.vue";
 import TableStructure from "./TableStructure.vue";
 
 interface PendingCell {
@@ -1613,14 +1614,46 @@ function openSqlInTab() {
   }
 }
 
-watch(
+const unsavedCount = computed(
   () =>
     [...pendingByRow.value].filter(([id, cells]) => !isNewKey(cells[0].key) && !deleted.value.has(id)).length +
     newRowIds.value.length +
     deleted.value.size +
     structureChanges.value,
-  (count) => emit("changes", count),
 );
+
+watch(unsavedCount, (count) => emit("changes", count));
+
+const replaceTarget = ref<{ column: string; wholeOnly: boolean } | null>(null);
+const menuReplaceable = computed(
+  () => kind.value === "table" && (menuColumn.value?.kind === "text" || menuColumn.value?.kind === "enum"),
+);
+const replaceBlocked = computed(() => {
+  if (!menuReplaceable.value) {
+    return "Find and replace works on text and enum columns.";
+  }
+  return unsavedCount.value ? "Save or discard your changes first." : "";
+});
+
+function replaceFromMenu() {
+  const column = menuColumn.value;
+  const blocked = replaceBlocked.value;
+  closeGridMenus();
+  if (column && !blocked) {
+    replaceTarget.value = { column: column.name, wholeOnly: column.kind === "enum" };
+  }
+}
+
+function onReplaced(count: number) {
+  replaceTarget.value = null;
+  showToast(count ? `Replaced in ${count.toLocaleString()} ${count === 1 ? "row" : "rows"}` : "No rows changed");
+  void loadData(true, false);
+}
+
+function openReplaceSql(sql: string) {
+  replaceTarget.value = null;
+  emit("openSql", `${sql};`);
+}
 
 onMounted(() => {
   // A saved or linked filter needs the column types first; the columnMap watcher applies it.
@@ -2076,6 +2109,17 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
           <button class="overflow-menu-item" type="button" role="menuitem" :disabled="!menuColumn" @click="filterOnColumn">
             Filter on {{ menuColumn?.name ?? "column" }}…
           </button>
+          <button
+            v-if="kind === 'table'"
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            :disabled="Boolean(replaceBlocked)"
+            :title="replaceBlocked || undefined"
+            @click="replaceFromMenu"
+          >
+            Find and replace…
+          </button>
           <div class="overflow-menu-divider" role="separator" />
           <button class="overflow-menu-item" type="button" role="menuitem" @click="sortFromMenu('asc')">
             Sort ascending
@@ -2135,6 +2179,19 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
       :name="table"
       :source="exportSource"
       @close="exportOpen = false"
+    />
+    <ReplaceDialog
+      v-if="replaceTarget"
+      :connection-id="connectionId"
+      :namespace="namespace"
+      :table="table"
+      :column="replaceTarget.column"
+      :whole-only="replaceTarget.wholeOnly"
+      :filter="applied.wire"
+      :filter-summary="applied.summary"
+      @close="replaceTarget = null"
+      @done="onReplaced"
+      @open-sql="openReplaceSql"
     />
   </div>
 </template>

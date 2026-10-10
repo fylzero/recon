@@ -17,6 +17,8 @@ import type {
   NamespaceList,
   PreferencesPatch,
   QueryLogEntry,
+  ReplacePreview,
+  ReplaceRequest,
   ResolvedSshHost,
   RowValues,
   SavedQuery,
@@ -285,6 +287,15 @@ export function distinctValues(
   limit = 50,
 ) {
   return invoke<string[]>("distinct_values", { connectionId, namespace, table, column, search, limit });
+}
+
+export function previewReplace(connectionId: string, request: ReplaceRequest) {
+  return invoke<ReplacePreview>("preview_replace", { connectionId, request });
+}
+
+/** Resolves to the number of rows changed. */
+export function replaceValues(connectionId: string, request: ReplaceRequest) {
+  return invoke<number>("replace_values", { connectionId, request });
 }
 
 export function saveTableChanges(connectionId: string, requests: SaveRequest[]) {

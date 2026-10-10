@@ -255,6 +255,28 @@ export interface BrowseRequest {
   requestId?: string;
 }
 
+/** `contains` replaces every occurrence inside a value; `whole` replaces values that are exactly `find`. */
+export type ReplaceMode = "contains" | "whole";
+
+export interface ReplaceRequest {
+  namespace: string;
+  table: string;
+  column: string;
+  find: string;
+  replace: string;
+  mode: ReplaceMode;
+  filter: WireNode | null;
+  /** Minutes east of UTC. */
+  utcOffset: number;
+}
+
+export interface ReplacePreview {
+  count: number;
+  samples: { before: string; after: string }[];
+  /** The UPDATE with its values written out. */
+  sql: string;
+}
+
 /* Opens `table` showing only rows where every filter column equals its value. */
 export interface TableLink {
   namespace: string;

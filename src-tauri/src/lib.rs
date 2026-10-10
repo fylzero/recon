@@ -109,6 +109,8 @@ pub fn run() {
             db_commands::cancel_browse,
             db_commands::preview_browse_sql,
             db_commands::distinct_values,
+            db_commands::preview_replace,
+            db_commands::replace_values,
             db_commands::save_table_changes,
             db_commands::run_query,
             db_commands::fetch_rows,

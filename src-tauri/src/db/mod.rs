@@ -2,6 +2,7 @@ pub mod dump;
 pub mod filter;
 pub mod mysql;
 pub mod postgres;
+pub mod replace;
 pub mod restore;
 pub mod sql_split;
 pub mod sqlite;
@@ -1348,7 +1349,7 @@ fn column_meta<DB: Database>(columns: &[DB::Column]) -> Vec<ColumnMeta> {
         .collect()
 }
 
-fn returns_rows(sql: &str) -> bool {
+pub(crate) fn returns_rows(sql: &str) -> bool {
     let keyword = sql
         .trim_start_matches(|c: char| c.is_whitespace() || c == '(')
         .split(|c: char| !c.is_ascii_alphabetic())

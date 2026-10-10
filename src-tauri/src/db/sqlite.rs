@@ -7,7 +7,7 @@ use futures_util::TryStreamExt;
 use sqlx::{Connection, Executor, Row, Sqlite, TypeInfo, ValueRef};
 
 use super::{
-    column_meta, describe_error, quote_double, quote_literal, run_raw, with_timeout, CellValue, Conn, Dialect,
+    column_meta, describe_error, quote_double, quote_literal, returns_rows, run_raw, with_timeout, CellValue, Conn, Dialect,
     EditValue, Opened, Pool, RawOutput, CONNECT_TIMEOUT,
 };
 use crate::models::ConnectionEntry;
@@ -79,6 +79,10 @@ pub async fn run_bound(
             EditValue::Float(value) => query.bind(*value),
             EditValue::Text(value) => query.bind(value.as_str()),
         };
+    }
+    if !returns_rows(sql) {
+        let result = query.execute(&mut *conn).await.map_err(describe_error)?;
+        return Ok(RawOutput { columns: Vec::new(), rows: Vec::new(), rows_affected: affected(&result), truncated: false });
     }
     let mut columns = None;
     let mut rows = Vec::new();

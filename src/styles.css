@@ -2749,6 +2749,52 @@ button.link-button:hover:not(:disabled) {
   overflow: auto;
 }
 
+.replace-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.replace-filter {
+  overflow-wrap: anywhere;
+}
+
+.replace-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.replace-preview p {
+  margin: 0;
+}
+
+.replace-samples {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-family: var(--font-code);
+  font-size: 12px;
+}
+
+.replace-samples th {
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-family: inherit;
+  font-weight: 500;
+  text-align: left;
+}
+
+.replace-samples td {
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
 .transfer-error {
   max-height: 12rem;
   margin: 0;

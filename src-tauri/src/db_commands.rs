@@ -10,6 +10,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::commands::{sanitize_connection, AppState};
 use crate::db::ssh::{Credentials, Tunnel};
 use crate::db::filter::{self, Fragment};
+use crate::db::replace::{self, ReplacePreview, ReplaceRequest, ReplaceSample, ReplaceStatements};
 use crate::db::table_ops::{self, DropOptions, TruncateOptions};
 use crate::db::{
     self, dialect, first_text, text_at, BrowseRequest, BrowseResult, CellValue, ColumnDetail,
@@ -1135,6 +1136,77 @@ pub async fn distinct_values(
             .unwrap_or_default())
     })
     .await
+}
+
+async fn replace_statements(session: &Session, request: &ReplaceRequest) -> Result<ReplaceStatements, String> {
+    let columns = table_columns(session, &request.namespace, &request.table).await?;
+    let classes = filter::column_classes(session.driver, &columns);
+    let Some(class) = classes.get(&request.column) else {
+        return Err(format!("The column “{}” no longer exists in this table. Refresh the table.", request.column));
+    };
+    replace::check(request, class.kind)?;
+    let condition = match &request.filter {
+        Some(root) => {
+            let ctx = filter::FilterContext { driver: session.driver, columns: &classes, utc_offset: request.utc_offset };
+            filter::compile(&ctx, root).map_err(filter::FilterError::into_message)?
+        }
+        None => None,
+    };
+    let table = dialect(session.driver).qualified(&request.namespace, &request.table);
+    Ok(replace::statements(session.driver, &table, request, condition))
+}
+
+async fn pool_statement(session: &Session, statement: &Fragment, limit: usize, origin: QueryOrigin) -> Result<RawOutput, String> {
+    let started = Instant::now();
+    let outcome = session.pool.run_statement(statement, limit).await;
+    record_statement(session, statement, origin, started, &outcome);
+    outcome
+}
+
+/** How many rows a find and replace would change, a few of them before and after, and the UPDATE it would run. */
+#[tauri::command]
+pub async fn preview_replace(app: AppHandle, connection_id: String, request: ReplaceRequest) -> Result<ReplacePreview, String> {
+    let request = &request;
+    with_session(&app, &connection_id, move |session| async move {
+        let statements = replace_statements(&session, request).await?;
+        let count = pool_statement(&session, &statements.count, 1, QueryOrigin::Browse)
+            .await?
+            .rows
+            .first()
+            .and_then(|row| row.first()?.as_i64())
+            .and_then(|count| u64::try_from(count).ok())
+            .unwrap_or(0);
+        let samples = pool_statement(&session, &statements.sample, replace::SAMPLE_LIMIT, QueryOrigin::Browse)
+            .await?
+            .rows
+            .iter()
+            .filter_map(|row| row.first()?.to_text())
+            .map(|before| ReplaceSample { after: replace::replaced(request, &before), before })
+            .collect();
+        Ok(ReplacePreview { count, samples, sql: statements.update.inline(session.driver) })
+    })
+    .await
+}
+
+/** Runs a find and replace and returns how many rows changed. Never retried, since replacing twice can change a value twice. */
+#[tauri::command]
+pub async fn replace_values(app: AppHandle, connection_id: String, request: ReplaceRequest) -> Result<u64, String> {
+    let session = app.state::<SessionStore>().get(&connection_id).await?;
+    let outcome = async {
+        let statements = replace_statements(&session, &request).await?;
+        pool_statement(&session, &statements.update, 0, QueryOrigin::Edit).await
+    }
+    .await;
+    match outcome {
+        Ok(output) => Ok(output.rows_affected),
+        Err(err) if db::is_connection_lost(&err) => {
+            let _ = recover(&app, &connection_id, &session).await;
+            Err(format!(
+                "{err} Recon reconnected but didn't retry, because the replacement may already have run. Reload to check before running it again."
+            ))
+        }
+        Err(err) => Err(err),
+    }
 }
 
 #[tauri::command]
