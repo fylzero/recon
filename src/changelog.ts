@@ -6,6 +6,13 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.6.1",
+    date: "October 9, 2026",
+    notes: [
+      "The button that shows or hides the table list stays in place on SQL and History, where there is no table list, and is disabled there. The Tables, SQL, Diagram, and History tabs no longer shift when you switch to those views.",
+    ],
+  },
+  {
     version: "1.6.0",
     date: "October 7, 2026",
     notes: [

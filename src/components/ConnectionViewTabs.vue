@@ -19,11 +19,17 @@ const emit = defineEmits<{
 <template>
   <div class="view-tabs connection-view-tabs">
     <button
-      v-if="listOpen !== null"
       class="view-tab view-tab-toggle"
       type="button"
-      :aria-pressed="listOpen"
-      :title="listOpen ? 'Hide the table list (⌘B)' : 'Show the table list (⌘B)'"
+      :disabled="listOpen === null"
+      :aria-pressed="listOpen === null ? undefined : listOpen"
+      :title="
+        listOpen === null
+          ? 'No table list in this view'
+          : listOpen
+            ? 'Hide the table list (⌘B)'
+            : 'Show the table list (⌘B)'
+      "
       @click="emit('toggleList')"
     >
       <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
