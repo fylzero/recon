@@ -9,23 +9,34 @@ use super::{
     quote_backtick, run_raw, text_at, with_timeout, CellValue, ColumnChange, Conn, Dialect, Opened,
     Pool, RawOutput, CONNECT_TIMEOUT,
 };
+use super::ssh_config::expand_home;
 use crate::models::ConnectionEntry;
 
 fn ssl_mode(mode: &str) -> MySqlSslMode {
     match mode {
         "disable" => MySqlSslMode::Disabled,
         "require" => MySqlSslMode::Required,
+        "verify-ca" => MySqlSslMode::VerifyCa,
+        "verify-full" => MySqlSslMode::VerifyIdentity,
         _ => MySqlSslMode::Preferred,
     }
 }
 
-fn options(entry: &ConnectionEntry, password: Option<&str>) -> MySqlConnectOptions {
+pub(super) fn options(entry: &ConnectionEntry, password: Option<&str>) -> MySqlConnectOptions {
     let mut options = MySqlConnectOptions::new()
         .host(&entry.host)
         .port(entry.port)
         .username(&entry.user)
         .ssl_mode(ssl_mode(&entry.ssl_mode))
         .enable_cleartext_plugin(entry.cleartext_auth);
+    if !entry.ssl_ca_path.is_empty() {
+        options = options.ssl_ca(expand_home(&entry.ssl_ca_path));
+    }
+    if !entry.ssl_cert_path.is_empty() && !entry.ssl_key_path.is_empty() {
+        options = options
+            .ssl_client_cert(expand_home(&entry.ssl_cert_path))
+            .ssl_client_key(expand_home(&entry.ssl_key_path));
+    }
     if let Some(password) = password.filter(|value| !value.is_empty()) {
         options = options.password(password);
     }

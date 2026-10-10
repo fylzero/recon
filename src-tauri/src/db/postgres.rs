@@ -9,23 +9,34 @@ use super::{
     index_columns_from_definition, quote_double, quote_literal, run_raw, with_timeout, CellValue,
     Conn, Dialect, EditStatement, Opened, Pool, RawOutput, CONNECT_TIMEOUT,
 };
+use super::ssh_config::expand_home;
 use crate::models::ConnectionEntry;
 
 fn ssl_mode(mode: &str) -> PgSslMode {
     match mode {
         "disable" => PgSslMode::Disable,
         "require" => PgSslMode::Require,
+        "verify-ca" => PgSslMode::VerifyCa,
+        "verify-full" => PgSslMode::VerifyFull,
         _ => PgSslMode::Prefer,
     }
 }
 
-fn options(entry: &ConnectionEntry, password: Option<&str>) -> PgConnectOptions {
+pub(super) fn options(entry: &ConnectionEntry, password: Option<&str>) -> PgConnectOptions {
     let mut options = PgConnectOptions::new()
         .host(&entry.host)
         .port(entry.port)
         .username(&entry.user)
         .ssl_mode(ssl_mode(&entry.ssl_mode))
         .application_name("Recon");
+    if !entry.ssl_ca_path.is_empty() {
+        options = options.ssl_root_cert(expand_home(&entry.ssl_ca_path));
+    }
+    if !entry.ssl_cert_path.is_empty() && !entry.ssl_key_path.is_empty() {
+        options = options
+            .ssl_client_cert(expand_home(&entry.ssl_cert_path))
+            .ssl_client_key(expand_home(&entry.ssl_key_path));
+    }
     if let Some(password) = password.filter(|value| !value.is_empty()) {
         options = options.password(password);
     }

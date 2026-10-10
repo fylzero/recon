@@ -179,6 +179,24 @@ pub enum SshAuth {
     Agent,
 }
 
+/// Where the database password comes from each time a connection signs in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PasswordSource {
+    #[default]
+    Password,
+    /// A short-lived RDS token from `aws rds generate-db-auth-token`.
+    AwsIam,
+    /// Whatever a shell command prints.
+    Command,
+}
+
+impl PasswordSource {
+    pub fn is_fetched(self) -> bool {
+        self != PasswordSource::Password
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SshTunnel {
@@ -250,7 +268,32 @@ pub struct ConnectionEntry {
     #[serde(default)]
     pub cleartext_auth: bool,
     #[serde(default)]
+    pub password_source: PasswordSource,
+    #[serde(default)]
+    pub aws_region: String,
+    #[serde(default)]
+    pub aws_profile: String,
+    #[serde(default)]
+    pub password_command: String,
+    /// CA certificate (PEM) to verify the server with, instead of the public roots.
+    #[serde(default)]
+    pub ssl_ca_path: String,
+    #[serde(default)]
+    pub ssl_cert_path: String,
+    #[serde(default)]
+    pub ssl_key_path: String,
+    #[serde(default)]
     pub ssh: SshTunnel,
+}
+
+impl ConnectionEntry {
+    pub fn verifies_certificate(&self) -> bool {
+        self.ssl_mode.starts_with("verify-")
+    }
+
+    pub fn requires_tls(&self) -> bool {
+        self.ssl_mode == "require" || self.verifies_certificate()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -419,6 +462,13 @@ mod tests {
                 header_color: String::new(),
                 save_password: true,
                 cleartext_auth: false,
+                password_source: PasswordSource::Password,
+                aws_region: String::new(),
+                aws_profile: String::new(),
+                password_command: String::new(),
+                ssl_ca_path: String::new(),
+                ssl_cert_path: String::new(),
+                ssl_key_path: String::new(),
                 ssh: SshTunnel::default(),
             }],
         });
@@ -450,6 +500,12 @@ mod tests {
         assert_eq!(entry.ssh.auth, SshAuth::Password);
         assert!(!entry.ssh.also_password);
         assert!(!entry.cleartext_auth);
+        assert_eq!(entry.password_source, PasswordSource::Password);
+        assert!(entry.ssl_ca_path.is_empty());
+
+        let iam: ConnectionEntry =
+            serde_json::from_str(r#"{"name":"rds","driver":"mysql","passwordSource":"aws-iam"}"#).unwrap();
+        assert_eq!(iam.password_source, PasswordSource::AwsIam);
     }
 
     #[test]

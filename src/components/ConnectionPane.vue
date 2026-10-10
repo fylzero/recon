@@ -250,7 +250,13 @@ const driver = computed(() => entry.value?.driver ?? "mysql");
 const namespaceLabel = computed(() => session.value?.namespaceLabel ?? "Database");
 const systemNamespaces = computed(() => session.value?.systemNamespaces ?? []);
 const needsPassword = computed(
-  () => Boolean(entry.value && entry.value.driver !== "sqlite" && !entry.value.savePassword),
+  () =>
+    Boolean(
+      entry.value &&
+        entry.value.driver !== "sqlite" &&
+        (entry.value.passwordSource ?? "password") === "password" &&
+        !entry.value.savePassword,
+    ),
 );
 
 const databaseTitle = computed(() => {

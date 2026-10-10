@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { homeDir, join } from "@tauri-apps/api/path";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import * as api from "../api";
 import { DEFAULT_HEADER_COLOR } from "../color";
 import { useApp } from "../composables/useApp";
@@ -13,6 +14,7 @@ import {
   defaultSshTunnel,
   type ConnectionEntry,
   type Driver,
+  type PasswordSource,
   type ResolvedSshHost,
   type SshAuth,
   type SslMode,
@@ -23,6 +25,14 @@ const SQLITE_FILTERS = [
   { name: "SQLite database", extensions: ["sqlite", "sqlite3", "db", "db3", "s3db", "sl3"] },
   { name: "All files", extensions: ["*"] },
 ];
+
+const CERT_FILTERS = [
+  { name: "Certificate or key", extensions: ["pem", "crt", "cer", "key"] },
+  { name: "All files", extensions: ["*"] },
+];
+
+const RDS_CERTS_URL = "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html";
+const RDS_HOST_REGION = /\.([a-z]{2}(?:-[a-z]+)+-\d+)\.rds\.amazonaws\.com$/i;
 
 const { groups, saveConnection, showToast } = useApp();
 const { openConnection } = useTabs();
@@ -42,6 +52,14 @@ const database = ref(initial?.database ?? "");
 const filePath = ref(initial?.filePath ?? "");
 const sslMode = ref<SslMode>(initial?.sslMode ?? "prefer");
 const cleartextAuth = ref(initial?.cleartextAuth ?? false);
+const passwordSource = ref<PasswordSource>(initial?.passwordSource ?? "password");
+const awsRegion = ref(initial?.awsRegion ?? "");
+const awsProfile = ref(initial?.awsProfile ?? "");
+const passwordCommand = ref(initial?.passwordCommand ?? "");
+const sslCaPath = ref(initial?.sslCaPath ?? "");
+const sslCertPath = ref(initial?.sslCertPath ?? "");
+const sslKeyPath = ref(initial?.sslKeyPath ?? "");
+const useClientCert = ref(Boolean(initial?.sslCertPath));
 const groupId = ref<string>(formState.value?.groupId ?? "");
 const colorPicked = ref(Boolean(initial?.headerColor));
 const headerColor = ref(initial?.headerColor || groupColor());
@@ -92,16 +110,50 @@ const sshReady = computed(
     ),
 );
 
-const usesCleartext = computed(() => driver.value === "mysql" && cleartextAuth.value);
+const usesIam = computed(() => !isSqlite.value && passwordSource.value === "aws-iam");
+const usesCommand = computed(() => !isSqlite.value && passwordSource.value === "command");
+const typesPassword = computed(() => !isSqlite.value && passwordSource.value === "password");
+
+const usesCleartext = computed(() => driver.value === "mysql" && (cleartextAuth.value || usesIam.value));
+
+const requiresTls = computed(() => ["require", "verify-ca", "verify-full"].includes(sslMode.value));
+const verifiesCertificate = computed(() => sslMode.value === "verify-ca" || sslMode.value === "verify-full");
 
 const cleartextBlocked = computed(
-  () => usesCleartext.value && !useSsh.value && sslMode.value !== "require",
+  () => usesCleartext.value && !usesIam.value && !useSsh.value && !requiresTls.value,
 );
+
+const iamBlocked = computed(() => usesIam.value && !requiresTls.value);
+
+const hostCheckBlocked = computed(() => useSsh.value && sslMode.value === "verify-full");
+
+const clientCertIncomplete = computed(
+  () => requiresTls.value && useClientCert.value && !(sslCertPath.value.trim() && sslKeyPath.value.trim()),
+);
+
+const sourceReady = computed(() => {
+  if (usesIam.value) {
+    return Boolean(awsRegion.value.trim());
+  }
+  if (usesCommand.value) {
+    return Boolean(passwordCommand.value.trim());
+  }
+  return true;
+});
 
 const canSubmit = computed(() =>
   isSqlite.value
     ? Boolean(filePath.value.trim())
-    : Boolean(host.value.trim() && user.value.trim() && sshReady.value && !cleartextBlocked.value),
+    : Boolean(
+        host.value.trim() &&
+          user.value.trim() &&
+          sshReady.value &&
+          sourceReady.value &&
+          !cleartextBlocked.value &&
+          !iamBlocked.value &&
+          !hostCheckBlocked.value &&
+          !clientCertIncomplete.value,
+      ),
 );
 
 const usesSshPassword = computed(
@@ -169,6 +221,14 @@ watch(
     filePath,
     sslMode,
     cleartextAuth,
+    passwordSource,
+    awsRegion,
+    awsProfile,
+    passwordCommand,
+    sslCaPath,
+    sslCertPath,
+    sslKeyPath,
+    useClientCert,
     sshEnabled,
     sshHost,
     sshPort,
@@ -193,8 +253,34 @@ watch(sshAuth, (next) => {
 });
 
 watch(cleartextAuth, (enabled) => {
-  if (enabled && !useSsh.value && sslMode.value !== "require") {
+  if (enabled && !useSsh.value && !requiresTls.value) {
     sslMode.value = "require";
+  }
+});
+
+function regionFromHost() {
+  return RDS_HOST_REGION.exec(host.value.trim())?.[1]?.toLowerCase() ?? "";
+}
+
+watch(passwordSource, (next) => {
+  if (next !== "aws-iam") {
+    return;
+  }
+  if (!requiresTls.value) {
+    sslMode.value = "require";
+  }
+  if (!awsRegion.value.trim()) {
+    awsRegion.value = regionFromHost();
+  }
+});
+
+watch(host, (_next, previous) => {
+  if (!usesIam.value) {
+    return;
+  }
+  const previousRegion = RDS_HOST_REGION.exec(previous.trim())?.[1]?.toLowerCase() ?? "";
+  if (!awsRegion.value.trim() || awsRegion.value.trim() === previousRegion) {
+    awsRegion.value = regionFromHost();
   }
 });
 
@@ -291,8 +377,15 @@ function buildEntry(): ConnectionEntry {
     filePath: isSqlite.value ? filePath.value.trim() : "",
     sslMode: sslMode.value,
     headerColor: colorPicked.value ? headerColor.value : "",
-    savePassword: isSqlite.value ? false : savePassword.value,
+    savePassword: typesPassword.value && savePassword.value,
     cleartextAuth: usesCleartext.value,
+    passwordSource: isSqlite.value ? "password" : passwordSource.value,
+    awsRegion: usesIam.value ? awsRegion.value.trim() : "",
+    awsProfile: usesIam.value ? awsProfile.value.trim() : "",
+    passwordCommand: usesCommand.value ? passwordCommand.value.trim() : "",
+    sslCaPath: verifiesCertificate.value ? sslCaPath.value.trim() : "",
+    sslCertPath: requiresTls.value && useClientCert.value ? sslCertPath.value.trim() : "",
+    sslKeyPath: requiresTls.value && useClientCert.value ? sslKeyPath.value.trim() : "",
     ssh: isSqlite.value
       ? defaultSshTunnel()
       : {
@@ -308,7 +401,7 @@ function buildEntry(): ConnectionEntry {
 }
 
 function passwordArg() {
-  if (isSqlite.value) {
+  if (!typesPassword.value) {
     return null;
   }
   return password.value ? password.value : null;
@@ -336,6 +429,21 @@ async function browseKey() {
   });
   if (typeof selected === "string") {
     sshKeyPath.value = home && selected.startsWith(`${home}/`) ? `~${selected.slice(home.length)}` : selected;
+  }
+}
+
+async function browseCertificate(field: "ca" | "cert" | "key", title: string) {
+  const target = { ca: sslCaPath, cert: sslCertPath, key: sslKeyPath }[field];
+  const home = await homeDir().catch(() => "");
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    title,
+    filters: CERT_FILTERS,
+    defaultPath: target.value.trim().replace(/^~(?=\/)/, home) || undefined,
+  });
+  if (typeof selected === "string") {
+    target.value = home && selected.startsWith(`${home}/`) ? `~${selected.slice(home.length)}` : selected;
   }
 }
 
@@ -489,19 +597,60 @@ async function submit(connectAfter: boolean) {
             />
           </label>
           <label class="modal-label">
-            <span class="muted tiny">Password</span>
-            <input
-              v-model="password"
-              type="password"
-              autocomplete="new-password"
-              :placeholder="passwordPlaceholder"
-              :disabled="!savePassword"
-            />
+            <span class="muted tiny">Authentication</span>
+            <select v-model="passwordSource">
+              <option value="password">Password</option>
+              <option value="aws-iam">AWS IAM</option>
+              <option value="command">Password command</option>
+            </select>
           </label>
-          <label class="checkbox-row span-2">
-            <input v-model="savePassword" type="checkbox" />
-            <span>Save password in the macOS Keychain</span>
-          </label>
+          <template v-if="passwordSource === 'password'">
+            <label class="modal-label span-2">
+              <span class="muted tiny">Password</span>
+              <input
+                v-model="password"
+                type="password"
+                autocomplete="new-password"
+                :placeholder="passwordPlaceholder"
+                :disabled="!savePassword"
+              />
+            </label>
+            <label class="checkbox-row span-2">
+              <input v-model="savePassword" type="checkbox" />
+              <span>Save password in the macOS Keychain</span>
+            </label>
+          </template>
+          <template v-else-if="passwordSource === 'aws-iam'">
+            <label class="modal-label">
+              <span class="muted tiny">AWS region</span>
+              <input v-model="awsRegion" type="text" spellcheck="false" autocomplete="off" placeholder="us-east-1" />
+            </label>
+            <label class="modal-label">
+              <span class="muted tiny">AWS profile</span>
+              <input v-model="awsProfile" type="text" spellcheck="false" autocomplete="off" placeholder="Default" />
+            </label>
+            <p class="muted tiny span-2 ssh-hint">
+              Signs in with a token from the AWS CLI (aws rds generate-db-auth-token), fetched again each time
+              Recon connects. For SSO profiles, run aws sso login first. IAM logins need SSL.
+            </p>
+          </template>
+          <template v-else>
+            <label class="modal-label span-2">
+              <span class="muted tiny">Command</span>
+              <input
+                v-model="passwordCommand"
+                class="code-input"
+                type="text"
+                spellcheck="false"
+                autocomplete="off"
+                placeholder="op read op://Private/Database/password"
+              />
+            </label>
+            <p class="muted tiny span-2 ssh-hint">
+              Runs in your shell each time Recon connects, and what it prints is the password. RECON_DB_HOST,
+              RECON_DB_PORT, and RECON_DB_USER are set for it.
+            </p>
+          </template>
           <label class="modal-label">
             <span class="muted tiny">Database</span>
             <input
@@ -516,16 +665,72 @@ async function submit(connectAfter: boolean) {
             <select v-model="sslMode">
               <option value="prefer">Prefer</option>
               <option value="require">Require</option>
+              <option value="verify-ca">Verify CA</option>
+              <option value="verify-full">Verify CA and host name</option>
               <option value="disable">Disable</option>
             </select>
           </label>
-          <template v-if="driver === 'mysql'">
+          <p v-if="iamBlocked" class="settings-error span-2">AWS IAM logins need SSL set to Require or Verify.</p>
+          <p v-if="hostCheckBlocked" class="settings-error span-2">
+            The host name can't be checked through an SSH tunnel. Set SSL to Verify CA instead.
+          </p>
+          <template v-if="verifiesCertificate">
+            <label class="modal-label span-2">
+              <span class="muted tiny">CA certificate</span>
+              <div class="file-picker">
+                <input
+                  v-model="sslCaPath"
+                  type="text"
+                  spellcheck="false"
+                  placeholder="Leave empty to use the public certificate authorities"
+                />
+                <button class="ghost" type="button" @click="browseCertificate('ca', 'Choose CA certificate')">
+                  Browse…
+                </button>
+              </div>
+            </label>
+            <p class="muted tiny span-2 ssh-hint">
+              For Amazon RDS and Aurora, use AWS's
+              <button class="link-button" type="button" @click="openUrl(RDS_CERTS_URL)">certificate bundle</button>.
+            </p>
+          </template>
+          <template v-if="requiresTls">
+            <label class="checkbox-row span-2">
+              <input v-model="useClientCert" type="checkbox" />
+              <span>Sign in with a client certificate</span>
+            </label>
+            <template v-if="useClientCert">
+              <label class="modal-label span-2">
+                <span class="muted tiny">Client certificate</span>
+                <div class="file-picker">
+                  <input v-model="sslCertPath" type="text" spellcheck="false" placeholder="~/certs/client-cert.pem" />
+                  <button
+                    class="ghost"
+                    type="button"
+                    @click="browseCertificate('cert', 'Choose client certificate')"
+                  >
+                    Browse…
+                  </button>
+                </div>
+              </label>
+              <label class="modal-label span-2">
+                <span class="muted tiny">Client key</span>
+                <div class="file-picker">
+                  <input v-model="sslKeyPath" type="text" spellcheck="false" placeholder="~/certs/client-key.pem" />
+                  <button class="ghost" type="button" @click="browseCertificate('key', 'Choose client key')">
+                    Browse…
+                  </button>
+                </div>
+              </label>
+            </template>
+          </template>
+          <template v-if="driver === 'mysql' && passwordSource !== 'aws-iam'">
             <label class="checkbox-row span-2">
               <input v-model="cleartextAuth" type="checkbox" />
               <span>Send password in clear text</span>
             </label>
             <p v-if="cleartextBlocked" class="settings-error span-2">
-              Set SSL to Require or connect through an SSH tunnel to send the password in clear text.
+              Set SSL to Require or Verify, or connect through an SSH tunnel, to send the password in clear text.
             </p>
             <p v-else-if="cleartextAuth" class="muted tiny span-2 ssh-hint">
               For servers that check passwords with PAM, LDAP, or AWS IAM (mysql_clear_password).

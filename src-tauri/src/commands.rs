@@ -7,7 +7,7 @@ use tauri::{AppHandle, State};
 use crate::models::{
     sanitize_color, sanitize_font_family, sanitize_font_size, sanitize_list_font_family,
     sanitize_notifications, AppData,
-    ConnectionEntry, ConnectionGroup, Driver, PreferencesPatch, SavedQuery, SshAuth, SshTunnel,
+    ConnectionEntry, ConnectionGroup, Driver, PasswordSource, PreferencesPatch, SavedQuery, SshAuth, SshTunnel,
     DEFAULT_EDITOR_FONT_SIZE, DEFAULT_GRID_FONT_SIZE, DEFAULT_LIST_FONT_SIZE, DEFAULT_SSH_PORT,
     MAX_AUTO_COLUMN_WIDTH_MAX, MAX_AUTO_COLUMN_WIDTH_MIN, PAGE_SIZE_MAX, PAGE_SIZE_MIN,
     QUERY_ROW_LIMIT_MAX, QUERY_ROW_LIMIT_MIN, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
@@ -15,9 +15,12 @@ use crate::models::{
 use crate::{persist, query_log, secrets};
 
 const DEFAULT_GROUP_COLOR: &str = "#16323c";
-const SSL_MODES: [&str; 3] = ["disable", "prefer", "require"];
+const SSL_MODES: [&str; 5] = ["disable", "prefer", "require", "verify-ca", "verify-full"];
 const CLEARTEXT_NEEDS_ENCRYPTION: &str =
-    "Sending the password in clear text needs SSL set to Require, or an SSH tunnel.";
+    "Sending the password in clear text needs SSL set to Require or Verify, or an SSH tunnel.";
+const IAM_NEEDS_ENCRYPTION: &str = "AWS IAM logins need SSL set to Require or Verify.";
+const HOST_CHECK_THROUGH_TUNNEL: &str =
+    "The host name can't be checked through an SSH tunnel. Set SSL to Verify CA instead.";
 
 pub struct AppState {
     pub data: Mutex<AppData>,
@@ -101,6 +104,72 @@ fn sanitize_ssh(ssh: &mut SshTunnel) -> Result<(), String> {
     Ok(())
 }
 
+fn clear_server_auth(entry: &mut ConnectionEntry) {
+    entry.password_source = PasswordSource::Password;
+    entry.aws_region.clear();
+    entry.aws_profile.clear();
+    entry.password_command.clear();
+    entry.ssl_ca_path.clear();
+    entry.ssl_cert_path.clear();
+    entry.ssl_key_path.clear();
+}
+
+fn sanitize_password_source(entry: &mut ConnectionEntry) -> Result<(), String> {
+    entry.aws_region = entry.aws_region.trim().to_ascii_lowercase();
+    entry.aws_profile = entry.aws_profile.trim().to_string();
+    entry.password_command = entry.password_command.trim().to_string();
+    match entry.password_source {
+        PasswordSource::Password => {
+            entry.aws_region.clear();
+            entry.aws_profile.clear();
+            entry.password_command.clear();
+        }
+        PasswordSource::AwsIam => {
+            entry.password_command.clear();
+            if entry.aws_region.is_empty() {
+                return Err("An AWS region is required for IAM logins.".into());
+            }
+            if !entry.requires_tls() {
+                return Err(IAM_NEEDS_ENCRYPTION.into());
+            }
+            if entry.driver == Driver::Mysql {
+                entry.cleartext_auth = true;
+            }
+        }
+        PasswordSource::Command => {
+            entry.aws_region.clear();
+            entry.aws_profile.clear();
+            if entry.password_command.is_empty() {
+                return Err("Enter the command that prints the password.".into());
+            }
+        }
+    }
+    if entry.password_source.is_fetched() {
+        entry.save_password = false;
+    }
+    Ok(())
+}
+
+fn sanitize_tls(entry: &mut ConnectionEntry) -> Result<(), String> {
+    entry.ssl_ca_path = entry.ssl_ca_path.trim().to_string();
+    entry.ssl_cert_path = entry.ssl_cert_path.trim().to_string();
+    entry.ssl_key_path = entry.ssl_key_path.trim().to_string();
+    if !entry.verifies_certificate() {
+        entry.ssl_ca_path.clear();
+    }
+    if !entry.requires_tls() {
+        entry.ssl_cert_path.clear();
+        entry.ssl_key_path.clear();
+    }
+    if entry.ssl_mode == "verify-full" && entry.ssh.enabled {
+        return Err(HOST_CHECK_THROUGH_TUNNEL.into());
+    }
+    if entry.ssl_cert_path.is_empty() != entry.ssl_key_path.is_empty() {
+        return Err("Choose both a client certificate and its key, or neither.".into());
+    }
+    Ok(())
+}
+
 pub fn sanitize_connection(mut entry: ConnectionEntry) -> Result<ConnectionEntry, String> {
     entry.name = entry.name.trim().to_string();
     entry.host = entry.host.trim().to_string();
@@ -126,6 +195,7 @@ pub fn sanitize_connection(mut entry: ConnectionEntry) -> Result<ConnectionEntry
             entry.save_password = false;
             entry.cleartext_auth = false;
             entry.ssh = SshTunnel::default();
+            clear_server_auth(&mut entry);
             if entry.name.is_empty() {
                 entry.name = Path::new(&entry.file_path)
                     .file_stem()
@@ -145,10 +215,12 @@ pub fn sanitize_connection(mut entry: ConnectionEntry) -> Result<ConnectionEntry
             }
             entry.file_path.clear();
             sanitize_ssh(&mut entry.ssh)?;
+            sanitize_password_source(&mut entry)?;
+            sanitize_tls(&mut entry)?;
             if entry.driver != Driver::Mysql {
                 entry.cleartext_auth = false;
             }
-            if entry.cleartext_auth && !entry.ssh.enabled && entry.ssl_mode != "require" {
+            if entry.cleartext_auth && !entry.ssh.enabled && !entry.requires_tls() {
                 return Err(CLEARTEXT_NEEDS_ENCRYPTION.into());
             }
             if entry.name.is_empty() {
@@ -739,8 +811,85 @@ mod tests {
             header_color: "nope".into(),
             save_password: true,
             cleartext_auth: false,
+            password_source: PasswordSource::Password,
+            aws_region: String::new(),
+            aws_profile: String::new(),
+            password_command: String::new(),
+            ssl_ca_path: String::new(),
+            ssl_cert_path: String::new(),
+            ssl_key_path: String::new(),
             ssh: SshTunnel::default(),
         }
+    }
+
+    fn with_tunnel(mut entry: ConnectionEntry) -> ConnectionEntry {
+        entry.ssh.enabled = true;
+        entry.ssh.host = "bastion.example.com".into();
+        entry.ssh.user = "deploy".into();
+        entry
+    }
+
+    #[test]
+    fn aws_iam_needs_region_and_tls_and_turns_on_cleartext() {
+        let mut mysql = entry(Driver::Mysql);
+        mysql.password_source = PasswordSource::AwsIam;
+        mysql.ssl_mode = "require".into();
+        mysql.password_command = "echo leftover".into();
+        assert!(sanitize_connection(mysql.clone()).is_err());
+        mysql.aws_region = " US-EAST-1 ".into();
+        let saved = sanitize_connection(mysql.clone()).unwrap();
+        assert_eq!(saved.aws_region, "us-east-1");
+        assert!(saved.cleartext_auth);
+        assert!(!saved.save_password);
+        assert!(saved.password_command.is_empty());
+
+        mysql.ssl_mode = "prefer".into();
+        assert_eq!(sanitize_connection(mysql.clone()).unwrap_err(), IAM_NEEDS_ENCRYPTION);
+        assert_eq!(sanitize_connection(with_tunnel(mysql)).unwrap_err(), IAM_NEEDS_ENCRYPTION);
+
+        let mut postgres = entry(Driver::Postgres);
+        postgres.password_source = PasswordSource::AwsIam;
+        postgres.aws_region = "eu-west-1".into();
+        postgres.ssl_mode = "verify-ca".into();
+        assert!(!sanitize_connection(postgres).unwrap().cleartext_auth);
+    }
+
+    #[test]
+    fn password_command_must_be_set() {
+        let mut pg = entry(Driver::Postgres);
+        pg.password_source = PasswordSource::Command;
+        pg.aws_region = "us-east-1".into();
+        assert!(sanitize_connection(pg.clone()).is_err());
+        pg.password_command = "  op read op://db/password  ".into();
+        let saved = sanitize_connection(pg).unwrap();
+        assert_eq!(saved.password_command, "op read op://db/password");
+        assert!(saved.aws_region.is_empty());
+        assert!(!saved.save_password);
+    }
+
+    #[test]
+    fn validates_certificate_settings() {
+        let mut pg = entry(Driver::Postgres);
+        pg.ssl_mode = "verify-full".into();
+        pg.ssl_ca_path = " ~/certs/global-bundle.pem ".into();
+        assert_eq!(sanitize_connection(pg.clone()).unwrap().ssl_ca_path, "~/certs/global-bundle.pem");
+        assert_eq!(sanitize_connection(with_tunnel(pg.clone())).unwrap_err(), HOST_CHECK_THROUGH_TUNNEL);
+        pg.ssl_mode = "verify-ca".into();
+        assert!(sanitize_connection(with_tunnel(pg.clone())).is_ok());
+
+        pg.ssl_cert_path = "/tmp/client.pem".into();
+        assert!(sanitize_connection(pg.clone()).is_err());
+        pg.ssl_key_path = "/tmp/client.key".into();
+        assert!(sanitize_connection(pg.clone()).is_ok());
+
+        pg.ssl_mode = "require".into();
+        let saved = sanitize_connection(pg.clone()).unwrap();
+        assert!(saved.ssl_ca_path.is_empty());
+        assert_eq!(saved.ssl_cert_path, "/tmp/client.pem");
+
+        pg.ssl_mode = "prefer".into();
+        let saved = sanitize_connection(pg).unwrap();
+        assert!(saved.ssl_cert_path.is_empty() && saved.ssl_key_path.is_empty());
     }
 
     #[test]
@@ -816,10 +965,15 @@ mod tests {
         assert!(sanitize_connection(entry(Driver::Sqlite)).is_err());
         let mut lite = entry(Driver::Sqlite);
         lite.file_path = "/tmp/app.db".into();
+        lite.password_source = PasswordSource::Command;
+        lite.password_command = "echo hi".into();
+        lite.ssl_ca_path = "/tmp/ca.pem".into();
         let lite = sanitize_connection(lite).unwrap();
         assert_eq!(lite.name, "app");
         assert!(lite.user.is_empty());
         assert!(!lite.save_password);
+        assert_eq!(lite.password_source, PasswordSource::Password);
+        assert!(lite.password_command.is_empty() && lite.ssl_ca_path.is_empty());
     }
 
     #[test]

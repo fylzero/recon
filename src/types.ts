@@ -2,7 +2,8 @@ import type { WireNode } from "./filters/compile";
 import type { FilterKind } from "./filters/model";
 
 export type Driver = "mysql" | "postgres" | "sqlite";
-export type SslMode = "disable" | "prefer" | "require";
+export type SslMode = "disable" | "prefer" | "require" | "verify-ca" | "verify-full";
+export type PasswordSource = "password" | "aws-iam" | "command";
 
 export const DRIVER_OPTIONS: { id: Driver; label: string; defaultPort: number }[] = [
   { id: "mysql", label: "MySQL", defaultPort: 3306 },
@@ -71,6 +72,13 @@ export interface ConnectionEntry {
   headerColor: string;
   savePassword: boolean;
   cleartextAuth?: boolean;
+  passwordSource?: PasswordSource;
+  awsRegion?: string;
+  awsProfile?: string;
+  passwordCommand?: string;
+  sslCaPath?: string;
+  sslCertPath?: string;
+  sslKeyPath?: string;
   ssh?: SshTunnel;
 }
 

@@ -2374,6 +2374,11 @@ button.link-button:hover:not(:disabled) {
   margin: 0;
 }
 
+.connection-form .code-input {
+  font-family: var(--font-code);
+  font-size: 12px;
+}
+
 .auth-prompt {
   display: flex;
   flex-direction: column;

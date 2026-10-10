@@ -1,3 +1,4 @@
+pub mod credentials;
 pub mod dump;
 pub mod filter;
 pub mod mysql;
@@ -924,6 +925,7 @@ pub fn dialect(driver: Driver) -> &'static dyn Dialect {
     }
 }
 
+#[derive(Clone)]
 pub enum Pool {
     MySql(sqlx::MySqlPool),
     Postgres(sqlx::PgPool),
@@ -931,6 +933,15 @@ pub enum Pool {
 }
 
 impl Pool {
+    /// Connections the pool opens from now on sign in with `password`.
+    pub fn refresh_password(&self, target: &ConnectionEntry, password: &str) {
+        match self {
+            Pool::MySql(pool) => pool.set_connect_options(mysql::options(target, Some(password))),
+            Pool::Postgres(pool) => pool.set_connect_options(postgres::options(target, Some(password))),
+            Pool::Sqlite(_) => {}
+        }
+    }
+
     pub async fn close(&self) {
         match self {
             Pool::MySql(pool) => pool.close().await,
@@ -1160,6 +1171,16 @@ pub struct Session {
     pub columns: Mutex<HashMap<(String, String), Arc<Vec<ColumnDetail>>>>,
     /// Backend ids of browse queries that can be cancelled, by request id.
     pub running: tokio::sync::Mutex<HashMap<String, i64>>,
+    /// Keeps the pool's fetched password from expiring, for IAM and command sources.
+    pub refresher: Option<tauri::async_runtime::JoinHandle<()>>,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        if let Some(refresher) = &self.refresher {
+            refresher.abort();
+        }
+    }
 }
 
 impl Session {
@@ -1211,6 +1232,9 @@ impl Session {
     }
 
     pub async fn close(&self) {
+        if let Some(refresher) = &self.refresher {
+            refresher.abort();
+        }
         if let Some(conn) = self.query_conn.lock().await.take() {
             conn.close().await;
         }

@@ -67,11 +67,21 @@ pub struct StatementResult {
     pub error: Option<String>,
 }
 
-fn resolve_password(entry: &ConnectionEntry, password: Option<String>) -> Result<Option<String>, String> {
+/**
+ * A typed password wins over the saved one. Connections with an IAM or
+ * command password source get a fresh one every time instead.
+ */
+async fn password_for(entry: &ConnectionEntry, password: Option<String>) -> Result<Option<String>, String> {
+    if entry.driver == Driver::Sqlite {
+        return Ok(None);
+    }
+    if entry.password_source.is_fetched() {
+        return db::credentials::fetch(entry).await.map(Some);
+    }
     if let Some(password) = password.filter(|value| !value.is_empty()) {
         return Ok(Some(password));
     }
-    if entry.driver == Driver::Sqlite || entry.id.is_empty() || !entry.save_password {
+    if entry.id.is_empty() || !entry.save_password {
         return Ok(None);
     }
     secrets::get(&entry.id)
@@ -221,7 +231,7 @@ pub async fn test_connection(
     ssh_password: Option<String>,
 ) -> Result<String, String> {
     let entry = sanitize_connection(connection)?;
-    let password = resolve_password(&entry, password)?;
+    let password = password_for(&entry, password).await?;
     let prompter = Prompter::interactive(&app, entry.name.clone());
     let (target, tunnel) = open_tunnel(&entry, ssh_secret, ssh_password, &prompter).await?;
     let outcome = match target.driver {
@@ -262,7 +272,7 @@ pub async fn connect(
             .ok_or_else(|| "Connection not found".to_string())?
     };
     let key = session_id.filter(|id| !id.is_empty()).unwrap_or(connection_id);
-    let password = resolve_password(&entry, password)?;
+    let password = password_for(&entry, password).await?;
     if let Some(previous) = sessions.remove(&key).await {
         previous.close().await;
         results.remove_connection(&key);
@@ -274,6 +284,24 @@ pub async fn connect(
         stale.close().await;
     }
     Ok(info)
+}
+
+/**
+ * Fetches a new password before the last one expires, so connections the
+ * pool opens later can still sign in. The token is signed for `entry`, the
+ * real server, while the pool connects to `target`, which may be a tunnel.
+ * A failed fetch keeps the old password, and the reconnect that follows if
+ * it expires fetches again.
+ */
+fn spawn_refresher(entry: ConnectionEntry, target: ConnectionEntry, pool: Pool) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(db::credentials::REFRESH_INTERVAL).await;
+            if let Ok(password) = db::credentials::fetch(&entry).await {
+                pool.refresh_password(&target, &password);
+            }
+        }
+    })
 }
 
 /**
@@ -308,6 +336,10 @@ async fn open_session(
             return Err(err);
         }
     };
+    let refresher = entry
+        .password_source
+        .is_fetched()
+        .then(|| spawn_refresher(entry.clone(), target, opened.pool.clone()));
     let session = Session {
         name: entry.name.clone(),
         driver: entry.driver,
@@ -322,6 +354,7 @@ async fn open_session(
         tunnel,
         columns: Mutex::new(HashMap::new()),
         running: tokio::sync::Mutex::new(HashMap::new()),
+        refresher,
     };
     let dialect = dialect(session.driver);
     let setup = async {
@@ -363,8 +396,9 @@ async fn open_session(
 /**
  * Re-reads the saved connection so edits made since connecting apply, and
  * falls back to the password typed for the stale session when none is saved.
+ * Fetched passwords are fetched again, since the old one may have expired.
  */
-fn reopen_credentials(app: &AppHandle, stale: &Session) -> Result<(ConnectionEntry, Option<String>), String> {
+async fn reopen_credentials(app: &AppHandle, stale: &Session) -> Result<(ConnectionEntry, Option<String>), String> {
     let entry = {
         let state = app.state::<AppState>();
         let data = state.data.lock().map_err(|err| err.to_string())?;
@@ -372,7 +406,10 @@ fn reopen_credentials(app: &AppHandle, stale: &Session) -> Result<(ConnectionEnt
             .cloned()
             .unwrap_or_else(|| stale.entry.clone())
     };
-    let saved = resolve_password(&entry, None)?;
+    let saved = password_for(&entry, None).await?;
+    if entry.password_source.is_fetched() {
+        return Ok((entry, saved));
+    }
     Ok((entry, saved.or_else(|| stale.password.clone())))
 }
 
@@ -383,8 +420,12 @@ async fn rebuild(
     password: Option<String>,
     prompter: &Prompter,
 ) -> Result<(Arc<Session>, SessionInfo), String> {
-    let (entry, saved) = reopen_credentials(app, stale)?;
-    let password = password.filter(|value| !value.is_empty()).or(saved);
+    let (entry, saved) = reopen_credentials(app, stale).await?;
+    let password = if entry.password_source.is_fetched() {
+        saved
+    } else {
+        password.filter(|value| !value.is_empty()).or(saved)
+    };
     let reuse = reusable_tunnel(stale, &entry);
     let (session, info) = open_session(entry, password, &stale.namespace(), prompter, reuse).await?;
     match app.state::<SessionStore>().replace(connection_id, stale, session).await {
