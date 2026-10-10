@@ -108,9 +108,11 @@ mod tests {
     use super::*;
     use crate::models::Driver;
 
+    const HOST: &str = "db.example.com";
+
     fn entry(source: PasswordSource) -> ConnectionEntry {
         let mut entry: ConnectionEntry = serde_json::from_value(serde_json::json!({
-            "name": "rds", "driver": "postgres", "host": "db.abc.us-east-1.rds.amazonaws.com",
+            "name": "rds", "driver": "postgres", "host": HOST,
             "port": 5432, "user": "app", "awsRegion": "us-east-1",
         }))
         .unwrap();
@@ -124,7 +126,7 @@ mod tests {
         let mut iam = entry(PasswordSource::AwsIam);
         assert_eq!(
             aws_args(&iam).join(" "),
-            "rds generate-db-auth-token --hostname db.abc.us-east-1.rds.amazonaws.com --port 5432 --username app --region us-east-1"
+            format!("rds generate-db-auth-token --hostname {HOST} --port 5432 --username app --region us-east-1")
         );
         iam.aws_profile = "prod-sso".into();
         assert!(aws_args(&iam).join(" ").ends_with("--region us-east-1 --profile prod-sso"));
@@ -134,7 +136,7 @@ mod tests {
     async fn uses_what_the_command_prints() {
         let mut cmd = entry(PasswordSource::Command);
         cmd.password_command = "printf '  token-for-%s@%s:%s\\n' \"$RECON_DB_USER\" \"$RECON_DB_HOST\" \"$RECON_DB_PORT\"".into();
-        assert_eq!(fetch(&cmd).await.unwrap(), "token-for-app@db.abc.us-east-1.rds.amazonaws.com:5432");
+        assert_eq!(fetch(&cmd).await.unwrap(), format!("token-for-app@{HOST}:5432"));
     }
 
     #[tokio::test]
