@@ -6,6 +6,13 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.7.1",
+    date: "October 10, 2026",
+    notes: [
+      "Turning on options that make the New Connection window taller, such as a client certificate or an SSH tunnel, no longer pushes its top and bottom off the screen with no way to reach them. When a window is taller than the screen, the fields scroll and the title and buttons stay put. This applies to every window.",
+    ],
+  },
+  {
     version: "1.7.0",
     date: "October 9, 2026",
     notes: [

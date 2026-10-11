@@ -330,6 +330,9 @@ button.commit:hover:not(:disabled) {
 
 .modal {
   width: min(28rem, calc(100vw - 2rem));
+  max-height: calc(100vh - 2rem);
+  display: flex;
+  flex-direction: column;
   border: 1px solid var(--border);
   background: var(--bg-raised);
   border-radius: 12px;
@@ -354,6 +357,12 @@ button.commit:hover:not(:disabled) {
   display: flex;
   flex-direction: column;
   gap: 0.65rem;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* Room so focus outlines on edge fields aren't clipped by the scroll container. */
+  margin: -2px;
+  padding: 2px;
 }
 
 .modal-label {
