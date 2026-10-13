@@ -61,7 +61,7 @@ const sslKeyPath = ref(initial?.sslKeyPath ?? "");
 const useClientCert = ref(Boolean(initial?.sslCertPath));
 const groupId = ref<string>(formState.value?.groupId ?? "");
 const colorPicked = ref(Boolean(initial?.headerColor));
-const headerColor = ref(initial?.headerColor || groupColor());
+const headerColor = ref(initial?.headerColor || DEFAULT_HEADER_COLOR);
 const hasSavedPassword = ref(false);
 
 const initialSsh = initial?.ssh ?? defaultSshTunnel();
@@ -208,16 +208,6 @@ const passwordPlaceholder = computed(() => {
     return "Asked for each time you connect";
   }
   return hasSavedPassword.value ? "Saved in Keychain" : "Password";
-});
-
-function groupColor() {
-  return groups.value.find((group) => group.id === groupId.value)?.headerColor || DEFAULT_HEADER_COLOR;
-}
-
-watch(groupId, () => {
-  if (!colorPicked.value) {
-    headerColor.value = groupColor();
-  }
 });
 
 watch(driver, (next, previous) => {
@@ -404,7 +394,7 @@ function buildEntry(): ConnectionEntry {
     database: isSqlite.value ? "" : database.value.trim(),
     filePath: isSqlite.value ? filePath.value.trim() : "",
     sslMode: sslMode.value,
-    headerColor: colorPicked.value ? headerColor.value : "",
+    headerColor: !groupId.value && colorPicked.value ? headerColor.value : "",
     savePassword: typesPassword.value && savePassword.value,
     cleartextAuth: usesCleartext.value,
     passwordSource: isSqlite.value ? "password" : passwordSource.value,
@@ -889,7 +879,7 @@ async function submit(connectAfter: boolean) {
             </option>
           </select>
         </label>
-        <div class="modal-label">
+        <div v-if="!groupId" class="modal-label">
           <span class="muted tiny">Color</span>
           <div class="color-choice">
             <label class="color-picker">

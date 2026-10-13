@@ -12,6 +12,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       "Drag connection tabs left or right to put them in any order. The tab you drag becomes the active one, and each tab keeps its place in the grid, scroll position, and open queries as it moves. The Connections, Settings, and Changelog tabs stay where they are.",
       "Clearing every filter no longer leaves a blank band above the table. The filter bar shrinks to its buttons until you add a filter.",
       "MySQL text that uses a binary collation, such as the names from SHOW DATABASES or SELECT User FROM mysql.user, shows as text instead of hex like 0x726F6F74. Binary columns that hold readable text show it as text too, and other binary values still show as hex.",
+      "The Color option in the connection window only appears for connections that aren't in a group, since connections in a group always use the group's color. It no longer starts out showing the group's color, which made it look like it would change the group.",
     ],
   },
   {
