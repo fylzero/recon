@@ -6,6 +6,13 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.8.1",
+    date: "October 13, 2026",
+    notes: [
+      "Editing a row in a PostgreSQL table and saving no longer moves it to the bottom of the table. Tables with a primary key now list rows in primary-key order when no sort is chosen, and use the key to break ties when sorting by another column, so rows keep their place after edits and no longer skip or repeat between pages. Exports use the same order.",
+    ],
+  },
+  {
     version: "1.8.0",
     date: "October 13, 2026",
     notes: [

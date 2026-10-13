@@ -1146,26 +1146,53 @@ async fn filtered_select(
     Ok(statement)
 }
 
-/** The filtered `SELECT *` with the request's sort, but no LIMIT. */
-async fn sorted_select(session: &Session, request: &BrowseRequest) -> Result<Fragment, String> {
-    let dialect = dialect(session.driver);
-    let mut statement = filtered_select(session, request, "*").await?;
-    if let Some(column) = request
-        .order_by
-        .as_deref()
-        .filter(|column| !column.is_empty())
-    {
-        let columns = table_columns(session, &request.namespace, &request.table).await?;
+/**
+ * The ORDER BY for a browse: the chosen column, then the primary key so rows
+ * keep a stable order across pages and edits. Without one, Postgres returns
+ * rows in storage order, and an UPDATE moves the row to the end.
+ */
+fn order_clause(
+    dialect: &dyn db::Dialect,
+    columns: &[ColumnDetail],
+    order_by: Option<&str>,
+    direction: Option<db::SortDirection>,
+) -> Result<Option<String>, String> {
+    let direction = direction.unwrap_or(db::SortDirection::Asc).sql();
+    let mut keys = Vec::new();
+    if let Some(column) = order_by.filter(|column| !column.is_empty()) {
         if !columns.iter().any(|known| known.name == column) {
             return Err(format!(
                 "Can't sort by “{column}” because the column no longer exists. Refresh the table."
             ));
         }
-        statement.push_sql(format!(
-            " ORDER BY {} {}",
-            dialect.quote_ident(column),
-            request.order_dir.unwrap_or(db::SortDirection::Asc).sql()
-        ));
+        keys.push(column);
+    }
+    for column in columns.iter().filter(|column| column.primary_key) {
+        if !keys.contains(&column.name.as_str()) {
+            keys.push(&column.name);
+        }
+    }
+    if keys.is_empty() {
+        return Ok(None);
+    }
+    let keys: Vec<String> = keys
+        .iter()
+        .map(|key| format!("{} {direction}", dialect.quote_ident(key)))
+        .collect();
+    Ok(Some(format!(" ORDER BY {}", keys.join(", "))))
+}
+
+/** The filtered `SELECT *` with the request's sort, but no LIMIT. */
+async fn sorted_select(session: &Session, request: &BrowseRequest) -> Result<Fragment, String> {
+    let mut statement = filtered_select(session, request, "*").await?;
+    let columns = table_columns(session, &request.namespace, &request.table).await?;
+    if let Some(order) = order_clause(
+        dialect(session.driver),
+        &columns,
+        request.order_by.as_deref(),
+        request.order_dir,
+    )? {
+        statement.push_sql(order);
     }
     Ok(statement)
 }
@@ -1913,5 +1940,59 @@ mod tests {
         assert_eq!(pick_namespace(&items, "", &system, "shop"), "shop");
         assert_eq!(pick_namespace(&items, "", &system, ""), "app");
         assert_eq!(pick_namespace(&[], "", &system, ""), "");
+    }
+
+    fn column(name: &str, primary_key: bool) -> ColumnDetail {
+        ColumnDetail {
+            name: name.into(),
+            data_type: "text".into(),
+            nullable: true,
+            default_value: None,
+            primary_key,
+            extra: String::new(),
+            filter_kind: filter::FilterKind::Other,
+            enum_values: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn orders_browses_by_the_primary_key_as_a_tiebreaker() {
+        let postgres = dialect(Driver::Postgres);
+        let columns = [
+            column("tenant", true),
+            column("status", false),
+            column("id", true),
+        ];
+        let order = |by, dir| order_clause(postgres, &columns, by, dir).unwrap();
+
+        assert_eq!(
+            order(None, None).as_deref(),
+            Some(" ORDER BY \"tenant\" ASC, \"id\" ASC")
+        );
+        assert_eq!(
+            order(Some(""), None).as_deref(),
+            Some(" ORDER BY \"tenant\" ASC, \"id\" ASC")
+        );
+        assert_eq!(
+            order(Some("status"), Some(db::SortDirection::Desc)).as_deref(),
+            Some(" ORDER BY \"status\" DESC, \"tenant\" DESC, \"id\" DESC")
+        );
+        assert_eq!(
+            order(Some("id"), Some(db::SortDirection::Desc)).as_deref(),
+            Some(" ORDER BY \"id\" DESC, \"tenant\" DESC")
+        );
+    }
+
+    #[test]
+    fn leaves_tables_without_a_primary_key_unordered() {
+        let mysql = dialect(Driver::Mysql);
+        let columns = [column("name", false), column("score", false)];
+
+        assert_eq!(order_clause(mysql, &columns, None, None), Ok(None));
+        assert_eq!(
+            order_clause(mysql, &columns, Some("score"), None),
+            Ok(Some(" ORDER BY `score` ASC".into()))
+        );
+        assert!(order_clause(mysql, &columns, Some("gone"), None).is_err());
     }
 }
