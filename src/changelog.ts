@@ -10,6 +10,7 @@ export const CHANGELOG: ChangelogRelease[] = [
     date: "October 13, 2026",
     notes: [
       "Drag connection tabs left or right to put them in any order. The tab you drag becomes the active one, and each tab keeps its place in the grid, scroll position, and open queries as it moves. The Connections, Settings, and Changelog tabs stay where they are.",
+      "Clearing every filter no longer leaves a blank band above the table. The filter bar shrinks to its buttons until you add a filter.",
     ],
   },
   {

@@ -245,6 +245,7 @@ defineExpose({ focus, add, reveal });
   <section
     ref="panel"
     class="filter-panel"
+    :class="{ 'is-empty': !root.children.length && !error }"
     aria-label="Filters"
     :style="maxHeight ? { maxHeight: `${maxHeight}px` } : undefined"
     @keydown="onKeydown"

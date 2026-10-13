@@ -3966,6 +3966,15 @@ button.view-tab.active:hover:not(:disabled) {
   background: #10141a;
 }
 
+/* An empty panel is only the button row. The min-height otherwise leaves a blank band above it. */
+.filter-panel.is-empty {
+  min-height: 0;
+}
+
+.filter-panel.is-empty .filter-panel-body {
+  display: none;
+}
+
 .filter-panel-loading {
   display: flex;
   align-items: center;
