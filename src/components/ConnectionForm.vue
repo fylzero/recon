@@ -93,6 +93,19 @@ const saving = ref(false);
 const testResult = ref<{ ok: boolean; text: string } | null>(null);
 const formError = ref("");
 const nameInput = ref<HTMLInputElement | null>(null);
+const testResultEl = ref<HTMLElement | null>(null);
+const formErrorEl = ref<HTMLElement | null>(null);
+
+watch(
+  [testResult, formError],
+  ([result, error], [prevResult, prevError]) => {
+    const errorAppeared = error && error !== prevError;
+    const resultAppeared = result && result !== prevResult;
+    const el = errorAppeared ? formErrorEl.value : resultAppeared ? testResultEl.value : null;
+    el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  },
+  { flush: "post" },
+);
 
 const isSqlite = computed(() => driver.value === "sqlite");
 const title = computed(() => (editing ? "Edit connection" : "New connection"));
@@ -893,13 +906,14 @@ async function submit(connectAfter: boolean) {
 
       <p
         v-if="testResult"
+        ref="testResultEl"
         class="test-result"
         :class="testResult.ok ? 'good' : 'bad'"
         role="status"
       >
         {{ testResult.text }}
       </p>
-      <p v-if="formError" class="settings-error">{{ formError }}</p>
+      <p v-if="formError" ref="formErrorEl" class="settings-error">{{ formError }}</p>
       <button type="submit" hidden />
     </form>
 
