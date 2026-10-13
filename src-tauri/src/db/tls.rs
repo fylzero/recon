@@ -27,8 +27,12 @@ impl<'a> Location<'a> {
         }
         if let Some(rest) = lower.strip_prefix("s3://") {
             return match rest.split_once('/') {
-                Some((bucket, key)) if !bucket.is_empty() && !key.is_empty() => Ok(Location::S3(value)),
-                _ => Err(format!("{value} isn't a full S3 location. Use s3://bucket/path/to/file.pem.")),
+                Some((bucket, key)) if !bucket.is_empty() && !key.is_empty() => {
+                    Ok(Location::S3(value))
+                }
+                _ => Err(format!(
+                    "{value} isn't a full S3 location. Use s3://bucket/path/to/file.pem."
+                )),
             };
         }
         Ok(Location::File(value))
@@ -76,7 +80,11 @@ async fn read(entry: &ConnectionEntry, value: &str, what: &str) -> Result<Option
             if !entry.aws_region.is_empty() {
                 args.extend(["--region".to_string(), entry.aws_region.clone()]);
             }
-            run_tool(&mut aws_command(args), &format!("Reading the {what} from S3")).await?
+            run_tool(
+                &mut aws_command(args),
+                &format!("Reading the {what} from S3"),
+            )
+            .await?
         }
     };
     check_pem(bytes, what, value).map(Some)
@@ -100,13 +108,24 @@ mod tests {
 
     #[test]
     fn parses_locations() {
-        assert_eq!(Location::parse("~/certs/ca.pem"), Ok(Location::File("~/certs/ca.pem")));
+        assert_eq!(
+            Location::parse("~/certs/ca.pem"),
+            Ok(Location::File("~/certs/ca.pem"))
+        );
         assert_eq!(
             Location::parse("https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem"),
-            Ok(Location::Https("https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem"))
+            Ok(Location::Https(
+                "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem"
+            ))
         );
-        assert_eq!(Location::parse("s3://team-certs/db/ca.pem"), Ok(Location::S3("s3://team-certs/db/ca.pem")));
-        assert_eq!(Location::parse("HTTP://example.com/ca.pem").unwrap_err(), HTTP_NOT_ALLOWED);
+        assert_eq!(
+            Location::parse("s3://team-certs/db/ca.pem"),
+            Ok(Location::S3("s3://team-certs/db/ca.pem"))
+        );
+        assert_eq!(
+            Location::parse("HTTP://example.com/ca.pem").unwrap_err(),
+            HTTP_NOT_ALLOWED
+        );
         assert!(Location::parse("s3://team-certs").is_err());
         assert!(Location::parse("s3://team-certs/").is_err());
         assert!(Location::parse("s3:///ca.pem").is_err());
@@ -119,11 +138,16 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let pem = dir.join("ca.pem");
         let junk = dir.join("junk.txt");
-        std::fs::write(&pem, "-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----\n").unwrap();
+        std::fs::write(
+            &pem,
+            "-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
         std::fs::write(&junk, "<html>not found</html>").unwrap();
 
         let mut entry: ConnectionEntry =
-            serde_json::from_value(serde_json::json!({"name": "db", "driver": "postgres"})).unwrap();
+            serde_json::from_value(serde_json::json!({"name": "db", "driver": "postgres"}))
+                .unwrap();
         entry.ssl_ca_path = pem.to_string_lossy().into_owned();
         let material = load(&entry).await.unwrap();
         assert!(material.ca.is_some() && material.cert.is_none() && material.key.is_none());
@@ -131,7 +155,10 @@ mod tests {
         entry.ssl_ca_path = junk.to_string_lossy().into_owned();
         assert!(load(&entry).await.unwrap_err().contains("isn't a PEM file"));
         entry.ssl_ca_path = dir.join("missing.pem").to_string_lossy().into_owned();
-        assert!(load(&entry).await.unwrap_err().starts_with("Could not read the CA certificate"));
+        assert!(load(&entry)
+            .await
+            .unwrap_err()
+            .starts_with("Could not read the CA certificate"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -49,7 +49,12 @@ impl TransferStore {
     }
 
     fn cancel(&self, transfer_id: &str) {
-        if let Some(flag) = self.flags.lock().ok().and_then(|flags| flags.get(transfer_id).cloned()) {
+        if let Some(flag) = self
+            .flags
+            .lock()
+            .ok()
+            .and_then(|flags| flags.get(transfer_id).cloned())
+        {
             flag.store(true, Ordering::Relaxed);
         }
     }
@@ -81,7 +86,11 @@ pub(crate) struct Throttle(pub(crate) Option<Instant>);
 
 impl Throttle {
     pub(crate) fn ready(&mut self, force: bool) -> bool {
-        if force || self.0.is_none_or(|last| last.elapsed() >= PROGRESS_INTERVAL) {
+        if force
+            || self
+                .0
+                .is_none_or(|last| last.elapsed() >= PROGRESS_INTERVAL)
+        {
             self.0 = Some(Instant::now());
             return true;
         }
@@ -221,14 +230,23 @@ async fn write_dump(
     header: Option<Header<'_>>,
 ) -> Result<(DumpSummary, u64), String> {
     let partial = sibling(path, "part");
-    let body = if header.is_some() { sibling(path, "body.part") } else { partial.clone() };
-    let file = File::create(&body).map_err(|err| format!("Could not create {}: {err}", file_name(path)))?;
+    let body = if header.is_some() {
+        sibling(path, "body.part")
+    } else {
+        partial.clone()
+    };
+    let file = File::create(&body)
+        .map_err(|err| format!("Could not create {}: {err}", file_name(path)))?;
     let mut sink = Sink::new(file, gzip);
 
     let outcome = async {
         let mut conn = session.pool.detached().await?;
         let result = async {
-            let version = first_text(&conn.run(dialect(session.driver).version_sql(), 1, None).await?);
+            let version = first_text(
+                &conn
+                    .run(dialect(session.driver).version_sql(), 1, None)
+                    .await?,
+            );
             let server = format!("{} {version}", session.driver.label());
             let mut throttle = Throttle(None);
             let mut current = String::new();
@@ -259,15 +277,20 @@ async fn write_dump(
     .await;
 
     let finished = outcome.and_then(|(summary, server)| {
-        sink.finish().map_err(|err| format!("Could not write the export file: {err}"))?;
+        sink.finish()
+            .map_err(|err| format!("Could not write the export file: {err}"))?;
         if let Some(header) = header {
             prepend_header(&partial, &body, &header(&server, &summary), gzip)?;
         }
-        fs::rename(&partial, path).map_err(|err| format!("Could not save {}: {err}", file_name(path)))?;
+        fs::rename(&partial, path)
+            .map_err(|err| format!("Could not save {}: {err}", file_name(path)))?;
         Ok(summary)
     });
     match finished {
-        Ok(summary) => Ok((summary, fs::metadata(path).map(|meta| meta.len()).unwrap_or(0))),
+        Ok(summary) => Ok((
+            summary,
+            fs::metadata(path).map(|meta| meta.len()).unwrap_or(0),
+        )),
         Err(err) => {
             let _ = fs::remove_file(&partial);
             let _ = fs::remove_file(&body);
@@ -299,7 +322,9 @@ pub async fn export_sql(
                     .iter()
                     .find(|table| &table.name == name)
                     .map(dump_table)
-                    .ok_or_else(|| format!("{name} no longer exists. Refresh the table list and try again."))
+                    .ok_or_else(|| {
+                        format!("{name} no longer exists. Refresh the table list and try again.")
+                    })
             })
             .collect::<Result<_, _>>()?,
     };
@@ -310,7 +335,16 @@ pub async fn export_sql(
     let transfer = transfers.start(&transfer_id);
     if let Some(options) = &request.tabular {
         let path = Path::new(&request.path);
-        return tabular_commands::export_tables(&app, &session, &transfer, &request.namespace, &tables, options, path).await;
+        return tabular_commands::export_tables(
+            &app,
+            &session,
+            &transfer,
+            &request.namespace,
+            &tables,
+            options,
+            path,
+        )
+        .await;
     }
     let options = DumpOptions {
         structure: request.structure,
@@ -331,11 +365,18 @@ pub async fn export_sql(
         None,
     )
     .await?;
-    Ok(ExportResult { summary, bytes, path: request.path })
+    Ok(ExportResult {
+        summary,
+        bytes,
+        path: request.path,
+    })
 }
 
 fn dump_table(table: &TableInfo) -> DumpTable {
-    DumpTable { name: table.name.clone(), view: table.kind == "view" }
+    DumpTable {
+        name: table.name.clone(),
+        view: table.kind == "view",
+    }
 }
 
 /**
@@ -354,9 +395,18 @@ pub async fn backup_database(
     path: String,
 ) -> Result<ExportResult, String> {
     let session = sessions.get(&connection_id).await?;
-    let tables: Vec<DumpTable> = tables_in(session.clone(), &namespace).await?.iter().map(dump_table).collect();
+    let tables: Vec<DumpTable> = tables_in(session.clone(), &namespace)
+        .await?
+        .iter()
+        .map(dump_table)
+        .collect();
     let transfer = transfers.start(&transfer_id);
-    let options = DumpOptions { structure: true, data: true, drop_tables: true, routines: true };
+    let options = DumpOptions {
+        structure: true,
+        data: true,
+        drop_tables: true,
+        routines: true,
+    };
     let driver = session.driver;
     let created_at = restore::utc_timestamp();
     let header = |server: &str, summary: &DumpSummary| {
@@ -382,7 +432,11 @@ pub async fn backup_database(
         Some(&header),
     )
     .await?;
-    Ok(ExportResult { summary, bytes, path })
+    Ok(ExportResult {
+        summary,
+        bytes,
+        path,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -478,17 +532,31 @@ pub(crate) fn open_sql_file(path: &str) -> Result<SqlFile, String> {
     let file = File::open(path).map_err(|err| format!("Could not open {name}: {err}"))?;
     let total_bytes = file.metadata().map(|meta| meta.len()).unwrap_or(0);
     let read = Arc::new(AtomicU64::new(0));
-    let mut counted = BufReader::with_capacity(READ_BUFFER, Counting { inner: file, count: read.clone() });
+    let mut counted = BufReader::with_capacity(
+        READ_BUFFER,
+        Counting {
+            inner: file,
+            count: read.clone(),
+        },
+    );
     let gzipped = counted
         .fill_buf()
         .map_err(|err| format!("Could not read {name}: {err}"))?
         .starts_with(&[0x1f, 0x8b]);
     let reader: Box<dyn BufRead + Send> = if gzipped {
-        Box::new(BufReader::with_capacity(READ_BUFFER, MultiGzDecoder::new(counted)))
+        Box::new(BufReader::with_capacity(
+            READ_BUFFER,
+            MultiGzDecoder::new(counted),
+        ))
     } else {
         Box::new(counted)
     };
-    Ok(SqlFile { name, reader, read, total_bytes })
+    Ok(SqlFile {
+        name,
+        reader,
+        read,
+        total_bytes,
+    })
 }
 
 /// Runs every statement in `file` on `conn`, counting them in `executed`, and stops at the first error.
@@ -516,7 +584,14 @@ async fn run_sql_file(
                 return Err(IMPORT_CANCELLED.to_string());
             }
             let ran = if driver == Driver::Postgres && is_copy_from_stdin(&statement.sql) {
-                copy_from_stdin(conn, &statement.sql, &mut *file.reader, &mut splitter, transfer).await
+                copy_from_stdin(
+                    conn,
+                    &statement.sql,
+                    &mut *file.reader,
+                    &mut splitter,
+                    transfer,
+                )
+                .await
             } else {
                 conn.execute(&statement.sql).await.map(|_| ())
             };
@@ -601,7 +676,10 @@ pub async fn import_sql(
     let outcome = async {
         let mut conn = session.pool.detached().await?;
         let result = async {
-            if let Some(sql) = dialect(driver).use_namespace_sql(&namespace).filter(|_| !namespace.is_empty()) {
+            if let Some(sql) = dialect(driver)
+                .use_namespace_sql(&namespace)
+                .filter(|_| !namespace.is_empty())
+            {
                 conn.execute(&sql).await?;
             }
             run_sql_file(&app, &mut conn, driver, &transfer, &mut file, &mut executed).await
@@ -657,7 +735,13 @@ pub async fn restore_database(
     let started = Instant::now();
     let mut executed = 0u64;
 
-    let renamed = |err: String| if err == IMPORT_CANCELLED { RESTORE_CANCELLED.to_string() } else { err };
+    let renamed = |err: String| {
+        if err == IMPORT_CANCELLED {
+            RESTORE_CANCELLED.to_string()
+        } else {
+            err
+        }
+    };
     let outcome = async {
         let mut conn = session.pool.detached().await?;
         let result = if driver == Driver::Postgres {
@@ -674,7 +758,12 @@ pub async fn restore_database(
             if ran.is_err() {
                 let _ = conn.execute("ROLLBACK").await;
             }
-            ran.map_err(|err| format!("{}\n\nThe restore was rolled back, so nothing changed.", renamed(err)))
+            ran.map_err(|err| {
+                format!(
+                    "{}\n\nThe restore was rolled back, so nothing changed.",
+                    renamed(err)
+                )
+            })
         } else {
             let ran = async {
                 restore::reset_namespace(&mut conn, driver, &namespace).await?;
@@ -695,4 +784,3 @@ pub async fn restore_database(
     let sql = format!("-- Restored {} ({executed} statements)", file.name);
     finish_file_run(&session, &namespace, &sql, started, executed, outcome)
 }
-

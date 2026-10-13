@@ -24,7 +24,15 @@ const PROMPT_ROUNDS: usize = 8;
 const MAX_AUTH_STEPS: usize = 4;
 const ALSO_PASSWORD_LABEL: &str = "Server also asks for a password";
 /// Words in a keyboard-interactive prompt that mean it wants a code, not the password.
-const CODE_WORDS: [&str; 7] = ["code", "passcode", "token", "otp", "verification", "one-time", "option"];
+const CODE_WORDS: [&str; 7] = [
+    "code",
+    "passcode",
+    "token",
+    "otp",
+    "verification",
+    "one-time",
+    "option",
+];
 
 #[derive(Debug, Default)]
 pub struct Credentials {
@@ -104,9 +112,15 @@ impl client::Handler for HostKeyCheck {
      * Trust on first use, like OpenSSH's `StrictHostKeyChecking=accept-new`:
      * unknown hosts are recorded in ~/.ssh/known_hosts, changed keys are refused.
      */
-    async fn check_server_key(&mut self, server_key: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
+    async fn check_server_key(
+        &mut self,
+        server_key: &PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
         let PublicKeyOrCertificate::PublicKey { key, .. } = server_key else {
-            put(&self.rejection, "SSH host certificates are not supported yet.".into());
+            put(
+                &self.rejection,
+                "SSH host certificates are not supported yet.".into(),
+            );
             return Ok(false);
         };
         match known_hosts::check_known_hosts(&self.host, self.port, key) {
@@ -183,14 +197,19 @@ impl Drop for Tunnel {
     }
 }
 
-pub async fn open(entry: &ConnectionEntry, credentials: &Credentials, prompter: &Prompter) -> Result<Tunnel, String> {
+pub async fn open(
+    entry: &ConnectionEntry,
+    credentials: &Credentials,
+    prompter: &Prompter,
+) -> Result<Tunnel, String> {
     let ssh = &entry.ssh;
     let resolved = ssh_config::resolve(&ssh.host).await.unwrap_or_default();
-    let address = if resolved.hostname.is_empty() || resolved.hostname.eq_ignore_ascii_case(&ssh.host) {
-        ssh.host.clone()
-    } else {
-        resolved.hostname.clone()
-    };
+    let address =
+        if resolved.hostname.is_empty() || resolved.hostname.eq_ignore_ascii_case(&ssh.host) {
+            ssh.host.clone()
+        } else {
+            resolved.hostname.clone()
+        };
     let rejection = ErrorSlot::default();
     let handler = HostKeyCheck {
         host: address.clone(),
@@ -204,13 +223,26 @@ pub async fn open(entry: &ConnectionEntry, credentials: &Credentials, prompter: 
         ..Default::default()
     });
     let connecting = async {
-        let (mut handle, proxy) =
-            connect_session(ssh, &address, &resolved, config, handler, &rejection, prompter).await?;
-        authenticate(&mut handle, ssh, credentials, &resolved.identity_agent, prompter).await?;
+        let (mut handle, proxy) = connect_session(
+            ssh, &address, &resolved, config, handler, &rejection, prompter,
+        )
+        .await?;
+        authenticate(
+            &mut handle,
+            ssh,
+            credentials,
+            &resolved.identity_agent,
+            prompter,
+        )
+        .await?;
         Ok::<_, String>((handle, proxy))
     };
     let Some(connected) = within_connect_timeout(connecting, prompter).await else {
-        let through = if resolved.has_proxy() { " through its proxy" } else { "" };
+        let through = if resolved.has_proxy() {
+            " through its proxy"
+        } else {
+            ""
+        };
         return Err(format!(
             "Timed out connecting to the SSH server {}:{}{through}.",
             ssh.host, ssh.port
@@ -246,7 +278,10 @@ pub async fn open(entry: &ConnectionEntry, credentials: &Credentials, prompter: 
  * Runs `future` under the connect timeout, except that time spent in a
  * sign-in prompt doesn't count: the deadline moves while someone is typing.
  */
-async fn within_connect_timeout<T>(future: impl Future<Output = T>, prompter: &Prompter) -> Option<T> {
+async fn within_connect_timeout<T>(
+    future: impl Future<Output = T>,
+    prompter: &Prompter,
+) -> Option<T> {
     let mut future = std::pin::pin!(future);
     let mut seen = 0;
     prompter.busy_since(&mut seen);
@@ -294,8 +329,14 @@ async fn connect_session(
 
 fn connect_error(ssh: &SshTunnel, err: russh::Error) -> String {
     match err {
-        russh::Error::IO(io) => format!("Could not reach the SSH server {}:{}: {io}", ssh.host, ssh.port),
-        other => format!("SSH connection to {}:{} failed: {other}", ssh.host, ssh.port),
+        russh::Error::IO(io) => format!(
+            "Could not reach the SSH server {}:{}: {io}",
+            ssh.host, ssh.port
+        ),
+        other => format!(
+            "SSH connection to {}:{} failed: {other}",
+            ssh.host, ssh.port
+        ),
     }
 }
 
@@ -414,7 +455,10 @@ async fn authenticate(
             }
         };
     }
-    Err(format!("The SSH server {} kept asking for more sign-in steps.", ssh.host))
+    Err(format!(
+        "The SSH server {} kept asking for more sign-in steps.",
+        ssh.host
+    ))
 }
 
 /// Many servers only take passwords through keyboard-interactive, so that's tried next.
@@ -424,7 +468,11 @@ async fn password_login(
     password: &str,
     prompter: &Prompter,
 ) -> Result<Step, String> {
-    match handle.authenticate_password(user, password).await.map_err(auth_error)? {
+    match handle
+        .authenticate_password(user, password)
+        .await
+        .map_err(auth_error)?
+    {
         AuthResult::Failure {
             partial_success: false,
             remaining_methods,
@@ -463,7 +511,11 @@ async fn keyboard_interactive_login(
                 instructions,
                 prompts,
             } => {
-                let context = if instructions.trim().is_empty() { name } else { instructions };
+                let context = if instructions.trim().is_empty() {
+                    name
+                } else {
+                    instructions
+                };
                 let mut responses = Vec::with_capacity(prompts.len());
                 for prompt in &prompts {
                     let answer = match password {
@@ -486,11 +538,19 @@ async fn keyboard_interactive_login(
     Err("The SSH server kept asking for more information.".into())
 }
 
-async fn key_login(handle: &mut Handle<HostKeyCheck>, ssh: &SshTunnel, passphrase: Option<&str>) -> Result<Step, String> {
+async fn key_login(
+    handle: &mut Handle<HostKeyCheck>,
+    ssh: &SshTunnel,
+    passphrase: Option<&str>,
+) -> Result<Step, String> {
     let path = expand_home(&ssh.key_path);
     let key = load_secret_key(&path, passphrase).map_err(|err| match err {
-        russh::keys::Error::KeyIsEncrypted => "This SSH key is encrypted. Enter its passphrase.".to_string(),
-        russh::keys::Error::IO(io) => format!("Could not read the SSH key at {}: {io}", path.display()),
+        russh::keys::Error::KeyIsEncrypted => {
+            "This SSH key is encrypted. Enter its passphrase.".to_string()
+        }
+        russh::keys::Error::IO(io) => {
+            format!("Could not read the SSH key at {}: {io}", path.display())
+        }
         other => format!("Could not load the SSH key: {other}"),
     })?;
     let hash = if key.algorithm().is_rsa() {
@@ -499,7 +559,10 @@ async fn key_login(handle: &mut Handle<HostKeyCheck>, ssh: &SshTunnel, passphras
         None
     };
     let result = handle
-        .authenticate_publickey(ssh.user.as_str(), PrivateKeyWithHashAlg::new(Arc::new(key), hash))
+        .authenticate_publickey(
+            ssh.user.as_str(),
+            PrivateKeyWithHashAlg::new(Arc::new(key), hash),
+        )
         .await
         .map_err(auth_error)?;
     Ok(result.into())
@@ -514,11 +577,15 @@ async fn rsa_hash(handle: &Handle<HostKeyCheck>) -> Result<Option<russh::keys::H
 }
 
 /// `identity_agent` is the IdentityAgent socket from ~/.ssh/config, like 1Password's.
-async fn agent_login(handle: &mut Handle<HostKeyCheck>, user: &str, identity_agent: &str) -> Result<Step, String> {
+async fn agent_login(
+    handle: &mut Handle<HostKeyCheck>,
+    user: &str,
+    identity_agent: &str,
+) -> Result<Step, String> {
     let mut agent = if identity_agent.is_empty() {
-        AgentClient::connect_env()
-            .await
-            .map_err(|err| format!("Could not reach the SSH agent ({err}). Is SSH_AUTH_SOCK set?"))?
+        AgentClient::connect_env().await.map_err(|err| {
+            format!("Could not reach the SSH agent ({err}). Is SSH_AUTH_SOCK set?")
+        })?
     } else {
         AgentClient::connect_uds(expand_home(identity_agent))
             .await
@@ -540,7 +607,10 @@ async fn agent_login(handle: &mut Handle<HostKeyCheck>, user: &str, identity_age
         } else {
             None
         };
-        match handle.authenticate_publickey_with(user, key, hash, &mut agent).await {
+        match handle
+            .authenticate_publickey_with(user, key, hash, &mut agent)
+            .await
+        {
             Ok(AuthResult::Success) => return Ok(Step::Done),
             Ok(AuthResult::Failure {
                 partial_success: true,
@@ -596,7 +666,10 @@ async fn pipe(
     {
         Ok(channel) => channel,
         Err(err) => {
-            put(&last_error, format!("the server could not reach {host}:{port}: {err}"));
+            put(
+                &last_error,
+                format!("the server could not reach {host}:{port}: {err}"),
+            );
             return;
         }
     };
@@ -611,17 +684,32 @@ mod tests {
     #[test]
     fn expands_home_in_key_paths() {
         let home = std::env::var("HOME").unwrap();
-        assert_eq!(expand_home("~/.ssh/id_ed25519"), PathBuf::from(home).join(".ssh/id_ed25519"));
+        assert_eq!(
+            expand_home("~/.ssh/id_ed25519"),
+            PathBuf::from(home).join(".ssh/id_ed25519")
+        );
         assert_eq!(expand_home("/keys/id_rsa"), PathBuf::from("/keys/id_rsa"));
     }
 
     #[test]
     fn routes_the_next_sign_in_step() {
         use MethodKind::{KeyboardInteractive, Password, PublicKey};
-        assert_eq!(next_method(&[Password, KeyboardInteractive], true), NextMethod::Password);
-        assert_eq!(next_method(&[Password, KeyboardInteractive], false), NextMethod::KeyboardInteractive);
-        assert_eq!(next_method(&[KeyboardInteractive], true), NextMethod::KeyboardInteractive);
-        assert_eq!(next_method(&[Password], false), NextMethod::NeedsSavedPassword);
+        assert_eq!(
+            next_method(&[Password, KeyboardInteractive], true),
+            NextMethod::Password
+        );
+        assert_eq!(
+            next_method(&[Password, KeyboardInteractive], false),
+            NextMethod::KeyboardInteractive
+        );
+        assert_eq!(
+            next_method(&[KeyboardInteractive], true),
+            NextMethod::KeyboardInteractive
+        );
+        assert_eq!(
+            next_method(&[Password], false),
+            NextMethod::NeedsSavedPassword
+        );
         assert_eq!(next_method(&[PublicKey], true), NextMethod::Unsupported);
     }
 

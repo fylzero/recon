@@ -4,15 +4,15 @@ use std::sync::Mutex;
 
 use tauri::{AppHandle, State};
 
+use crate::db::tls;
 use crate::models::{
     sanitize_color, sanitize_font_family, sanitize_font_size, sanitize_list_font_family,
-    sanitize_notifications, AppData,
-    ConnectionEntry, ConnectionGroup, Driver, PasswordSource, PreferencesPatch, SavedQuery, SshAuth, SshTunnel,
-    DEFAULT_EDITOR_FONT_SIZE, DEFAULT_GRID_FONT_SIZE, DEFAULT_LIST_FONT_SIZE, DEFAULT_SSH_PORT,
-    MAX_AUTO_COLUMN_WIDTH_MAX, MAX_AUTO_COLUMN_WIDTH_MIN, PAGE_SIZE_MAX, PAGE_SIZE_MIN,
-    QUERY_ROW_LIMIT_MAX, QUERY_ROW_LIMIT_MIN, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
+    sanitize_notifications, AppData, ConnectionEntry, ConnectionGroup, Driver, PasswordSource,
+    PreferencesPatch, SavedQuery, SshAuth, SshTunnel, DEFAULT_EDITOR_FONT_SIZE,
+    DEFAULT_GRID_FONT_SIZE, DEFAULT_LIST_FONT_SIZE, DEFAULT_SSH_PORT, MAX_AUTO_COLUMN_WIDTH_MAX,
+    MAX_AUTO_COLUMN_WIDTH_MIN, PAGE_SIZE_MAX, PAGE_SIZE_MIN, QUERY_ROW_LIMIT_MAX,
+    QUERY_ROW_LIMIT_MIN, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
 };
-use crate::db::tls;
 use crate::{persist, query_log, secrets};
 
 const DEFAULT_GROUP_COLOR: &str = "#16323c";
@@ -52,7 +52,11 @@ fn connection_list_mut<'a>(
 }
 
 fn take_connection(data: &mut AppData, connection_id: &str) -> Option<ConnectionEntry> {
-    if let Some(index) = data.connections.iter().position(|entry| entry.id == connection_id) {
+    if let Some(index) = data
+        .connections
+        .iter()
+        .position(|entry| entry.id == connection_id)
+    {
         return Some(data.connections.remove(index));
     }
     for group in &mut data.groups {
@@ -68,7 +72,11 @@ fn take_connection(data: &mut AppData, connection_id: &str) -> Option<Connection
 }
 
 fn connection_location(data: &AppData, connection_id: &str) -> Option<(Option<String>, usize)> {
-    if let Some(index) = data.connections.iter().position(|entry| entry.id == connection_id) {
+    if let Some(index) = data
+        .connections
+        .iter()
+        .position(|entry| entry.id == connection_id)
+    {
         return Some((None, index));
     }
     data.groups.iter().find_map(|group| {
@@ -158,9 +166,13 @@ fn sanitize_password_source(entry: &mut ConnectionEntry) -> Result<(), String> {
 
 /// The AWS profile and region also tell the AWS CLI how to read certificates from S3.
 fn reads_from_s3(entry: &ConnectionEntry) -> bool {
-    [&entry.ssl_ca_path, &entry.ssl_cert_path, &entry.ssl_key_path]
-        .into_iter()
-        .any(|location| tls::is_s3(location))
+    [
+        &entry.ssl_ca_path,
+        &entry.ssl_cert_path,
+        &entry.ssl_key_path,
+    ]
+    .into_iter()
+    .any(|location| tls::is_s3(location))
 }
 
 fn sanitize_tls(entry: &mut ConnectionEntry) -> Result<(), String> {
@@ -174,7 +186,11 @@ fn sanitize_tls(entry: &mut ConnectionEntry) -> Result<(), String> {
         entry.ssl_cert_path.clear();
         entry.ssl_key_path.clear();
     }
-    for location in [&entry.ssl_ca_path, &entry.ssl_cert_path, &entry.ssl_key_path] {
+    for location in [
+        &entry.ssl_ca_path,
+        &entry.ssl_cert_path,
+        &entry.ssl_key_path,
+    ] {
         if !location.is_empty() {
             tls::Location::parse(location)?;
         }
@@ -264,7 +280,9 @@ fn sanitize_app_data(mut data: AppData) -> Result<AppData, String> {
     data.query_row_limit = data
         .query_row_limit
         .clamp(QUERY_ROW_LIMIT_MIN, QUERY_ROW_LIMIT_MAX);
-    data.sidebar_width = data.sidebar_width.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
+    data.sidebar_width = data
+        .sidebar_width
+        .clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
     data.max_auto_column_width = data
         .max_auto_column_width
         .clamp(MAX_AUTO_COLUMN_WIDTH_MIN, MAX_AUTO_COLUMN_WIDTH_MAX);
@@ -400,7 +418,11 @@ pub fn update_group(
 }
 
 #[tauri::command]
-pub fn delete_group(app: AppHandle, state: State<AppState>, group_id: String) -> Result<(), String> {
+pub fn delete_group(
+    app: AppHandle,
+    state: State<AppState>,
+    group_id: String,
+) -> Result<(), String> {
     let mut data = lock(&state)?;
     let index = data
         .groups
@@ -423,7 +445,11 @@ pub fn delete_group(app: AppHandle, state: State<AppState>, group_id: String) ->
 }
 
 #[tauri::command]
-pub fn toggle_group(app: AppHandle, state: State<AppState>, group_id: String) -> Result<bool, String> {
+pub fn toggle_group(
+    app: AppHandle,
+    state: State<AppState>,
+    group_id: String,
+) -> Result<bool, String> {
     let mut data = lock(&state)?;
     let group = find_group_mut(&mut data, &group_id)?;
     group.expanded = !group.expanded;
@@ -454,7 +480,8 @@ fn arrange_dashboard(data: &mut AppData, ids: Vec<String>) -> Result<(), String>
         let top_level = data.groups.iter().any(|group| &group.id == id)
             || data.connections.iter().any(|entry| &entry.id == id);
         if !top_level {
-            let entry = take_connection(data, id).ok_or_else(|| "Connection not found".to_string())?;
+            let entry =
+                take_connection(data, id).ok_or_else(|| "Connection not found".to_string())?;
             data.connections.push(entry);
         }
     }
@@ -560,7 +587,8 @@ pub fn remove_connection(
         let mut data = lock(&state)?;
         let removed = take_connection(&mut data, &connection_id)
             .ok_or_else(|| "Connection not found".to_string())?;
-        data.saved_queries.retain(|query| query.connection_id != connection_id);
+        data.saved_queries
+            .retain(|query| query.connection_id != connection_id);
         persist::save(&app, &data)?;
         removed
     };
@@ -613,7 +641,11 @@ pub fn save_query(
     if data.find_connection(&query.connection_id).is_none() {
         return Err("Connection not found".into());
     }
-    match data.saved_queries.iter_mut().find(|item| item.id == query.id) {
+    match data
+        .saved_queries
+        .iter_mut()
+        .find(|item| item.id == query.id)
+    {
         Some(existing) => *existing = query.clone(),
         None => data.saved_queries.push(query.clone()),
     }
@@ -862,8 +894,14 @@ mod tests {
         assert!(saved.password_command.is_empty());
 
         mysql.ssl_mode = "prefer".into();
-        assert_eq!(sanitize_connection(mysql.clone()).unwrap_err(), IAM_NEEDS_ENCRYPTION);
-        assert_eq!(sanitize_connection(with_tunnel(mysql)).unwrap_err(), IAM_NEEDS_ENCRYPTION);
+        assert_eq!(
+            sanitize_connection(mysql.clone()).unwrap_err(),
+            IAM_NEEDS_ENCRYPTION
+        );
+        assert_eq!(
+            sanitize_connection(with_tunnel(mysql)).unwrap_err(),
+            IAM_NEEDS_ENCRYPTION
+        );
 
         let mut postgres = entry(Driver::Postgres);
         postgres.password_source = PasswordSource::AwsIam;
@@ -890,7 +928,10 @@ mod tests {
         let mut pg = entry(Driver::Postgres);
         pg.ssl_mode = "verify-ca".into();
         pg.ssl_ca_path = "http://example.com/ca.pem".into();
-        assert_eq!(sanitize_connection(pg.clone()).unwrap_err(), tls::HTTP_NOT_ALLOWED);
+        assert_eq!(
+            sanitize_connection(pg.clone()).unwrap_err(),
+            tls::HTTP_NOT_ALLOWED
+        );
         pg.ssl_ca_path = "s3://team-certs".into();
         assert!(sanitize_connection(pg.clone()).is_err());
 
@@ -920,8 +961,14 @@ mod tests {
         let mut pg = entry(Driver::Postgres);
         pg.ssl_mode = "verify-full".into();
         pg.ssl_ca_path = " ~/certs/global-bundle.pem ".into();
-        assert_eq!(sanitize_connection(pg.clone()).unwrap().ssl_ca_path, "~/certs/global-bundle.pem");
-        assert_eq!(sanitize_connection(with_tunnel(pg.clone())).unwrap_err(), HOST_CHECK_THROUGH_TUNNEL);
+        assert_eq!(
+            sanitize_connection(pg.clone()).unwrap().ssl_ca_path,
+            "~/certs/global-bundle.pem"
+        );
+        assert_eq!(
+            sanitize_connection(with_tunnel(pg.clone())).unwrap_err(),
+            HOST_CHECK_THROUGH_TUNNEL
+        );
         pg.ssl_mode = "verify-ca".into();
         assert!(sanitize_connection(with_tunnel(pg.clone())).is_ok());
 
@@ -955,7 +1002,10 @@ mod tests {
         assert!(sanitize_connection(mysql.clone()).is_err());
         mysql.ssh.key_path = "~/.ssh/id_ed25519".into();
         mysql.ssh.also_password = true;
-        assert!(sanitize_connection(mysql.clone()).unwrap().ssh.uses_second_password());
+        assert!(sanitize_connection(mysql.clone())
+            .unwrap()
+            .ssh
+            .uses_second_password());
         mysql.ssh.auth = SshAuth::Password;
         assert!(!sanitize_connection(mysql).unwrap().ssh.also_password);
 
@@ -970,7 +1020,10 @@ mod tests {
         let mut mysql = entry(Driver::Mysql);
         mysql.cleartext_auth = true;
         mysql.ssl_mode = "prefer".into();
-        assert_eq!(sanitize_connection(mysql.clone()).unwrap_err(), CLEARTEXT_NEEDS_ENCRYPTION);
+        assert_eq!(
+            sanitize_connection(mysql.clone()).unwrap_err(),
+            CLEARTEXT_NEEDS_ENCRYPTION
+        );
         mysql.ssl_mode = "require".into();
         assert!(sanitize_connection(mysql.clone()).unwrap().cleartext_auth);
 
@@ -1039,8 +1092,14 @@ mod tests {
         data.connections.push(conn);
         assert_eq!(connection_location(&data, "c1"), Some((None, 0)));
         let taken = take_connection(&mut data, "c1").unwrap();
-        find_group_mut(&mut data, "g1").unwrap().connections.push(taken);
-        assert_eq!(connection_location(&data, "c1"), Some((Some("g1".into()), 0)));
+        find_group_mut(&mut data, "g1")
+            .unwrap()
+            .connections
+            .push(taken);
+        assert_eq!(
+            connection_location(&data, "c1"),
+            Some((Some("g1".into()), 0))
+        );
         assert!(data.connections.is_empty());
     }
 

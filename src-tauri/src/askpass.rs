@@ -56,8 +56,8 @@ pub struct Bridge {
 impl Bridge {
     pub fn start(prompter: Prompter) -> Result<Self, String> {
         let path = socket_path();
-        let listener =
-            UnixListener::bind(&path).map_err(|err| format!("Could not set up SSH sign-in prompts: {err}"))?;
+        let listener = UnixListener::bind(&path)
+            .map_err(|err| format!("Could not set up SSH sign-in prompts: {err}"))?;
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
         let token = uuid::Uuid::new_v4().simple().to_string();
         let last_error = Arc::new(Mutex::new(None));
@@ -72,7 +72,8 @@ impl Bridge {
 
     /// Environment for the child process so OpenSSH asks through Recon.
     pub fn env(&self) -> Result<Vec<(&'static str, String)>, String> {
-        let exe = std::env::current_exe().map_err(|err| format!("Could not find Recon's own executable: {err}"))?;
+        let exe = std::env::current_exe()
+            .map_err(|err| format!("Could not find Recon's own executable: {err}"))?;
         Ok(vec![
             ("SSH_ASKPASS", exe.to_string_lossy().into_owned()),
             ("SSH_ASKPASS_REQUIRE", "force".into()),
@@ -94,7 +95,12 @@ impl Drop for Bridge {
     }
 }
 
-async fn serve(listener: UnixListener, token: String, prompter: Prompter, last_error: Arc<Mutex<Option<String>>>) {
+async fn serve(
+    listener: UnixListener,
+    token: String,
+    prompter: Prompter,
+    last_error: Arc<Mutex<Option<String>>>,
+) {
     while let Ok((stream, _)) = listener.accept().await {
         let _ = answer(stream, &token, &prompter, &last_error).await;
     }
@@ -182,7 +188,9 @@ mod tests {
         let bridge = Bridge::start(Prompter::answering(Some("hunter2"))).unwrap();
         let env = bridge.env().unwrap();
         let socket = PathBuf::from(&env.iter().find(|(key, _)| *key == SOCKET_ENV).unwrap().1);
-        assert!(env.iter().any(|(key, value)| *key == "SSH_ASKPASS_REQUIRE" && value == "force"));
+        assert!(env
+            .iter()
+            .any(|(key, value)| *key == "SSH_ASKPASS_REQUIRE" && value == "force"));
 
         let token = bridge.token.clone();
         let path = socket.clone();
@@ -210,6 +218,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(answer, None);
-        assert_eq!(bridge.take_error().as_deref(), Some("Sign-in was cancelled."));
+        assert_eq!(
+            bridge.take_error().as_deref(),
+            Some("Sign-in was cancelled.")
+        );
     }
 }

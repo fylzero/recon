@@ -52,7 +52,9 @@ impl Splitter {
     pub fn push_bytes(&mut self, line: &[u8], out: &mut Vec<Statement>) -> Result<(), String> {
         match std::str::from_utf8(line) {
             Ok(text) => self.push_line(text, out),
-            Err(_) => match mysql_hex_binary_strings(line).filter(|_| self.driver == Driver::Mysql && self.state == State::Normal) {
+            Err(_) => match mysql_hex_binary_strings(line)
+                .filter(|_| self.driver == Driver::Mysql && self.state == State::Normal)
+            {
                 Some(text) => self.push_line(&text, out),
                 None => {
                     return Err(format!(
@@ -143,16 +145,26 @@ impl Splitter {
                     }
                     match c {
                         '\'' => {
-                            let escape = mysql || (self.driver == Driver::Postgres && self.escape_string_prefix());
-                            self.state = State::Quote { quote: '\'', backslash: escape };
+                            let escape = mysql
+                                || (self.driver == Driver::Postgres && self.escape_string_prefix());
+                            self.state = State::Quote {
+                                quote: '\'',
+                                backslash: escape,
+                            };
                             self.push(c);
                         }
                         '"' => {
-                            self.state = State::Quote { quote: '"', backslash: mysql };
+                            self.state = State::Quote {
+                                quote: '"',
+                                backslash: mysql,
+                            };
                             self.push(c);
                         }
                         '`' if self.driver != Driver::Postgres => {
-                            self.state = State::Quote { quote: '`', backslash: false };
+                            self.state = State::Quote {
+                                quote: '`',
+                                backslash: false,
+                            };
                             self.push(c);
                         }
                         '-' if next == Some('-')
@@ -251,11 +263,16 @@ fn is_ident_char(c: char) -> bool {
 fn starts_with_word(text: &str, word: &str) -> bool {
     text.len() >= word.len()
         && text[..word.len()].eq_ignore_ascii_case(word)
-        && text[word.len()..].chars().next().is_none_or(char::is_whitespace)
+        && text[word.len()..]
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace)
 }
 
 fn matches_at(chars: &[char], at: usize, needle: &[char]) -> bool {
-    !needle.is_empty() && chars.len() >= at + needle.len() && chars[at..at + needle.len()] == *needle
+    !needle.is_empty()
+        && chars.len() >= at + needle.len()
+        && chars[at..at + needle.len()] == *needle
 }
 
 /// A `$tag$` opener: letters, digits, and underscores, not starting with a digit.
@@ -282,7 +299,9 @@ fn is_trigger(sql: &str) -> bool {
         .collect();
     match words.as_slice() {
         [create, trigger, ..] if create == "CREATE" && trigger == "TRIGGER" => true,
-        [create, temp, trigger] => create == "CREATE" && (temp == "TEMP" || temp == "TEMPORARY") && trigger == "TRIGGER",
+        [create, temp, trigger] => {
+            create == "CREATE" && (temp == "TEMP" || temp == "TEMPORARY") && trigger == "TRIGGER"
+        }
         _ => false,
     }
 }
@@ -351,7 +370,11 @@ pub fn mysql_hex_binary_strings(line: &[u8]) -> Option<String> {
             quote @ (b'"' | b'`') => {
                 i += 1;
                 while *line.get(i)? != quote {
-                    i += if quote == b'"' && line[i] == b'\\' { 2 } else { 1 };
+                    i += if quote == b'"' && line[i] == b'\\' {
+                        2
+                    } else {
+                        1
+                    };
                 }
                 i += 1;
                 out.push_str(std::str::from_utf8(&line[start..i]).ok()?);
@@ -369,7 +392,10 @@ pub fn mysql_hex_binary_strings(line: &[u8]) -> Option<String> {
 
 /// A Postgres `COPY ... FROM stdin`, whose data follows on the next lines until `\.`.
 pub fn is_copy_from_stdin(sql: &str) -> bool {
-    let words: Vec<String> = sql.split_whitespace().map(str::to_ascii_uppercase).collect();
+    let words: Vec<String> = sql
+        .split_whitespace()
+        .map(str::to_ascii_uppercase)
+        .collect();
     words.first().is_some_and(|word| word == "COPY")
         && words
             .windows(2)
@@ -395,7 +421,11 @@ mod tests {
         let sql = "-- header; comment\nINSERT INTO t VALUES ('a;b', \"c;d\");\n/* x; y */ SELECT 1; SELECT 2\n";
         assert_eq!(
             split(Driver::Sqlite, sql),
-            vec!["INSERT INTO t VALUES ('a;b', \"c;d\")", "SELECT 1", "SELECT 2"]
+            vec![
+                "INSERT INTO t VALUES ('a;b', \"c;d\")",
+                "SELECT 1",
+                "SELECT 2"
+            ]
         );
     }
 
@@ -418,7 +448,10 @@ mod tests {
     #[test]
     fn keeps_multiline_strings_intact() {
         let sql = "INSERT INTO t VALUES ('line one;\nline two');\n";
-        assert_eq!(split(Driver::Postgres, sql), vec!["INSERT INTO t VALUES ('line one;\nline two')"]);
+        assert_eq!(
+            split(Driver::Postgres, sql),
+            vec!["INSERT INTO t VALUES ('line one;\nline two')"]
+        );
     }
 
     #[test]
@@ -471,7 +504,9 @@ mod tests {
 
     #[test]
     fn detects_copy_from_stdin() {
-        assert!(is_copy_from_stdin("COPY public.users (id, name) FROM stdin"));
+        assert!(is_copy_from_stdin(
+            "COPY public.users (id, name) FROM stdin"
+        ));
         assert!(!is_copy_from_stdin("COPY users TO stdout"));
         assert!(!is_copy_from_stdin("SELECT 'COPY x FROM stdin'"));
     }

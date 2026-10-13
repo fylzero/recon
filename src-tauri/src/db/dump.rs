@@ -10,8 +10,8 @@ use sqlx::sqlite::{SqliteConnection, SqliteRow};
 use sqlx::{Database, Executor, Row};
 
 use super::{
-    describe_error, hex, mysql, postgres, quote_backtick, quote_double, quote_literal, sqlite, text_at, texts,
-    CellValue, Conn, RawOutput,
+    describe_error, hex, mysql, postgres, quote_backtick, quote_double, quote_literal, sqlite,
+    text_at, texts, CellValue, Conn, RawOutput,
 };
 
 pub const CANCELLED: &str = "Export cancelled.";
@@ -136,8 +136,13 @@ pub async fn run(
         drop_tables: options.drop_tables && options.structure,
         ..options
     };
-    dump.total = tables.iter().filter(|table| !table.view || options.structure).count();
-    dump.write(&format!("-- Recon SQL export\n-- Server: {server}\n-- Database: {namespace}\n"))?;
+    dump.total = tables
+        .iter()
+        .filter(|table| !table.view || options.structure)
+        .count();
+    dump.write(&format!(
+        "-- Recon SQL export\n-- Server: {server}\n-- Database: {namespace}\n"
+    ))?;
     match conn {
         Conn::MySql(conn) => dump_mysql(conn, namespace, tables, options, dump).await,
         Conn::Postgres(conn) => dump_postgres(conn, namespace, tables, options, dump).await,
@@ -180,7 +185,9 @@ pub fn mysql_literal(cell: &CellValue) -> String {
         CellValue::Float(value) => float_literal(*value),
         CellValue::Bytes(bytes) if bytes.is_empty() => "''".into(),
         CellValue::Bytes(bytes) => format!("0x{}", hex(bytes)),
-        CellValue::Text(text) | CellValue::Json(text) | CellValue::DateTime(text) => mysql_string(text),
+        CellValue::Text(text) | CellValue::Json(text) | CellValue::DateTime(text) => {
+            mysql_string(text)
+        }
     }
 }
 
@@ -191,7 +198,9 @@ pub fn sqlite_literal(cell: &CellValue) -> String {
         CellValue::Int(value) => value.to_string(),
         CellValue::Float(value) => float_literal(*value),
         CellValue::Bytes(bytes) => format!("X'{}'", hex(bytes)),
-        CellValue::Text(text) | CellValue::Json(text) | CellValue::DateTime(text) => quote_literal(text),
+        CellValue::Text(text) | CellValue::Json(text) | CellValue::DateTime(text) => {
+            quote_literal(text)
+        }
     }
 }
 
@@ -205,7 +214,9 @@ fn sqlite_value(row: &SqliteRow, index: usize) -> Result<String, String> {
 
 /// Postgres columns are selected as `::text`, and the server casts the quoted text back on insert.
 fn postgres_value(row: &PgRow, index: usize) -> Result<String, String> {
-    let value = row.try_get::<Option<String>, _>(index).map_err(describe_error)?;
+    let value = row
+        .try_get::<Option<String>, _>(index)
+        .map_err(describe_error)?;
     Ok(value.map_or_else(|| "NULL".into(), |text| quote_literal(&text)))
 }
 
@@ -261,7 +272,11 @@ where
 }
 
 fn column_list(columns: &[String], quote: fn(&str) -> String) -> String {
-    columns.iter().map(|column| quote(column)).collect::<Vec<_>>().join(", ")
+    columns
+        .iter()
+        .map(|column| quote(column))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn first_column(output: &RawOutput) -> Vec<String> {
@@ -278,10 +293,17 @@ fn strip_definer(sql: &str) -> String {
         return sql.to_string();
     };
     let rest = &sql[start + 1..];
-    let end = [" SQL SECURITY ", " VIEW ", " TRIGGER ", " PROCEDURE ", " FUNCTION ", " EVENT "]
-        .iter()
-        .filter_map(|keyword| rest.find(keyword))
-        .min();
+    let end = [
+        " SQL SECURITY ",
+        " VIEW ",
+        " TRIGGER ",
+        " PROCEDURE ",
+        " FUNCTION ",
+        " EVENT ",
+    ]
+    .iter()
+    .filter_map(|keyword| rest.find(keyword))
+    .min();
     match end {
         Some(end) => format!("{}{}", &sql[..start], &rest[end..]),
         None => sql.to_string(),
@@ -319,10 +341,19 @@ fn mysql_compound(sql_mode: &str, create: &str) -> String {
 }
 
 /// The sql_mode and statement from `SHOW CREATE TRIGGER`, `PROCEDURE`, or `FUNCTION`.
-async fn mysql_show_create(conn: &mut MySqlConnection, kind: &str, name: &str) -> Option<(String, String)> {
-    let output = mysql::run(conn, &format!("SHOW CREATE {kind} {}", quote_backtick(name)), 1, None)
-        .await
-        .ok()?;
+async fn mysql_show_create(
+    conn: &mut MySqlConnection,
+    kind: &str,
+    name: &str,
+) -> Option<(String, String)> {
+    let output = mysql::run(
+        conn,
+        &format!("SHOW CREATE {kind} {}", quote_backtick(name)),
+        1,
+        None,
+    )
+    .await
+    .ok()?;
     let row = output.text_rows().into_iter().next()?;
     let create = row.get(2).cloned().flatten()?;
     Some((text_at(&row, 1), create))
@@ -358,12 +389,23 @@ async fn dump_mysql(
         }
         if options.structure {
             let output = mysql::run(conn, &format!("SHOW CREATE TABLE {quoted}"), 1, None).await?;
-            let create = output.text_rows().into_iter().next().map(|row| text_at(&row, 1)).unwrap_or_default();
+            let create = output
+                .text_rows()
+                .into_iter()
+                .next()
+                .map(|row| text_at(&row, 1))
+                .unwrap_or_default();
             dump.write(&format!("{create};\n"))?;
         }
         if options.data {
             let definitions = mysql::column_definitions(
-                &mysql::run(conn, &mysql::column_definitions_sql(namespace, &table.name), usize::MAX, None).await?,
+                &mysql::run(
+                    conn,
+                    &mysql::column_definitions_sql(namespace, &table.name),
+                    usize::MAX,
+                    None,
+                )
+                .await?,
             );
             let columns: Vec<String> = definitions
                 .into_iter()
@@ -374,7 +416,8 @@ async fn dump_mysql(
                 let list = column_list(&columns, quote_backtick);
                 let select = format!("SELECT {list} FROM {quoted}");
                 let insert = format!("INSERT INTO {quoted} ({list})");
-                write_rows::<sqlx::MySql>(dump, conn, &table.name, &select, &insert, mysql_value).await?;
+                write_rows::<sqlx::MySql>(dump, conn, &table.name, &select, &insert, mysql_value)
+                    .await?;
             }
         }
     }
@@ -403,7 +446,10 @@ async fn dump_mysql(
                     continue;
                 };
                 if options.drop_tables {
-                    dump.write(&format!("DROP {kind} IF EXISTS {};\n", quote_backtick(&name)))?;
+                    dump.write(&format!(
+                        "DROP {kind} IF EXISTS {};\n",
+                        quote_backtick(&name)
+                    ))?;
                 }
                 dump.write(&mysql_compound(&sql_mode, &create))?;
             }
@@ -415,8 +461,19 @@ async fn dump_mysql(
         let mut views = Vec::new();
         for view in tables.iter().filter(|table| table.view) {
             dump.check()?;
-            let output = mysql::run(conn, &format!("SHOW CREATE VIEW {}", quote_backtick(&view.name)), 1, None).await?;
-            let create = output.text_rows().into_iter().next().map(|row| text_at(&row, 1)).unwrap_or_default();
+            let output = mysql::run(
+                conn,
+                &format!("SHOW CREATE VIEW {}", quote_backtick(&view.name)),
+                1,
+                None,
+            )
+            .await?;
+            let create = output
+                .text_rows()
+                .into_iter()
+                .next()
+                .map(|row| text_at(&row, 1))
+                .unwrap_or_default();
             views.push((view.name.clone(), strip_definer(&create)));
         }
         /*
@@ -434,7 +491,11 @@ async fn dump_mysql(
             dump.write(&format!("{create};\n"))?;
         }
 
-        let chosen: HashSet<&str> = tables.iter().filter(|table| !table.view).map(|table| table.name.as_str()).collect();
+        let chosen: HashSet<&str> = tables
+            .iter()
+            .filter(|table| !table.view)
+            .map(|table| table.name.as_str())
+            .collect();
         let triggers = mysql::run(
             conn,
             &format!(
@@ -566,7 +627,8 @@ struct PgObjects {
     uses: Vec<PgFunctionUse>,
 }
 
-const PG_SEQUENCE_OPTIONS: &str = "format(' AS %s INCREMENT BY %s MINVALUE %s MAXVALUE %s START WITH %s CACHE %s%s', \
+const PG_SEQUENCE_OPTIONS: &str =
+    "format(' AS %s INCREMENT BY %s MINVALUE %s MAXVALUE %s START WITH %s CACHE %s%s', \
      format_type(q.seqtypid, NULL), q.seqincrement, q.seqmin, q.seqmax, q.seqstart, q.seqcache, \
      CASE WHEN q.seqcycle THEN ' CYCLE' ELSE '' END)";
 
@@ -575,7 +637,10 @@ const PG_SEQUENCE_OPTIONS: &str = "format(' AS %s INCREMENT BY %s MINVALUE %s MA
  * of catalog queries rather than several per table, which matters over a
  * slow tunnel.
  */
-async fn postgres_catalog(conn: &mut PgConnection, namespace: &str) -> Result<(HashMap<String, PgRelation>, Vec<String>), String> {
+async fn postgres_catalog(
+    conn: &mut PgConnection,
+    namespace: &str,
+) -> Result<(HashMap<String, PgRelation>, Vec<String>), String> {
     let ns = quote_literal(namespace);
     let relations = postgres::run(
         conn,
@@ -898,7 +963,10 @@ async fn postgres_objects(conn: &mut PgConnection, namespace: &str) -> Result<Pg
             } else {
                 format!(" WITH SCHEMA {}", text_at(&text, 1))
             };
-            format!("CREATE EXTENSION IF NOT EXISTS {}{schema} CASCADE;\n", text_at(&text, 0))
+            format!(
+                "CREATE EXTENSION IF NOT EXISTS {}{schema} CASCADE;\n",
+                text_at(&text, 0)
+            )
         })
         .collect();
 
@@ -1058,7 +1126,11 @@ fn unqualify_function(definition: &str, schema: &str) -> String {
  */
 fn wanted_functions(objects: &PgObjects, chosen: &HashSet<&str>, all: bool) -> HashSet<String> {
     if all {
-        return objects.functions.iter().map(|function| function.oid.clone()).collect();
+        return objects
+            .functions
+            .iter()
+            .map(|function| function.oid.clone())
+            .collect();
     }
     let mut wanted: HashSet<String> = objects
         .uses
@@ -1074,7 +1146,11 @@ fn wanted_functions(objects: &PgObjects, chosen: &HashSet<&str>, all: bool) -> H
         let called: Vec<String> = objects
             .uses
             .iter()
-            .filter(|used| used.caller.as_ref().is_some_and(|caller| wanted.contains(caller)))
+            .filter(|used| {
+                used.caller
+                    .as_ref()
+                    .is_some_and(|caller| wanted.contains(caller))
+            })
             .filter(|used| !wanted.contains(&used.function))
             .map(|used| used.function.clone())
             .collect();
@@ -1094,7 +1170,10 @@ fn postgres_comments(name: &str, relation: &PgRelation) -> String {
     };
     let mut sql = String::new();
     if let Some(comment) = &relation.comment {
-        sql.push_str(&format!("COMMENT ON {kind} {quoted} IS {};\n", quote_literal(comment)));
+        sql.push_str(&format!(
+            "COMMENT ON {kind} {quoted} IS {};\n",
+            quote_literal(comment)
+        ));
     }
     for (column, comment) in &relation.column_comments {
         sql.push_str(&format!(
@@ -1139,7 +1218,11 @@ async fn dump_postgres(
         _ => None,
     };
     let views = dependency_order(
-        selected.iter().copied().filter(|(_, relation)| is_view(relation)).collect(),
+        selected
+            .iter()
+            .copied()
+            .filter(|(_, relation)| is_view(relation))
+            .collect(),
         |(_, relation), (other, _)| relation.reads.contains(other),
     );
     let exported: Vec<(&String, &PgRelation)> = selected
@@ -1169,7 +1252,11 @@ async fn dump_postgres(
     }
     let mut positioned: HashSet<&str> = HashSet::new();
 
-    let objects = if options.structure { Some(postgres_objects(conn, namespace).await?) } else { None };
+    let objects = if options.structure {
+        Some(postgres_objects(conn, namespace).await?)
+    } else {
+        None
+    };
     let (early_functions, late_functions): (Vec<&PgFunction>, Vec<&PgFunction>) = match &objects {
         Some(objects) => {
             let wanted_functions = wanted_functions(objects, &wanted, options.routines);
@@ -1184,7 +1271,12 @@ async fn dump_postgres(
     let function_sql = |functions: &[&PgFunction]| -> String {
         functions
             .iter()
-            .map(|function| format!("{};\n", function.definition.trim_end().trim_end_matches(';')))
+            .map(|function| {
+                format!(
+                    "{};\n",
+                    function.definition.trim_end().trim_end_matches(';')
+                )
+            })
             .collect()
     };
 
@@ -1198,7 +1290,11 @@ async fn dump_postgres(
     if options.drop_tables {
         let mut drops = String::from("\n");
         for (name, relation) in &selected {
-            for constraint in relation.constraints.iter().filter(|constraint| constraint.kind == "f") {
+            for constraint in relation
+                .constraints
+                .iter()
+                .filter(|constraint| constraint.kind == "f")
+            {
                 drops.push_str(&format!(
                     "ALTER TABLE IF EXISTS {} DROP CONSTRAINT IF EXISTS {};\n",
                     quote_double(name),
@@ -1207,7 +1303,11 @@ async fn dump_postgres(
             }
         }
         for (name, relation) in views.iter().rev() {
-            let kind = if relation.kind == "m" { "MATERIALIZED VIEW" } else { "VIEW" };
+            let kind = if relation.kind == "m" {
+                "MATERIALIZED VIEW"
+            } else {
+                "VIEW"
+            };
             drops.push_str(&format!("DROP {kind} IF EXISTS {};\n", quote_double(name)));
         }
         for function in &late_functions {
@@ -1218,7 +1318,10 @@ async fn dump_postgres(
          * between them don't block dropping them one at a time.
          */
         if !exported.is_empty() {
-            let names: Vec<String> = exported.iter().map(|(name, _)| quote_double(name)).collect();
+            let names: Vec<String> = exported
+                .iter()
+                .map(|(name, _)| quote_double(name))
+                .collect();
             drops.push_str(&format!("DROP TABLE IF EXISTS {};\n", names.join(", ")));
         }
         dump.write(&drops)?;
@@ -1232,12 +1335,21 @@ async fn dump_postgres(
             dump.write(&format!("\n-- Types\n{}", objects.types.concat()))?;
         }
         if !early_functions.is_empty() {
-            dump.write(&format!("\n-- Functions\n{}", function_sql(&early_functions)))?;
+            dump.write(&format!(
+                "\n-- Functions\n{}",
+                function_sql(&early_functions)
+            ))?;
         }
         if !sequences.is_empty() {
             let created: String = sequences
                 .iter()
-                .map(|sequence| format!("CREATE SEQUENCE IF NOT EXISTS {}{};\n", quote_double(&sequence.name), sequence.options))
+                .map(|sequence| {
+                    format!(
+                        "CREATE SEQUENCE IF NOT EXISTS {}{};\n",
+                        quote_double(&sequence.name),
+                        sequence.options
+                    )
+                })
                 .collect();
             dump.write(&format!("\n-- Sequences\n{created}"))?;
         }
@@ -1252,16 +1364,30 @@ async fn dump_postgres(
         dump.start(name)?;
         if options.structure {
             let mut sql = String::new();
-            let mut parts: Vec<String> = relation.columns.iter().map(PgColumn::definition).collect();
+            let mut parts: Vec<String> =
+                relation.columns.iter().map(PgColumn::definition).collect();
             parts.extend(
                 relation
                     .constraints
                     .iter()
                     .filter(|constraint| constraint.kind != "f")
-                    .map(|constraint| format!("CONSTRAINT {} {}", quote_double(&constraint.name), constraint.definition)),
+                    .map(|constraint| {
+                        format!(
+                            "CONSTRAINT {} {}",
+                            quote_double(&constraint.name),
+                            constraint.definition
+                        )
+                    }),
             );
-            sql.push_str(&format!("CREATE TABLE {quoted} (\n    {}\n);\n", parts.join(",\n    ")));
-            for sequence in relation.sequences.iter().filter(|sequence| !sequence.identity) {
+            sql.push_str(&format!(
+                "CREATE TABLE {quoted} (\n    {}\n);\n",
+                parts.join(",\n    ")
+            ));
+            for sequence in relation
+                .sequences
+                .iter()
+                .filter(|sequence| !sequence.identity)
+            {
                 sql.push_str(&format!(
                     "ALTER SEQUENCE {} OWNED BY {quoted}.{};\n",
                     quote_double(&sequence.name),
@@ -1272,13 +1398,21 @@ async fn dump_postgres(
             dump.write(&sql)?;
         }
         if options.data {
-            let columns: Vec<&PgColumn> = relation.columns.iter().filter(|column| column.generated.is_empty()).collect();
+            let columns: Vec<&PgColumn> = relation
+                .columns
+                .iter()
+                .filter(|column| column.generated.is_empty())
+                .collect();
             if !columns.is_empty() {
                 let names: Vec<String> = columns.iter().map(|column| column.name.clone()).collect();
                 let list = column_list(&names, quote_double);
                 let select = format!(
                     "SELECT {} FROM ONLY {quoted}",
-                    names.iter().map(|name| format!("{}::text", quote_double(name))).collect::<Vec<_>>().join(", ")
+                    names
+                        .iter()
+                        .map(|name| format!("{}::text", quote_double(name)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
                 let overriding = if columns.iter().any(|column| column.identity == "a") {
                     " OVERRIDING SYSTEM VALUE"
@@ -1286,7 +1420,8 @@ async fn dump_postgres(
                     ""
                 };
                 let insert = format!("INSERT INTO {quoted} ({list}){overriding}");
-                write_rows::<sqlx::Postgres>(dump, conn, name, &select, &insert, postgres_value).await?;
+                write_rows::<sqlx::Postgres>(dump, conn, name, &select, &insert, postgres_value)
+                    .await?;
             }
             for sequence in &relation.sequences {
                 if let Some((last, called)) = postgres_sequence_position(conn, sequence).await? {
@@ -1298,7 +1433,9 @@ async fn dump_postgres(
                 }
             }
             for sequence in &relation.borrowed {
-                if owned.contains(sequence.name.as_str()) || !positioned.insert(sequence.name.as_str()) {
+                if owned.contains(sequence.name.as_str())
+                    || !positioned.insert(sequence.name.as_str())
+                {
                     continue;
                 }
                 if let Some((last, called)) = postgres_sequence_position(conn, sequence).await? {
@@ -1310,19 +1447,36 @@ async fn dump_postgres(
             }
         }
         if options.structure && !relation.indexes.is_empty() {
-            dump.write(&relation.indexes.iter().map(|index| format!("{index};\n")).collect::<String>())?;
+            dump.write(
+                &relation
+                    .indexes
+                    .iter()
+                    .map(|index| format!("{index};\n"))
+                    .collect::<String>(),
+            )?;
         }
     }
 
     if options.structure {
         if !late_functions.is_empty() {
-            dump.write(&format!("\n-- Functions using table row types\n{}", function_sql(&late_functions)))?;
+            dump.write(&format!(
+                "\n-- Functions using table row types\n{}",
+                function_sql(&late_functions)
+            ))?;
         }
         for (name, relation) in &views {
             dump.start(name)?;
-            let definition = relation.view.as_deref().unwrap_or_default().trim().trim_end_matches(';');
+            let definition = relation
+                .view
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .trim_end_matches(';');
             let mut sql = if relation.kind == "m" {
-                let mut sql = format!("CREATE MATERIALIZED VIEW {} AS\n{definition}\nWITH DATA;\n", quote_double(name));
+                let mut sql = format!(
+                    "CREATE MATERIALIZED VIEW {} AS\n{definition}\nWITH DATA;\n",
+                    quote_double(name)
+                );
                 for index in &relation.indexes {
                     sql.push_str(&format!("{index};\n"));
                 }
@@ -1334,8 +1488,15 @@ async fn dump_postgres(
             dump.write(&sql)?;
         }
         let mut keys = String::new();
-        for (name, relation) in selected.iter().filter(|(_, relation)| unsupported(relation).is_none()) {
-            for constraint in relation.constraints.iter().filter(|constraint| constraint.kind == "f") {
+        for (name, relation) in selected
+            .iter()
+            .filter(|(_, relation)| unsupported(relation).is_none())
+        {
+            for constraint in relation
+                .constraints
+                .iter()
+                .filter(|constraint| constraint.kind == "f")
+            {
                 keys.push_str(&format!(
                     "ALTER TABLE {} ADD CONSTRAINT {} {};\n",
                     quote_double(name),
@@ -1363,7 +1524,11 @@ async fn dump_postgres(
                     _ => continue,
                 };
                 if !is_view(relation) {
-                    triggers.push_str(&format!("ALTER TABLE {} {state} TRIGGER {};\n", quote_double(name), trigger.name));
+                    triggers.push_str(&format!(
+                        "ALTER TABLE {} {state} TRIGGER {};\n",
+                        quote_double(name),
+                        trigger.name
+                    ));
                 }
             }
         }
@@ -1376,10 +1541,22 @@ async fn dump_postgres(
 }
 
 /// The sequence's `last_value` and `is_called`, for a `setval` that puts it back where it was.
-async fn postgres_sequence_position(conn: &mut PgConnection, sequence: &PgSequence) -> Result<Option<(String, bool)>, String> {
-    let output = postgres::run(conn, &format!("SELECT last_value, is_called FROM {}", sequence.qualified), 1, None).await?;
+async fn postgres_sequence_position(
+    conn: &mut PgConnection,
+    sequence: &PgSequence,
+) -> Result<Option<(String, bool)>, String> {
+    let output = postgres::run(
+        conn,
+        &format!("SELECT last_value, is_called FROM {}", sequence.qualified),
+        1,
+        None,
+    )
+    .await?;
     Ok(output.rows.first().map(|row| {
-        let last = row.first().and_then(CellValue::to_text).unwrap_or_else(|| "1".into());
+        let last = row
+            .first()
+            .and_then(CellValue::to_text)
+            .unwrap_or_else(|| "1".into());
         (last, row.get(1).is_some_and(CellValue::is_truthy))
     }))
 }
@@ -1406,16 +1583,33 @@ async fn dump_sqlite(
     .text_rows();
     let entries: Vec<(String, String, String, String)> = master
         .iter()
-        .map(|row| (text_at(row, 0), text_at(row, 1), text_at(row, 2), text_at(row, 3)))
+        .map(|row| {
+            (
+                text_at(row, 0),
+                text_at(row, 1),
+                text_at(row, 2),
+                text_at(row, 3),
+            )
+        })
         .collect();
     let virtual_tables: Vec<&str> = entries
         .iter()
-        .filter(|(kind, _, _, sql)| kind == "table" && sql.to_ascii_uppercase().starts_with("CREATE VIRTUAL TABLE"))
+        .filter(|(kind, _, _, sql)| {
+            kind == "table" && sql.to_ascii_uppercase().starts_with("CREATE VIRTUAL TABLE")
+        })
         .map(|(_, name, _, _)| name.as_str())
         .collect();
-    let shadow = |name: &str| virtual_tables.iter().any(|parent| name.starts_with(&format!("{parent}_")));
+    let shadow = |name: &str| {
+        virtual_tables
+            .iter()
+            .any(|parent| name.starts_with(&format!("{parent}_")))
+    };
     let wanted: HashSet<&str> = tables.iter().map(|table| table.name.as_str()).collect();
-    let find = |name: &str, kind: &str| entries.iter().find(|entry| entry.0 == kind && entry.1 == name);
+    let find = |name: &str, kind: &str| {
+        entries
+            .iter()
+            .find(|entry| entry.0 == kind && entry.1 == name)
+    };
 
     dump.write("\nPRAGMA foreign_keys = OFF;\nBEGIN TRANSACTION;\n")?;
     for table in tables.iter().filter(|table| !table.view) {
@@ -1451,11 +1645,15 @@ async fn dump_sqlite(
                 let list = column_list(&columns, quote_double);
                 let select = format!("SELECT {list} FROM {schema}.{quoted}");
                 let insert = format!("INSERT INTO {quoted} ({list})");
-                write_rows::<sqlx::Sqlite>(dump, conn, name, &select, &insert, sqlite_value).await?;
+                write_rows::<sqlx::Sqlite>(dump, conn, name, &select, &insert, sqlite_value)
+                    .await?;
             }
         }
         if options.structure {
-            for (_, _, _, sql) in entries.iter().filter(|entry| entry.0 == "index" && entry.2 == *name) {
+            for (_, _, _, sql) in entries
+                .iter()
+                .filter(|entry| entry.0 == "index" && entry.2 == *name)
+            {
                 dump.write(&format!("{sql};\n"))?;
             }
         }
@@ -1493,7 +1691,10 @@ mod tests {
 
     #[test]
     fn formats_literals_for_each_driver() {
-        assert_eq!(mysql_literal(&CellValue::Text("it's a\\b\n".into())), "'it\\'s a\\\\b\\n'");
+        assert_eq!(
+            mysql_literal(&CellValue::Text("it's a\\b\n".into())),
+            "'it\\'s a\\\\b\\n'"
+        );
         assert_eq!(mysql_literal(&CellValue::Bytes(vec![0xca, 0xfe])), "0xcafe");
         assert_eq!(mysql_literal(&CellValue::Bytes(Vec::new())), "''");
         assert_eq!(mysql_literal(&CellValue::Float(2.0)), "2.0");
@@ -1516,24 +1717,42 @@ mod tests {
             strip_definer("CREATE DEFINER=`app`@`%` PROCEDURE `p`()\n    SQL SECURITY INVOKER\nBEGIN SELECT 1; END"),
             "CREATE PROCEDURE `p`()\n    SQL SECURITY INVOKER\nBEGIN SELECT 1; END"
         );
-        assert_eq!(strip_definer("CREATE VIEW v AS select 1"), "CREATE VIEW v AS select 1");
+        assert_eq!(
+            strip_definer("CREATE VIEW v AS select 1"),
+            "CREATE VIEW v AS select 1"
+        );
     }
 
     #[test]
     fn orders_items_after_their_dependencies() {
         let deps = |item: &&str, other: &&str| matches!((*item, *other), ("a", "c") | ("c", "b"));
-        assert_eq!(dependency_order(vec!["a", "b", "c", "d"], deps), vec!["b", "c", "a", "d"]);
+        assert_eq!(
+            dependency_order(vec!["a", "b", "c", "d"], deps),
+            vec!["b", "c", "a", "d"]
+        );
         let cycle = |item: &&str, other: &&str| matches!((*item, *other), ("a", "b") | ("b", "a"));
-        assert_eq!(dependency_order(vec!["a", "b", "c"], cycle), vec!["c", "a", "b"]);
+        assert_eq!(
+            dependency_order(vec!["a", "b", "c"], cycle),
+            vec!["c", "a", "b"]
+        );
     }
 
-    async fn export_sqlite(conn: &mut SqliteConnection, tables: &[DumpTable], options: DumpOptions) -> (String, DumpSummary) {
+    async fn export_sqlite(
+        conn: &mut SqliteConnection,
+        tables: &[DumpTable],
+        options: DumpOptions,
+    ) -> (String, DumpSummary) {
         let mut out: Vec<u8> = Vec::new();
         let cancel = AtomicBool::new(false);
         let mut progress = |_: DumpProgress| {};
         let mut dump = Dump::new(&mut out, &cancel, &mut progress);
-        let mut wrapped = Conn::Sqlite(std::mem::replace(conn, SqliteConnection::connect("sqlite::memory:").await.unwrap()));
-        run(&mut wrapped, "SQLite 3", "main", tables, options, &mut dump).await.unwrap();
+        let mut wrapped = Conn::Sqlite(std::mem::replace(
+            conn,
+            SqliteConnection::connect("sqlite::memory:").await.unwrap(),
+        ));
+        run(&mut wrapped, "SQLite 3", "main", tables, options, &mut dump)
+            .await
+            .unwrap();
         let summary = dump.into_summary();
         if let Conn::Sqlite(inner) = wrapped {
             *conn = inner;
@@ -1557,11 +1776,25 @@ mod tests {
             sqlite::run(&mut source, sql, 0, None).await.unwrap();
         }
         let tables = [
-            DumpTable { name: "names".into(), view: true },
-            DumpTable { name: "posts".into(), view: false },
-            DumpTable { name: "users".into(), view: false },
+            DumpTable {
+                name: "names".into(),
+                view: true,
+            },
+            DumpTable {
+                name: "posts".into(),
+                view: false,
+            },
+            DumpTable {
+                name: "users".into(),
+                view: false,
+            },
         ];
-        let options = DumpOptions { structure: true, data: true, drop_tables: true, routines: true };
+        let options = DumpOptions {
+            structure: true,
+            data: true,
+            drop_tables: true,
+            routines: true,
+        };
         let (sql, summary) = export_sqlite(&mut source, &tables, options).await;
         assert_eq!(summary.tables, 3);
         assert_eq!(summary.rows, 3);
@@ -1570,9 +1803,19 @@ mod tests {
         let mut target = SqliteConnection::connect("sqlite::memory:").await.unwrap();
         let statements = split_all(Driver::Sqlite, sql.as_bytes());
         for statement in &statements {
-            sqlx::raw_sql(&statement.sql).execute(&mut target).await.unwrap_or_else(|err| panic!("{err}: {}", statement.sql));
+            sqlx::raw_sql(&statement.sql)
+                .execute(&mut target)
+                .await
+                .unwrap_or_else(|err| panic!("{err}: {}", statement.sql));
         }
-        let users = sqlite::run(&mut target, "SELECT id, name, score, avatar, doubled FROM users ORDER BY id", 10, None).await.unwrap();
+        let users = sqlite::run(
+            &mut target,
+            "SELECT id, name, score, avatar, doubled FROM users ORDER BY id",
+            10,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             users.rows[0],
             vec![
@@ -1584,12 +1827,25 @@ mod tests {
             ]
         );
         assert_eq!(users.rows[1][1], CellValue::Text("line\nbreak".into()));
-        let names = sqlite::run(&mut target, "SELECT count(*) FROM names", 1, None).await.unwrap();
+        let names = sqlite::run(&mut target, "SELECT count(*) FROM names", 1, None)
+            .await
+            .unwrap();
         assert_eq!(names.rows[0][0], CellValue::Int(2));
-        sqlite::run(&mut target, "INSERT INTO posts VALUES (2, 2, 'x')", 0, None).await.unwrap();
-        let scored = sqlite::run(&mut target, "SELECT score FROM users WHERE id = 2", 1, None).await.unwrap();
+        sqlite::run(&mut target, "INSERT INTO posts VALUES (2, 2, 'x')", 0, None)
+            .await
+            .unwrap();
+        let scored = sqlite::run(&mut target, "SELECT score FROM users WHERE id = 2", 1, None)
+            .await
+            .unwrap();
         assert_eq!(scored.rows[0][0], CellValue::Null);
-        let indexes = sqlite::run(&mut target, "SELECT name FROM sqlite_master WHERE type = 'index'", 10, None).await.unwrap();
+        let indexes = sqlite::run(
+            &mut target,
+            "SELECT name FROM sqlite_master WHERE type = 'index'",
+            10,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(indexes.rows.len(), 1);
 
         let (again, _) = export_sqlite(&mut target, &tables, options).await;
@@ -1624,7 +1880,9 @@ mod tests {
         }))
         .unwrap();
         let password = std::env::var("RECON_TEST_MYSQL_PASSWORD").ok();
-        let opened = mysql::open(&entry, password.as_deref(), &Default::default()).await.unwrap();
+        let opened = mysql::open(&entry, password.as_deref(), &Default::default())
+            .await
+            .unwrap();
         let mut conn = opened.conn;
         for sql in [
             "DROP DATABASE IF EXISTS recon_dump_src",
@@ -1653,17 +1911,43 @@ mod tests {
         }
 
         let tables = [
-            DumpTable { name: "a_loud".into(), view: true },
-            DumpTable { name: "names".into(), view: true },
-            DumpTable { name: "posts".into(), view: false },
-            DumpTable { name: "users".into(), view: false },
+            DumpTable {
+                name: "a_loud".into(),
+                view: true,
+            },
+            DumpTable {
+                name: "names".into(),
+                view: true,
+            },
+            DumpTable {
+                name: "posts".into(),
+                view: false,
+            },
+            DumpTable {
+                name: "users".into(),
+                view: false,
+            },
         ];
         let mut out: Vec<u8> = Vec::new();
         let cancel = AtomicBool::new(false);
         let mut progress = |_: DumpProgress| {};
         let mut dump = Dump::new(&mut out, &cancel, &mut progress);
-        let options = DumpOptions { structure: true, data: true, drop_tables: true, routines: true };
-        run(&mut conn, "MySQL", "recon_dump_src", &tables, options, &mut dump).await.unwrap();
+        let options = DumpOptions {
+            structure: true,
+            data: true,
+            drop_tables: true,
+            routines: true,
+        };
+        run(
+            &mut conn,
+            "MySQL",
+            "recon_dump_src",
+            &tables,
+            options,
+            &mut dump,
+        )
+        .await
+        .unwrap();
         let sql = String::from_utf8(out).unwrap();
         assert!(!sql.contains("recon_dump_src`."), "{sql}");
         assert!(!sql.contains("DEFINER="), "{sql}");
@@ -1673,29 +1957,50 @@ mod tests {
         async fn import(conn: &mut Conn, sql: Vec<u8>) {
             conn.execute("USE recon_dump_dst").await.unwrap();
             for statement in split_all(Driver::Mysql, &sql) {
-                conn.execute(&statement.sql)
-                    .await
-                    .unwrap_or_else(|err| panic!("line {}: {err}: {}", statement.line, statement.sql));
+                conn.execute(&statement.sql).await.unwrap_or_else(|err| {
+                    panic!("line {}: {err}: {}", statement.line, statement.sql)
+                });
             }
         }
         import(&mut conn, sql.clone().into_bytes()).await;
-        assert_eq!(conn.run(compare, 10, None).await.unwrap().text_rows(), expected);
-        let names = conn.run("SELECT COUNT(*) FROM names", 1, None).await.unwrap();
+        assert_eq!(
+            conn.run(compare, 10, None).await.unwrap().text_rows(),
+            expected
+        );
+        let names = conn
+            .run("SELECT COUNT(*) FROM names", 1, None)
+            .await
+            .unwrap();
         assert_eq!(names.rows[0][0].as_i64(), Some(2));
         let body = conn.run("SELECT body FROM posts", 1, None).await.unwrap();
-        assert_eq!(body.text_rows()[0][0].as_deref(), Some("-- not a comment; /* nor this */"));
+        assert_eq!(
+            body.text_rows()[0][0].as_deref(),
+            Some("-- not a comment; /* nor this */")
+        );
 
         import(&mut conn, sql.clone().into_bytes()).await;
-        assert_eq!(conn.run(compare, 10, None).await.unwrap().text_rows(), expected);
-        let loud = conn.run("SELECT name FROM a_loud ORDER BY name", 10, None).await.unwrap().text_rows();
+        assert_eq!(
+            conn.run(compare, 10, None).await.unwrap().text_rows(),
+            expected
+        );
+        let loud = conn
+            .run("SELECT name FROM a_loud ORDER BY name", 10, None)
+            .await
+            .unwrap()
+            .text_rows();
         assert_eq!(loud[1][0].as_deref(), Some("ZERO"));
         let routines = conn
             .run("SELECT COUNT(*) FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = 'recon_dump_dst'", 1, None)
             .await
             .unwrap();
         assert_eq!(routines.rows[0][0].as_i64(), Some(2));
-        conn.execute("INSERT INTO posts VALUES (2, 5, 'fires the trigger')").await.unwrap();
-        let note = conn.run("SELECT note FROM users WHERE id = 5", 1, None).await.unwrap();
+        conn.execute("INSERT INTO posts VALUES (2, 5, 'fires the trigger')")
+            .await
+            .unwrap();
+        let note = conn
+            .run("SELECT note FROM users WHERE id = 5", 1, None)
+            .await
+            .unwrap();
         assert_eq!(note.text_rows()[0][0].as_deref(), Some("日本語 🎉+"));
 
         for sql in [
@@ -1707,9 +2012,13 @@ mod tests {
             "CREATE PROCEDURE stray_proc() SELECT 1",
             "DELETE FROM posts",
         ] {
-            conn.execute(sql).await.unwrap_or_else(|err| panic!("{err}: {sql}"));
+            conn.execute(sql)
+                .await
+                .unwrap_or_else(|err| panic!("{err}: {sql}"));
         }
-        crate::db::restore::reset_namespace(&mut conn, Driver::Mysql, "recon_dump_dst").await.unwrap();
+        crate::db::restore::reset_namespace(&mut conn, Driver::Mysql, "recon_dump_dst")
+            .await
+            .unwrap();
         let leftovers = conn
             .run(
                 "SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'recon_dump_dst') + \
@@ -1721,7 +2030,10 @@ mod tests {
             .unwrap();
         assert_eq!(leftovers.rows[0][0].as_i64(), Some(0));
         import(&mut conn, sql.into_bytes()).await;
-        assert_eq!(conn.run(compare, 10, None).await.unwrap().text_rows(), expected);
+        assert_eq!(
+            conn.run(compare, 10, None).await.unwrap().text_rows(),
+            expected
+        );
         let kept = conn
             .run(
                 "SELECT (SELECT COUNT(*) FROM information_schema.EVENTS WHERE EVENT_SCHEMA = 'recon_dump_dst'), \
@@ -1734,18 +2046,38 @@ mod tests {
             .await
             .unwrap()
             .text_rows();
-        assert_eq!(kept[0], vec![Some("1".into()), Some("latin1".into()), Some("0".into())]);
+        assert_eq!(
+            kept[0],
+            vec![Some("1".into()), Some("latin1".into()), Some("0".into())]
+        );
 
         if let Ok(mysqldump) = std::env::var("RECON_TEST_MYSQLDUMP") {
             let output = std::process::Command::new(mysqldump)
-                .args(["-h", "127.0.0.1", "-u", &entry.user, "--routines", "--triggers", "recon_dump_src"])
+                .args([
+                    "-h",
+                    "127.0.0.1",
+                    "-u",
+                    &entry.user,
+                    "--routines",
+                    "--triggers",
+                    "recon_dump_src",
+                ])
                 .output()
                 .unwrap();
-            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             conn.execute("DROP DATABASE recon_dump_dst").await.unwrap();
-            conn.execute("CREATE DATABASE recon_dump_dst").await.unwrap();
+            conn.execute("CREATE DATABASE recon_dump_dst")
+                .await
+                .unwrap();
             import(&mut conn, output.stdout).await;
-            assert_eq!(conn.run(compare, 10, None).await.unwrap().text_rows(), expected);
+            assert_eq!(
+                conn.run(compare, 10, None).await.unwrap().text_rows(),
+                expected
+            );
         }
 
         conn.execute("DROP DATABASE recon_dump_src").await.unwrap();
@@ -1761,20 +2093,31 @@ mod tests {
             "savePassword": false,
         }))
         .unwrap();
-        postgres::open(&entry, None, &Default::default()).await.unwrap()
+        postgres::open(&entry, None, &Default::default())
+            .await
+            .unwrap()
     }
 
-    async fn export(conn: &mut Conn, namespace: &str, tables: &[DumpTable], options: DumpOptions) -> String {
+    async fn export(
+        conn: &mut Conn,
+        namespace: &str,
+        tables: &[DumpTable],
+        options: DumpOptions,
+    ) -> String {
         let mut out: Vec<u8> = Vec::new();
         let cancel = AtomicBool::new(false);
         let mut progress = |_: DumpProgress| {};
         let mut dump = Dump::new(&mut out, &cancel, &mut progress);
-        run(conn, "live", namespace, tables, options, &mut dump).await.unwrap();
+        run(conn, "live", namespace, tables, options, &mut dump)
+            .await
+            .unwrap();
         String::from_utf8(out).unwrap()
     }
 
     async fn import_postgres(conn: &mut Conn, schema: &str, sql: &str) {
-        conn.execute(&format!("SET search_path TO {schema}, public")).await.unwrap();
+        conn.execute(&format!("SET search_path TO {schema}, public"))
+            .await
+            .unwrap();
         for statement in split_all(Driver::Postgres, sql.as_bytes()) {
             conn.execute(&statement.sql)
                 .await
@@ -1790,7 +2133,10 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn live_postgres_round_trip() {
-        let Some(port) = std::env::var("RECON_TEST_POSTGRES_PORT").ok().and_then(|port| port.parse().ok()) else {
+        let Some(port) = std::env::var("RECON_TEST_POSTGRES_PORT")
+            .ok()
+            .and_then(|port| port.parse().ok())
+        else {
             return;
         };
         let admin = open_postgres(port, "postgres").await;
@@ -1803,7 +2149,10 @@ mod tests {
             "CREATE DATABASE recon_dump_src",
             "CREATE DATABASE recon_dump_dst OWNER recon_dump_user",
         ] {
-            admin_conn.execute(sql).await.unwrap_or_else(|err| panic!("{err}: {sql}"));
+            admin_conn
+                .execute(sql)
+                .await
+                .unwrap_or_else(|err| panic!("{err}: {sql}"));
         }
 
         let source = open_postgres(port, "recon_dump_src").await;
@@ -1842,7 +2191,10 @@ mod tests {
             src.execute(sql).await.unwrap_or_else(|err| panic!("{err}: {sql}"));
         }
 
-        let relation = |name: &str, view: bool| DumpTable { name: name.into(), view };
+        let relation = |name: &str, view: bool| DumpTable {
+            name: name.into(),
+            view,
+        };
         let tables = [
             relation("a_loud", true),
             relation("audit", false),
@@ -1850,11 +2202,19 @@ mod tests {
             relation("extras", false),
             relation("users", false),
         ];
-        let options = DumpOptions { structure: true, data: true, drop_tables: true, routines: true };
+        let options = DumpOptions {
+            structure: true,
+            data: true,
+            drop_tables: true,
+            routines: true,
+        };
         let sql = export(&mut src, "app", &tables, options).await;
         assert!(!sql.contains("app."), "{sql}");
         assert!(!sql.contains("LANGUAGE internal"), "{sql}");
-        assert!(sql.contains("CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA public CASCADE;"), "{sql}");
+        assert!(
+            sql.contains("CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA public CASCADE;"),
+            "{sql}"
+        );
 
         let compare = "SELECT id, email::text, feeling::text, score, spot::text, span::text, ticket, loud FROM users ORDER BY id";
         let expected = src.run(compare, 10, None).await.unwrap().text_rows();
@@ -1864,26 +2224,65 @@ mod tests {
         dst.execute("SET ROLE recon_dump_user").await.unwrap();
         dst.execute("CREATE SCHEMA moved").await.unwrap();
         import_postgres(&mut dst, "moved", &sql).await;
-        assert_eq!(dst.run(compare, 10, None).await.unwrap().text_rows(), expected);
-        let audited = dst.run("SELECT count(*) FROM audit", 1, None).await.unwrap();
+        assert_eq!(
+            dst.run(compare, 10, None).await.unwrap().text_rows(),
+            expected
+        );
+        let audited = dst
+            .run("SELECT count(*) FROM audit", 1, None)
+            .await
+            .unwrap();
         assert_eq!(audited.rows[0][0].as_i64(), Some(2));
 
         import_postgres(&mut dst, "moved", &sql).await;
-        assert_eq!(dst.run(compare, 10, None).await.unwrap().text_rows(), expected);
+        assert_eq!(
+            dst.run(compare, 10, None).await.unwrap().text_rows(),
+            expected
+        );
 
-        dst.execute("INSERT INTO users (email) VALUES ('cy@x.io')").await.unwrap();
-        let added = dst.run("SELECT id, ticket, feeling::text, score FROM users WHERE email = 'CY@X.IO'", 1, None).await.unwrap();
+        dst.execute("INSERT INTO users (email) VALUES ('cy@x.io')")
+            .await
+            .unwrap();
+        let added = dst
+            .run(
+                "SELECT id, ticket, feeling::text, score FROM users WHERE email = 'CY@X.IO'",
+                1,
+                None,
+            )
+            .await
+            .unwrap();
         assert_eq!(
             added.text_rows()[0],
-            vec![Some("4".into()), Some("102".into()), Some("ok".into()), Some("1".into())]
+            vec![
+                Some("4".into()),
+                Some("102".into()),
+                Some("ok".into()),
+                Some("1".into())
+            ]
         );
-        let audited = dst.run("SELECT count(*) FROM audit", 1, None).await.unwrap();
+        let audited = dst
+            .run("SELECT count(*) FROM audit", 1, None)
+            .await
+            .unwrap();
         assert_eq!(audited.rows[0][0].as_i64(), Some(3));
-        let disabled = dst.run("SELECT tgenabled::text FROM pg_trigger WHERE tgname = 'users_off'", 1, None).await.unwrap();
+        let disabled = dst
+            .run(
+                "SELECT tgenabled::text FROM pg_trigger WHERE tgname = 'users_off'",
+                1,
+                None,
+            )
+            .await
+            .unwrap();
         assert_eq!(disabled.text_rows()[0][0].as_deref(), Some("D"));
-        let loud = dst.run("SELECT email FROM a_loud ORDER BY email", 10, None).await.unwrap();
+        let loud = dst
+            .run("SELECT email FROM a_loud ORDER BY email", 10, None)
+            .await
+            .unwrap();
         assert_eq!(loud.text_rows()[0][0].as_deref(), Some("ANN@X.IO"));
-        let everyone = dst.run("SELECT count(*) FROM everyone()", 1, None).await.unwrap();
+        let everyone = dst
+            .run("SELECT count(*) FROM everyone()", 1, None)
+            .await
+            .unwrap();
         assert_eq!(everyone.rows[0][0].as_i64(), Some(3));
         let comments = dst
             .run(
@@ -1896,17 +2295,41 @@ mod tests {
             .unwrap();
         assert_eq!(
             comments.text_rows()[0],
-            vec![Some("People's accounts".into()), Some("Used to sign in".into()), Some("Shouting".into())]
+            vec![
+                Some("People's accounts".into()),
+                Some("Used to sign in".into()),
+                Some("Shouting".into())
+            ]
         );
 
-        let subset = export(&mut src, "app", &[relation("extras", false)], DumpOptions { routines: false, ..options }).await;
+        let subset = export(
+            &mut src,
+            "app",
+            &[relation("extras", false)],
+            DumpOptions {
+                routines: false,
+                ..options
+            },
+        )
+        .await;
         assert!(!subset.contains("everyone"), "{subset}");
-        assert!(subset.contains("CREATE SEQUENCE IF NOT EXISTS \"users_id_seq\""), "{subset}");
+        assert!(
+            subset.contains("CREATE SEQUENCE IF NOT EXISTS \"users_id_seq\""),
+            "{subset}"
+        );
         dst.execute("CREATE SCHEMA subset").await.unwrap();
         import_postgres(&mut dst, "subset", &subset).await;
-        dst.execute("INSERT INTO extras (label) VALUES ('next')").await.unwrap();
-        let ids = dst.run("SELECT id FROM extras ORDER BY id", 10, None).await.unwrap();
-        assert_eq!(ids.text_rows(), vec![vec![Some("3".into())], vec![Some("4".into())]]);
+        dst.execute("INSERT INTO extras (label) VALUES ('next')")
+            .await
+            .unwrap();
+        let ids = dst
+            .run("SELECT id FROM extras ORDER BY id", 10, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            ids.text_rows(),
+            vec![vec![Some("3".into())], vec![Some("4".into())]]
+        );
 
         async fn restore(conn: &mut Conn, sql: &str) -> Result<(), String> {
             conn.execute("BEGIN").await?;
@@ -1927,21 +2350,34 @@ mod tests {
         let before = dst.run(count, 1, None).await.unwrap().text_rows();
 
         dst.execute("CREATE SCHEMA outside").await.unwrap();
-        dst.execute("CREATE VIEW outside.peek AS SELECT id FROM moved.users").await.unwrap();
+        dst.execute("CREATE VIEW outside.peek AS SELECT id FROM moved.users")
+            .await
+            .unwrap();
         let err = restore(&mut dst, &sql).await.unwrap_err();
         assert!(err.contains("outside.peek"), "{err}");
         assert_eq!(dst.run(count, 1, None).await.unwrap().text_rows(), before);
         dst.execute("DROP SCHEMA outside CASCADE").await.unwrap();
 
-        let err = restore(&mut dst, &format!("{sql}SELECT 1 / 0;\n")).await.unwrap_err();
+        let err = restore(&mut dst, &format!("{sql}SELECT 1 / 0;\n"))
+            .await
+            .unwrap_err();
         assert!(err.contains("division by zero"), "{err}");
         assert_eq!(dst.run(count, 1, None).await.unwrap().text_rows(), before);
 
         restore(&mut dst, &sql).await.unwrap();
-        dst.execute("SET search_path TO moved, public").await.unwrap();
-        assert_eq!(dst.run(compare, 10, None).await.unwrap().text_rows(), expected);
+        dst.execute("SET search_path TO moved, public")
+            .await
+            .unwrap();
+        assert_eq!(
+            dst.run(compare, 10, None).await.unwrap().text_rows(),
+            expected
+        );
         let owner = dst
-            .run("SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'moved'", 1, None)
+            .run(
+                "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'moved'",
+                1,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(owner.text_rows()[0][0].as_deref(), Some("recon_dump_user"));
@@ -1950,7 +2386,11 @@ mod tests {
         source.pool.close().await;
         dst.close().await;
         target.pool.close().await;
-        for sql in ["DROP DATABASE recon_dump_src", "DROP DATABASE recon_dump_dst", "DROP ROLE recon_dump_user"] {
+        for sql in [
+            "DROP DATABASE recon_dump_src",
+            "DROP DATABASE recon_dump_dst",
+            "DROP ROLE recon_dump_user",
+        ] {
             admin_conn.execute(sql).await.unwrap();
         }
         admin_conn.close().await;
@@ -1960,13 +2400,43 @@ mod tests {
     #[tokio::test]
     async fn exports_only_the_chosen_parts() {
         let mut conn = SqliteConnection::connect("sqlite::memory:").await.unwrap();
-        sqlite::run(&mut conn, "CREATE TABLE t (a INT)", 0, None).await.unwrap();
-        sqlite::run(&mut conn, "INSERT INTO t VALUES (1)", 0, None).await.unwrap();
-        let tables = [DumpTable { name: "t".into(), view: false }];
-        let (data_only, _) = export_sqlite(&mut conn, &tables, DumpOptions { structure: false, data: true, drop_tables: true, routines: true }).await;
+        sqlite::run(&mut conn, "CREATE TABLE t (a INT)", 0, None)
+            .await
+            .unwrap();
+        sqlite::run(&mut conn, "INSERT INTO t VALUES (1)", 0, None)
+            .await
+            .unwrap();
+        let tables = [DumpTable {
+            name: "t".into(),
+            view: false,
+        }];
+        let (data_only, _) = export_sqlite(
+            &mut conn,
+            &tables,
+            DumpOptions {
+                structure: false,
+                data: true,
+                drop_tables: true,
+                routines: true,
+            },
+        )
+        .await;
         assert!(!data_only.contains("CREATE TABLE") && !data_only.contains("DROP TABLE"));
         assert!(data_only.contains("INSERT INTO \"t\" (\"a\") VALUES\n(1);"));
-        let (structure_only, _) = export_sqlite(&mut conn, &tables, DumpOptions { structure: true, data: false, drop_tables: false, routines: true }).await;
-        assert!(structure_only.contains("CREATE TABLE t (a INT);") && !structure_only.contains("INSERT"));
+        let (structure_only, _) = export_sqlite(
+            &mut conn,
+            &tables,
+            DumpOptions {
+                structure: true,
+                data: false,
+                drop_tables: false,
+                routines: true,
+            },
+        )
+        .await;
+        assert!(
+            structure_only.contains("CREATE TABLE t (a INT);")
+                && !structure_only.contains("INSERT")
+        );
     }
 }

@@ -8,15 +8,15 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::commands::{sanitize_connection, AppState};
-use crate::db::ssh::{Credentials, Tunnel};
 use crate::db::filter::{self, Fragment};
 use crate::db::replace::{self, ReplacePreview, ReplaceRequest, ReplaceSample, ReplaceStatements};
+use crate::db::ssh::{Credentials, Tunnel};
 use crate::db::table_ops::{self, DropOptions, TruncateOptions};
 use crate::db::{
     self, dialect, first_text, text_at, BrowseRequest, BrowseResult, CellValue, ColumnDetail,
-    ColumnMeta, EditValue, IndexInfo, NamespaceList, Pool, PooledConn, RawOutput, ResultStore, RowInsert,
-    RowValues, SaveRequest,
-    SchemaColumn, SchemaDiagram, Session, SessionStore, TableInfo, TableStructure,
+    ColumnMeta, EditValue, IndexInfo, NamespaceList, Pool, PooledConn, RawOutput, ResultStore,
+    RowInsert, RowValues, SaveRequest, SchemaColumn, SchemaDiagram, Session, SessionStore,
+    TableInfo, TableStructure,
 };
 use crate::models::{ConnectionEntry, Driver};
 use crate::prompts::Prompter;
@@ -71,7 +71,10 @@ pub struct StatementResult {
  * A typed password wins over the saved one. Connections with an IAM or
  * command password source get a fresh one every time instead.
  */
-async fn password_for(entry: &ConnectionEntry, password: Option<String>) -> Result<Option<String>, String> {
+async fn password_for(
+    entry: &ConnectionEntry,
+    password: Option<String>,
+) -> Result<Option<String>, String> {
     if entry.driver == Driver::Sqlite {
         return Ok(None);
     }
@@ -116,7 +119,12 @@ async fn open_tunnel(
         return Ok((entry.clone(), None));
     }
     let credentials = Credentials {
-        secret: typed_or_saved(entry, entry.ssh.uses_secret(), ssh_secret, secrets::ssh_account)?,
+        secret: typed_or_saved(
+            entry,
+            entry.ssh.uses_secret(),
+            ssh_secret,
+            secrets::ssh_account,
+        )?,
         password: typed_or_saved(
             entry,
             entry.ssh.uses_second_password(),
@@ -133,7 +141,9 @@ async fn open_tunnel(
  * it: reconnecting then needs no new SSH sign-in, and so no one-time code.
  */
 fn reusable_tunnel(stale: &Session, entry: &ConnectionEntry) -> Option<Arc<Tunnel>> {
-    let same_route = stale.entry.ssh == entry.ssh && stale.entry.host == entry.host && stale.entry.port == entry.port;
+    let same_route = stale.entry.ssh == entry.ssh
+        && stale.entry.host == entry.host
+        && stale.entry.port == entry.port;
     stale
         .tunnel
         .as_ref()
@@ -148,7 +158,13 @@ fn explain(tunnel: Option<&Tunnel>, err: String) -> String {
     }
 }
 
-fn record(session: &Session, sql: &str, origin: QueryOrigin, started: Instant, outcome: &Result<RawOutput, String>) {
+fn record(
+    session: &Session,
+    sql: &str,
+    origin: QueryOrigin,
+    started: Instant,
+    outcome: &Result<RawOutput, String>,
+) {
     let rows = outcome.as_ref().map(|output| {
         Some(if output.columns.is_empty() {
             output.rows_affected
@@ -169,7 +185,12 @@ fn record(session: &Session, sql: &str, origin: QueryOrigin, started: Instant, o
     });
 }
 
-async fn pool_run(session: &Session, sql: &str, limit: usize, origin: QueryOrigin) -> Result<RawOutput, String> {
+async fn pool_run(
+    session: &Session,
+    sql: &str,
+    limit: usize,
+    origin: QueryOrigin,
+) -> Result<RawOutput, String> {
     let started = Instant::now();
     let outcome = session.pool.run(sql, limit).await;
     record(session, sql, origin, started, &outcome);
@@ -195,12 +216,17 @@ async fn conn_run(
 
 async fn load_namespaces(session: &Session) -> Result<NamespaceList, String> {
     let dialect = dialect(session.driver);
-    let items: Vec<String> = pool_run(session, dialect.namespaces_sql(), usize::MAX, QueryOrigin::Schema)
-        .await?
-        .text_rows()
-        .into_iter()
-        .filter_map(|row| row.into_iter().next().flatten())
-        .collect();
+    let items: Vec<String> = pool_run(
+        session,
+        dialect.namespaces_sql(),
+        usize::MAX,
+        QueryOrigin::Schema,
+    )
+    .await?
+    .text_rows()
+    .into_iter()
+    .filter_map(|row| row.into_iter().next().flatten())
+    .collect();
     Ok(NamespaceList {
         items,
         current: session.namespace(),
@@ -272,7 +298,9 @@ pub async fn connect(
             .cloned()
             .ok_or_else(|| "Connection not found".to_string())?
     };
-    let key = session_id.filter(|id| !id.is_empty()).unwrap_or(connection_id);
+    let key = session_id
+        .filter(|id| !id.is_empty())
+        .unwrap_or(connection_id);
     let password = password_for(&entry, password).await?;
     if let Some(previous) = sessions.remove(&key).await {
         previous.close().await;
@@ -365,12 +393,24 @@ async fn open_session(
     };
     let dialect = dialect(session.driver);
     let setup = async {
-        let version = first_text(&pool_run(&session, dialect.version_sql(), 1, QueryOrigin::Schema).await?);
+        let version =
+            first_text(&pool_run(&session, dialect.version_sql(), 1, QueryOrigin::Schema).await?);
         let reported = first_text(
-            &conn_run(&session, dialect.current_namespace_sql(), 1, None, QueryOrigin::Schema).await?,
+            &conn_run(
+                &session,
+                dialect.current_namespace_sql(),
+                1,
+                None,
+                QueryOrigin::Schema,
+            )
+            .await?,
         );
         let mut namespaces = load_namespaces(&session).await?;
-        let wanted = if restore.is_empty() { reported.as_str() } else { restore };
+        let wanted = if restore.is_empty() {
+            reported.as_str()
+        } else {
+            restore
+        };
         let current = pick_namespace(
             &namespaces.items,
             wanted,
@@ -388,7 +428,11 @@ async fn open_session(
             server_version: version,
             namespaces,
             namespace_label: dialect.namespace_label().into(),
-            system_namespaces: dialect.system_namespaces().iter().map(|s| s.to_string()).collect(),
+            system_namespaces: dialect
+                .system_namespaces()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         })
     };
     match setup.await {
@@ -405,7 +449,10 @@ async fn open_session(
  * falls back to the password typed for the stale session when none is saved.
  * Fetched passwords are fetched again, since the old one may have expired.
  */
-async fn reopen_credentials(app: &AppHandle, stale: &Session) -> Result<(ConnectionEntry, Option<String>), String> {
+async fn reopen_credentials(
+    app: &AppHandle,
+    stale: &Session,
+) -> Result<(ConnectionEntry, Option<String>), String> {
     let entry = {
         let state = app.state::<AppState>();
         let data = state.data.lock().map_err(|err| err.to_string())?;
@@ -434,8 +481,13 @@ async fn rebuild(
         password.filter(|value| !value.is_empty()).or(saved)
     };
     let reuse = reusable_tunnel(stale, &entry);
-    let (session, info) = open_session(entry, password, &stale.namespace(), prompter, reuse).await?;
-    match app.state::<SessionStore>().replace(connection_id, stale, session).await {
+    let (session, info) =
+        open_session(entry, password, &stale.namespace(), prompter, reuse).await?;
+    match app
+        .state::<SessionStore>()
+        .replace(connection_id, stale, session)
+        .await
+    {
         Ok(next) => {
             let stale = stale.clone();
             tauri::async_runtime::spawn(async move { stale.close().await });
@@ -452,7 +504,11 @@ async fn rebuild(
  * Called after an operation fails because the connection dropped. Returns a
  * working session, or marks the connection lost and tells the frontend.
  */
-async fn recover(app: &AppHandle, connection_id: &str, stale: &Arc<Session>) -> Option<Arc<Session>> {
+async fn recover(
+    app: &AppHandle,
+    connection_id: &str,
+    stale: &Arc<Session>,
+) -> Option<Arc<Session>> {
     let sessions = app.state::<SessionStore>();
     let _guard = sessions.reconnect_guard().await;
     let current = sessions.current(connection_id).await?;
@@ -461,13 +517,19 @@ async fn recover(app: &AppHandle, connection_id: &str, stale: &Arc<Session>) -> 
     }
     match rebuild(app, connection_id, stale, None, &Prompter::background()).await {
         Ok((session, _)) => {
-            let event = ConnectionEvent { connection_id, error: None };
+            let event = ConnectionEvent {
+                connection_id,
+                error: None,
+            };
             let _ = app.emit(CONNECTION_RESTORED_EVENT, event);
             Some(session)
         }
         Err(err) => {
             stale.mark_lost();
-            let event = ConnectionEvent { connection_id, error: Some(&err) };
+            let event = ConnectionEvent {
+                connection_id,
+                error: Some(&err),
+            };
             let _ = app.emit(CONNECTION_LOST_EVENT, event);
             None
         }
@@ -486,10 +548,12 @@ where
 {
     let session = app.state::<SessionStore>().get(connection_id).await?;
     match op(session.clone()).await {
-        Err(err) if db::is_connection_lost(&err) => match recover(app, connection_id, &session).await {
-            Some(next) => op(next).await,
-            None => Err(err),
-        },
+        Err(err) if db::is_connection_lost(&err) => {
+            match recover(app, connection_id, &session).await {
+                Some(next) => op(next).await,
+                None => Err(err),
+            }
+        }
         outcome => outcome,
     }
 }
@@ -525,38 +589,65 @@ pub async fn disconnect(
 }
 
 #[tauri::command]
-pub async fn list_databases(app: AppHandle, connection_id: String) -> Result<NamespaceList, String> {
-    with_session(&app, &connection_id, |session| async move { load_namespaces(&session).await }).await
+pub async fn list_databases(
+    app: AppHandle,
+    connection_id: String,
+) -> Result<NamespaceList, String> {
+    with_session(&app, &connection_id, |session| async move {
+        load_namespaces(&session).await
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn set_database(app: AppHandle, connection_id: String, namespace: String) -> Result<(), String> {
+pub async fn set_database(
+    app: AppHandle,
+    connection_id: String,
+    namespace: String,
+) -> Result<(), String> {
     let namespace = namespace.as_str();
-    with_session(&app, &connection_id, move |session| use_namespace(session, namespace)).await
+    with_session(&app, &connection_id, move |session| {
+        use_namespace(session, namespace)
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn create_database(app: AppHandle, connection_id: String, namespace: String) -> Result<(), String> {
+pub async fn create_database(
+    app: AppHandle,
+    connection_id: String,
+    namespace: String,
+) -> Result<(), String> {
     let namespace = namespace.trim();
     if namespace.is_empty() {
         return Err("Enter a name.".into());
     }
     let session = app.state::<SessionStore>().get(&connection_id).await?;
     let dialect = dialect(session.driver);
-    let sql = dialect
-        .create_namespace_sql(namespace)
-        .ok_or_else(|| format!("{} can't create a {} here.", session.driver.label(), dialect.namespace_label().to_lowercase()))?;
+    let sql = dialect.create_namespace_sql(namespace).ok_or_else(|| {
+        format!(
+            "{} can't create a {} here.",
+            session.driver.label(),
+            dialect.namespace_label().to_lowercase()
+        )
+    })?;
     pool_run(&session, &sql, 0, QueryOrigin::Schema).await?;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn drop_database(app: AppHandle, connection_id: String, namespace: String) -> Result<(), String> {
+pub async fn drop_database(
+    app: AppHandle,
+    connection_id: String,
+    namespace: String,
+) -> Result<(), String> {
     let session = app.state::<SessionStore>().get(&connection_id).await?;
     let dialect = dialect(session.driver);
     let label = dialect.namespace_label().to_lowercase();
     if namespace == session.namespace() {
-        return Err(format!("Switch to another {label} before dropping this one."));
+        return Err(format!(
+            "Switch to another {label} before dropping this one."
+        ));
     }
     let sql = dialect
         .drop_namespace_sql(&namespace)
@@ -567,7 +658,12 @@ pub async fn drop_database(app: AppHandle, connection_id: String, namespace: Str
 }
 
 #[tauri::command]
-pub async fn rename_database(app: AppHandle, connection_id: String, from: String, to: String) -> Result<(), String> {
+pub async fn rename_database(
+    app: AppHandle,
+    connection_id: String,
+    from: String,
+    to: String,
+) -> Result<(), String> {
     let to = to.trim();
     if to.is_empty() {
         return Err("Enter a name.".into());
@@ -600,7 +696,15 @@ pub async fn rename_database(app: AppHandle, connection_id: String, from: String
  * emptied original. Grants on the old name are not carried over.
  */
 async fn rename_mysql_database(session: &Session, from: &str, to: &str) -> Result<(), String> {
-    let blockers = first_text(&pool_run(session, &db::mysql::rename_blockers_sql(from), 1, QueryOrigin::Schema).await?);
+    let blockers = first_text(
+        &pool_run(
+            session,
+            &db::mysql::rename_blockers_sql(from),
+            1,
+            QueryOrigin::Schema,
+        )
+        .await?,
+    );
     if blockers.parse::<u64>().unwrap_or(0) > 0 {
         return Err(
             "MySQL can only rename a database by moving its tables, and this one has views, triggers, \
@@ -608,22 +712,38 @@ async fn rename_mysql_database(session: &Session, from: &str, to: &str) -> Resul
                 .into(),
         );
     }
-    let charset = pool_run(session, &db::mysql::charset_sql(from), 1, QueryOrigin::Schema)
-        .await?
-        .text_rows()
-        .into_iter()
-        .next()
-        .unwrap_or_default();
-    let tables: Vec<String> = pool_run(session, &db::mysql::base_tables_sql(from), usize::MAX, QueryOrigin::Schema)
-        .await?
-        .text_rows()
-        .into_iter()
-        .filter_map(|row| row.into_iter().next().flatten())
-        .collect();
+    let charset = pool_run(
+        session,
+        &db::mysql::charset_sql(from),
+        1,
+        QueryOrigin::Schema,
+    )
+    .await?
+    .text_rows()
+    .into_iter()
+    .next()
+    .unwrap_or_default();
+    let tables: Vec<String> = pool_run(
+        session,
+        &db::mysql::base_tables_sql(from),
+        usize::MAX,
+        QueryOrigin::Schema,
+    )
+    .await?
+    .text_rows()
+    .into_iter()
+    .filter_map(|row| row.into_iter().next().flatten())
+    .collect();
     let create = db::mysql::create_like_sql(to, &text_at(&charset, 0), &text_at(&charset, 1));
     pool_run(session, &create, 0, QueryOrigin::Schema).await?;
     if !tables.is_empty() {
-        let moved = pool_run(session, &db::mysql::move_tables_sql(from, to, &tables), 0, QueryOrigin::Schema).await;
+        let moved = pool_run(
+            session,
+            &db::mysql::move_tables_sql(from, to, &tables),
+            0,
+            QueryOrigin::Schema,
+        )
+        .await;
         if let Err(err) = moved {
             let cleanup = format!("DROP DATABASE {}", db::quote_backtick(to));
             let _ = pool_run(session, &cleanup, 0, QueryOrigin::Schema).await;
@@ -656,9 +776,16 @@ async fn use_namespace(session: Arc<Session>, namespace: &str) -> Result<(), Str
 }
 
 #[tauri::command]
-pub async fn list_tables(app: AppHandle, connection_id: String, namespace: String) -> Result<Vec<TableInfo>, String> {
+pub async fn list_tables(
+    app: AppHandle,
+    connection_id: String,
+    namespace: String,
+) -> Result<Vec<TableInfo>, String> {
     let namespace = namespace.as_str();
-    with_session(&app, &connection_id, move |session| tables_in(session, namespace)).await
+    with_session(&app, &connection_id, move |session| {
+        tables_in(session, namespace)
+    })
+    .await
 }
 
 pub async fn tables_in(session: Arc<Session>, namespace: &str) -> Result<Vec<TableInfo>, String> {
@@ -709,10 +836,15 @@ async fn truncate_on(
         first_text(&detached_run(session, conn, &sql, QueryOrigin::Schema).await?) != "0"
     };
     let mut emptied = Vec::new();
-    for sql in table_ops::truncate_statements(session.driver, namespace, tables, options, has_sequence) {
+    for sql in
+        table_ops::truncate_statements(session.driver, namespace, tables, options, has_sequence)
+    {
         if let Err(err) = detached_run(session, conn, &sql, QueryOrigin::Edit).await {
             if session.driver == Driver::Mysql && !emptied.is_empty() {
-                return Err(format!("{err} These tables were already emptied: {}.", emptied.join(", ")));
+                return Err(format!(
+                    "{err} These tables were already emptied: {}.",
+                    emptied.join(", ")
+                ));
             }
             return Err(err);
         }
@@ -738,7 +870,9 @@ pub async fn drop_tables(
     let mut conn = session.pool.detached().await?;
     let mut outcome = Ok(());
     for sql in table_ops::drop_statements(session.driver, &namespace, &tables, options) {
-        outcome = detached_run(&session, &mut conn, &sql, QueryOrigin::Schema).await.map(|_| ());
+        outcome = detached_run(&session, &mut conn, &sql, QueryOrigin::Schema)
+            .await
+            .map(|_| ());
         if outcome.is_err() {
             break;
         }
@@ -750,7 +884,12 @@ pub async fn drop_tables(
     outcome
 }
 
-async fn detached_run(session: &Session, conn: &mut db::Conn, sql: &str, origin: QueryOrigin) -> Result<RawOutput, String> {
+async fn detached_run(
+    session: &Session,
+    conn: &mut db::Conn,
+    sql: &str,
+    origin: QueryOrigin,
+) -> Result<RawOutput, String> {
     let started = Instant::now();
     let outcome = conn.run(sql, usize::MAX, None).await;
     record(session, sql, origin, started, &outcome);
@@ -765,39 +904,49 @@ pub async fn table_structure(
     table: String,
 ) -> Result<TableStructure, String> {
     let (namespace, table) = (namespace.as_str(), table.as_str());
-    with_session(&app, &connection_id, move |session| structure_of(session, namespace, table)).await
+    with_session(&app, &connection_id, move |session| {
+        structure_of(session, namespace, table)
+    })
+    .await
 }
 
 /** Reads the column list from the catalog and caches it for filter checks. */
-async fn load_columns(session: &Session, namespace: &str, table: &str) -> Result<Arc<Vec<ColumnDetail>>, String> {
+async fn load_columns(
+    session: &Session,
+    namespace: &str,
+    table: &str,
+) -> Result<Arc<Vec<ColumnDetail>>, String> {
     let driver = session.driver;
     let columns_sql = dialect(driver).columns_sql(namespace, table);
-    let columns: Vec<ColumnDetail> = pool_run(session, &columns_sql, usize::MAX, QueryOrigin::Schema)
-        .await?
-        .rows
-        .into_iter()
-        .map(|row| {
-            let text = db::texts(&row);
-            let data_type = text_at(&text, 1);
-            let enum_values = match driver {
-                Driver::Mysql => filter::mysql_enum_values(&data_type),
-                Driver::Postgres => serde_json::from_str(&text_at(&text, 6)).unwrap_or_default(),
-                Driver::Sqlite => Vec::new(),
-            };
-            let mut column = ColumnDetail {
-                name: text_at(&text, 0),
-                data_type,
-                nullable: text_at(&text, 2).eq_ignore_ascii_case("YES"),
-                default_value: text.get(3).cloned().flatten(),
-                primary_key: row.get(4).is_some_and(CellValue::is_truthy),
-                extra: text_at(&text, 5),
-                filter_kind: filter::FilterKind::Other,
-                enum_values,
-            };
-            column.filter_kind = filter::column_class(driver, &column).kind;
-            column
-        })
-        .collect();
+    let columns: Vec<ColumnDetail> =
+        pool_run(session, &columns_sql, usize::MAX, QueryOrigin::Schema)
+            .await?
+            .rows
+            .into_iter()
+            .map(|row| {
+                let text = db::texts(&row);
+                let data_type = text_at(&text, 1);
+                let enum_values = match driver {
+                    Driver::Mysql => filter::mysql_enum_values(&data_type),
+                    Driver::Postgres => {
+                        serde_json::from_str(&text_at(&text, 6)).unwrap_or_default()
+                    }
+                    Driver::Sqlite => Vec::new(),
+                };
+                let mut column = ColumnDetail {
+                    name: text_at(&text, 0),
+                    data_type,
+                    nullable: text_at(&text, 2).eq_ignore_ascii_case("YES"),
+                    default_value: text.get(3).cloned().flatten(),
+                    primary_key: row.get(4).is_some_and(CellValue::is_truthy),
+                    extra: text_at(&text, 5),
+                    filter_kind: filter::FilterKind::Other,
+                    enum_values,
+                };
+                column.filter_kind = filter::column_class(driver, &column).kind;
+                column
+            })
+            .collect();
     let columns = Arc::new(columns);
     if !columns.is_empty() {
         session.cache_columns(namespace, table, columns.clone());
@@ -805,16 +954,27 @@ async fn load_columns(session: &Session, namespace: &str, table: &str) -> Result
     Ok(columns)
 }
 
-pub(crate) async fn table_columns(session: &Session, namespace: &str, table: &str) -> Result<Arc<Vec<ColumnDetail>>, String> {
+pub(crate) async fn table_columns(
+    session: &Session,
+    namespace: &str,
+    table: &str,
+) -> Result<Arc<Vec<ColumnDetail>>, String> {
     match session.cached_columns(namespace, table) {
         Some(columns) => Ok(columns),
         None => load_columns(session, namespace, table).await,
     }
 }
 
-async fn structure_of(session: Arc<Session>, namespace: &str, table: &str) -> Result<TableStructure, String> {
+async fn structure_of(
+    session: Arc<Session>,
+    namespace: &str,
+    table: &str,
+) -> Result<TableStructure, String> {
     let dialect = dialect(session.driver);
-    let columns = load_columns(&session, namespace, table).await?.as_ref().clone();
+    let columns = load_columns(&session, namespace, table)
+        .await?
+        .as_ref()
+        .clone();
     let indexes_sql = dialect.indexes_sql(namespace, table);
     let indexes = pool_run(&session, &indexes_sql, usize::MAX, QueryOrigin::Schema)
         .await?
@@ -831,8 +991,14 @@ async fn structure_of(session: Arc<Session>, namespace: &str, table: &str) -> Re
         })
         .collect();
     let foreign_keys_sql = dialect.foreign_keys_sql(namespace, table);
-    let foreign_keys = db::foreign_keys(&pool_run(&session, &foreign_keys_sql, usize::MAX, QueryOrigin::Schema).await?);
-    Ok(TableStructure { columns, indexes, foreign_keys })
+    let foreign_keys = db::foreign_keys(
+        &pool_run(&session, &foreign_keys_sql, usize::MAX, QueryOrigin::Schema).await?,
+    );
+    Ok(TableStructure {
+        columns,
+        indexes,
+        foreign_keys,
+    })
 }
 
 #[tauri::command]
@@ -842,7 +1008,10 @@ pub async fn schema_columns(
     namespace: String,
 ) -> Result<Vec<SchemaColumn>, String> {
     let namespace = namespace.as_str();
-    with_session(&app, &connection_id, move |session| columns_in(session, namespace)).await
+    with_session(&app, &connection_id, move |session| {
+        columns_in(session, namespace)
+    })
+    .await
 }
 
 async fn columns_in(session: Arc<Session>, namespace: &str) -> Result<Vec<SchemaColumn>, String> {
@@ -865,16 +1034,26 @@ pub async fn schema_diagram(
     namespace: String,
 ) -> Result<SchemaDiagram, String> {
     let namespace = namespace.as_str();
-    with_session(&app, &connection_id, move |session| diagram_of(session, namespace)).await
+    with_session(&app, &connection_id, move |session| {
+        diagram_of(session, namespace)
+    })
+    .await
 }
 
 async fn diagram_of(session: Arc<Session>, namespace: &str) -> Result<SchemaDiagram, String> {
     let dialect = dialect(session.driver);
     let columns_sql = dialect.diagram_columns_sql(namespace);
-    let tables = db::diagram_tables(&pool_run(&session, &columns_sql, usize::MAX, QueryOrigin::Schema).await?);
+    let tables = db::diagram_tables(
+        &pool_run(&session, &columns_sql, usize::MAX, QueryOrigin::Schema).await?,
+    );
     let keys_sql = dialect.schema_foreign_keys_sql(namespace);
-    let foreign_keys = db::schema_foreign_keys(&pool_run(&session, &keys_sql, usize::MAX, QueryOrigin::Schema).await?);
-    Ok(SchemaDiagram { tables, foreign_keys })
+    let foreign_keys = db::schema_foreign_keys(
+        &pool_run(&session, &keys_sql, usize::MAX, QueryOrigin::Schema).await?,
+    );
+    Ok(SchemaDiagram {
+        tables,
+        foreign_keys,
+    })
 }
 
 const MORPH_TYPE_LIMIT: usize = 100;
@@ -891,7 +1070,10 @@ pub async fn morph_types(
     columns: Vec<SchemaColumn>,
 ) -> Result<Vec<Vec<String>>, String> {
     let (namespace, columns) = (namespace.as_str(), columns.as_slice());
-    with_session(&app, &connection_id, move |session| morph_types_in(session, namespace, columns)).await
+    with_session(&app, &connection_id, move |session| {
+        morph_types_in(session, namespace, columns)
+    })
+    .await
 }
 
 async fn morph_types_in(
@@ -930,11 +1112,18 @@ pub async fn browse_table(
     request: BrowseRequest,
 ) -> Result<BrowseResult, String> {
     let request = &request;
-    with_session(&app, &connection_id, move |session| browse(session, request)).await
+    with_session(&app, &connection_id, move |session| {
+        browse(session, request)
+    })
+    .await
 }
 
 /** `SELECT … FROM table [WHERE filter]`, with the filter checked against the table's real columns. */
-async fn filtered_select(session: &Session, request: &BrowseRequest, select: &str) -> Result<Fragment, String> {
+async fn filtered_select(
+    session: &Session,
+    request: &BrowseRequest,
+    select: &str,
+) -> Result<Fragment, String> {
     let dialect = dialect(session.driver);
     let table = dialect.qualified(&request.namespace, &request.table);
     let mut statement = Fragment::new(format!("SELECT {select} FROM {table}"));
@@ -943,8 +1132,14 @@ async fn filtered_select(session: &Session, request: &BrowseRequest, select: &st
     };
     let columns = table_columns(session, &request.namespace, &request.table).await?;
     let classes = filter::column_classes(session.driver, &columns);
-    let ctx = filter::FilterContext { driver: session.driver, columns: &classes, utc_offset: request.utc_offset };
-    if let Some(condition) = filter::compile(&ctx, root).map_err(filter::FilterError::into_message)? {
+    let ctx = filter::FilterContext {
+        driver: session.driver,
+        columns: &classes,
+        utc_offset: request.utc_offset,
+    };
+    if let Some(condition) =
+        filter::compile(&ctx, root).map_err(filter::FilterError::into_message)?
+    {
         statement.push_sql(" WHERE ");
         statement.append(condition);
     }
@@ -955,10 +1150,16 @@ async fn filtered_select(session: &Session, request: &BrowseRequest, select: &st
 async fn sorted_select(session: &Session, request: &BrowseRequest) -> Result<Fragment, String> {
     let dialect = dialect(session.driver);
     let mut statement = filtered_select(session, request, "*").await?;
-    if let Some(column) = request.order_by.as_deref().filter(|column| !column.is_empty()) {
+    if let Some(column) = request
+        .order_by
+        .as_deref()
+        .filter(|column| !column.is_empty())
+    {
         let columns = table_columns(session, &request.namespace, &request.table).await?;
         if !columns.iter().any(|known| known.name == column) {
-            return Err(format!("Can't sort by “{column}” because the column no longer exists. Refresh the table."));
+            return Err(format!(
+                "Can't sort by “{column}” because the column no longer exists. Refresh the table."
+            ));
         }
         statement.push_sql(format!(
             " ORDER BY {} {}",
@@ -969,7 +1170,10 @@ async fn sorted_select(session: &Session, request: &BrowseRequest) -> Result<Fra
     Ok(statement)
 }
 
-async fn browse_statement(session: &Session, request: &BrowseRequest) -> Result<(Fragment, u64), String> {
+async fn browse_statement(
+    session: &Session,
+    request: &BrowseRequest,
+) -> Result<(Fragment, u64), String> {
     let mut statement = sorted_select(session, request).await?;
     let limit = request.limit.clamp(1, BROWSE_LIMIT_MAX);
     statement.push_sql(format!(" LIMIT {limit} OFFSET {}", request.offset));
@@ -977,9 +1181,15 @@ async fn browse_statement(session: &Session, request: &BrowseRequest) -> Result<
 }
 
 /** What exporting a table view reads: every matching row, or only the page on screen. */
-pub(crate) async fn export_statement(session: &Session, request: &BrowseRequest, page_only: bool) -> Result<Fragment, String> {
+pub(crate) async fn export_statement(
+    session: &Session,
+    request: &BrowseRequest,
+    page_only: bool,
+) -> Result<Fragment, String> {
     if page_only {
-        return browse_statement(session, request).await.map(|(statement, _)| statement);
+        return browse_statement(session, request)
+            .await
+            .map(|(statement, _)| statement);
     }
     sorted_select(session, request).await
 }
@@ -991,7 +1201,13 @@ fn record_statement(
     started: Instant,
     outcome: &Result<RawOutput, String>,
 ) {
-    record(session, &statement.inline(session.driver), origin, started, outcome);
+    record(
+        session,
+        &statement.inline(session.driver),
+        origin,
+        started,
+        outcome,
+    );
 }
 
 /**
@@ -1085,8 +1301,15 @@ async fn browse(session: Arc<Session>, request: &BrowseRequest) -> Result<Browse
     let (statement, limit) = browse_statement(&session, request).await?;
     let started = Instant::now();
     let output = if request.request_id.is_some() && request.filter.is_some() {
-        match run_controlled(&session, &statement, limit as usize, request.request_id.as_deref(), None, QueryOrigin::Browse)
-            .await?
+        match run_controlled(
+            &session,
+            &statement,
+            limit as usize,
+            request.request_id.as_deref(),
+            None,
+            QueryOrigin::Browse,
+        )
+        .await?
         {
             Some(output) => output,
             None => return Err("Query cancelled.".into()),
@@ -1111,9 +1334,21 @@ async fn browse(session: Arc<Session>, request: &BrowseRequest) -> Result<Browse
     })
 }
 
-async fn count(session: &Session, request: &BrowseRequest, timeout: Option<Duration>) -> Result<Option<u64>, String> {
+async fn count(
+    session: &Session,
+    request: &BrowseRequest,
+    timeout: Option<Duration>,
+) -> Result<Option<u64>, String> {
     let statement = filtered_select(session, request, "COUNT(*)").await?;
-    let output = run_controlled(session, &statement, 1, request.request_id.as_deref(), timeout, QueryOrigin::Browse).await?;
+    let output = run_controlled(
+        session,
+        &statement,
+        1,
+        request.request_id.as_deref(),
+        timeout,
+        QueryOrigin::Browse,
+    )
+    .await?;
     Ok(output
         .and_then(|count| count.rows.first()?.first()?.as_i64())
         .and_then(|count| u64::try_from(count).ok()))
@@ -1129,11 +1364,18 @@ pub async fn count_rows(
 ) -> Result<Option<u64>, String> {
     let timeout = timeout_ms.map(|ms| Duration::from_millis(ms).min(COUNT_TIMEOUT_MAX));
     let request = &request;
-    with_session(&app, &connection_id, move |session| async move { count(&session, request, timeout).await }).await
+    with_session(&app, &connection_id, move |session| async move {
+        count(&session, request, timeout).await
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn cancel_browse(sessions: State<'_, SessionStore>, connection_id: String, request_id: String) -> Result<(), String> {
+pub async fn cancel_browse(
+    sessions: State<'_, SessionStore>,
+    connection_id: String,
+    request_id: String,
+) -> Result<(), String> {
     if let Some(session) = sessions.current(&connection_id).await {
         cancel_request(&session, Some(&request_id)).await;
     }
@@ -1142,7 +1384,11 @@ pub async fn cancel_browse(sessions: State<'_, SessionStore>, connection_id: Str
 
 /** The SQL a browse request runs, with its values written out, for showing or copying. */
 #[tauri::command]
-pub async fn preview_browse_sql(app: AppHandle, connection_id: String, request: BrowseRequest) -> Result<String, String> {
+pub async fn preview_browse_sql(
+    app: AppHandle,
+    connection_id: String,
+    request: BrowseRequest,
+) -> Result<String, String> {
     let request = &request;
     with_session(&app, &connection_id, move |session| async move {
         let (statement, _) = browse_statement(&session, request).await?;
@@ -1165,46 +1411,96 @@ pub async fn distinct_values(
     search: String,
     limit: Option<u32>,
 ) -> Result<Vec<String>, String> {
-    let (namespace, table, column, search) = (namespace.as_str(), table.as_str(), column.as_str(), search.as_str());
+    let (namespace, table, column, search) = (
+        namespace.as_str(),
+        table.as_str(),
+        column.as_str(),
+        search.as_str(),
+    );
     let limit = limit.unwrap_or(50).clamp(1, SUGGESTION_LIMIT_MAX);
     with_session(&app, &connection_id, move |session| async move {
         let columns = table_columns(&session, namespace, table).await?;
         let Some(detail) = columns.iter().find(|known| known.name == column) else {
-            return Err(format!("The column “{column}” no longer exists in this table."));
+            return Err(format!(
+                "The column “{column}” no longer exists in this table."
+            ));
         };
-        if matches!(detail.filter_kind, filter::FilterKind::Binary | filter::FilterKind::Boolean) {
+        if matches!(
+            detail.filter_kind,
+            filter::FilterKind::Binary | filter::FilterKind::Boolean
+        ) {
             return Ok(Vec::new());
         }
         let qualified = dialect(session.driver).qualified(namespace, table);
-        let statement = filter::suggestion_sql(session.driver, &qualified, column, search, SUGGESTION_SAMPLE, limit);
-        let output = run_controlled(&session, &statement, limit as usize, None, Some(SUGGESTION_TIMEOUT), QueryOrigin::Schema)
-            .await?;
+        let statement = filter::suggestion_sql(
+            session.driver,
+            &qualified,
+            column,
+            search,
+            SUGGESTION_SAMPLE,
+            limit,
+        );
+        let output = run_controlled(
+            &session,
+            &statement,
+            limit as usize,
+            None,
+            Some(SUGGESTION_TIMEOUT),
+            QueryOrigin::Schema,
+        )
+        .await?;
         Ok(output
-            .map(|output| output.rows.iter().filter_map(|row| row.first()?.to_text()).collect())
+            .map(|output| {
+                output
+                    .rows
+                    .iter()
+                    .filter_map(|row| row.first()?.to_text())
+                    .collect()
+            })
             .unwrap_or_default())
     })
     .await
 }
 
-async fn replace_statements(session: &Session, request: &ReplaceRequest) -> Result<ReplaceStatements, String> {
+async fn replace_statements(
+    session: &Session,
+    request: &ReplaceRequest,
+) -> Result<ReplaceStatements, String> {
     let columns = table_columns(session, &request.namespace, &request.table).await?;
     let classes = filter::column_classes(session.driver, &columns);
     let Some(class) = classes.get(&request.column) else {
-        return Err(format!("The column “{}” no longer exists in this table. Refresh the table.", request.column));
+        return Err(format!(
+            "The column “{}” no longer exists in this table. Refresh the table.",
+            request.column
+        ));
     };
     replace::check(request, class.kind)?;
     let condition = match &request.filter {
         Some(root) => {
-            let ctx = filter::FilterContext { driver: session.driver, columns: &classes, utc_offset: request.utc_offset };
+            let ctx = filter::FilterContext {
+                driver: session.driver,
+                columns: &classes,
+                utc_offset: request.utc_offset,
+            };
             filter::compile(&ctx, root).map_err(filter::FilterError::into_message)?
         }
         None => None,
     };
     let table = dialect(session.driver).qualified(&request.namespace, &request.table);
-    Ok(replace::statements(session.driver, &table, request, condition))
+    Ok(replace::statements(
+        session.driver,
+        &table,
+        request,
+        condition,
+    ))
 }
 
-async fn pool_statement(session: &Session, statement: &Fragment, limit: usize, origin: QueryOrigin) -> Result<RawOutput, String> {
+async fn pool_statement(
+    session: &Session,
+    statement: &Fragment,
+    limit: usize,
+    origin: QueryOrigin,
+) -> Result<RawOutput, String> {
     let started = Instant::now();
     let outcome = session.pool.run_statement(statement, limit).await;
     record_statement(session, statement, origin, started, &outcome);
@@ -1213,7 +1509,11 @@ async fn pool_statement(session: &Session, statement: &Fragment, limit: usize, o
 
 /** How many rows a find and replace would change, a few of them before and after, and the UPDATE it would run. */
 #[tauri::command]
-pub async fn preview_replace(app: AppHandle, connection_id: String, request: ReplaceRequest) -> Result<ReplacePreview, String> {
+pub async fn preview_replace(
+    app: AppHandle,
+    connection_id: String,
+    request: ReplaceRequest,
+) -> Result<ReplacePreview, String> {
     let request = &request;
     with_session(&app, &connection_id, move |session| async move {
         let statements = replace_statements(&session, request).await?;
@@ -1224,21 +1524,37 @@ pub async fn preview_replace(app: AppHandle, connection_id: String, request: Rep
             .and_then(|row| row.first()?.as_i64())
             .and_then(|count| u64::try_from(count).ok())
             .unwrap_or(0);
-        let samples = pool_statement(&session, &statements.sample, replace::SAMPLE_LIMIT, QueryOrigin::Browse)
-            .await?
-            .rows
-            .iter()
-            .filter_map(|row| row.first()?.to_text())
-            .map(|before| ReplaceSample { after: replace::replaced(request, &before), before })
-            .collect();
-        Ok(ReplacePreview { count, samples, sql: statements.update.inline(session.driver) })
+        let samples = pool_statement(
+            &session,
+            &statements.sample,
+            replace::SAMPLE_LIMIT,
+            QueryOrigin::Browse,
+        )
+        .await?
+        .rows
+        .iter()
+        .filter_map(|row| row.first()?.to_text())
+        .map(|before| ReplaceSample {
+            after: replace::replaced(request, &before),
+            before,
+        })
+        .collect();
+        Ok(ReplacePreview {
+            count,
+            samples,
+            sql: statements.update.inline(session.driver),
+        })
     })
     .await
 }
 
 /** Runs a find and replace and returns how many rows changed. Never retried, since replacing twice can change a value twice. */
 #[tauri::command]
-pub async fn replace_values(app: AppHandle, connection_id: String, request: ReplaceRequest) -> Result<u64, String> {
+pub async fn replace_values(
+    app: AppHandle,
+    connection_id: String,
+    request: ReplaceRequest,
+) -> Result<u64, String> {
     let session = app.state::<SessionStore>().get(&connection_id).await?;
     let outcome = async {
         let statements = replace_statements(&session, &request).await?;
@@ -1311,25 +1627,42 @@ async fn save(session: Arc<Session>, requests: &[SaveRequest]) -> Result<usize, 
             statements.push(db::update_statement(session.driver, &table, update)?);
         }
         let explicit = |insert: &RowInsert, column: &str| {
-            insert.values.iter().any(|cell| cell.column == column && !matches!(cell.value, EditValue::Null))
+            insert
+                .values
+                .iter()
+                .any(|cell| cell.column == column && !matches!(cell.value, EditValue::Null))
         };
         let sequences = if session.driver == Driver::Postgres
-            && request
-                .inserts
-                .iter()
-                .any(|insert| insert.values.iter().any(|cell| !matches!(cell.value, EditValue::Null)))
-        {
+            && request.inserts.iter().any(|insert| {
+                insert
+                    .values
+                    .iter()
+                    .any(|cell| !matches!(cell.value, EditValue::Null))
+            }) {
             let sql = db::postgres::sequence_columns_sql(&request.namespace, &request.table);
-            db::postgres::sequence_columns(&pool_run(&session, &sql, usize::MAX, QueryOrigin::Schema).await?)
+            db::postgres::sequence_columns(
+                &pool_run(&session, &sql, usize::MAX, QueryOrigin::Schema).await?,
+            )
         } else {
             Vec::new()
         };
         for insert in &request.inserts {
-            let overriding = sequences.iter().any(|column| column.always && explicit(insert, &column.name));
-            statements.push(db::insert_statement(session.driver, &table, insert, overriding));
+            let overriding = sequences
+                .iter()
+                .any(|column| column.always && explicit(insert, &column.name));
+            statements.push(db::insert_statement(
+                session.driver,
+                &table,
+                insert,
+                overriding,
+            ));
         }
         for column in &sequences {
-            if request.inserts.iter().any(|insert| explicit(insert, &column.name)) {
+            if request
+                .inserts
+                .iter()
+                .any(|insert| explicit(insert, &column.name))
+            {
                 statements.push(db::postgres::sync_sequence_statement(&table, column));
             }
         }
@@ -1343,7 +1676,12 @@ async fn save(session: Arc<Session>, requests: &[SaveRequest]) -> Result<usize, 
             };
             for change in &request.columns {
                 let existing = current.iter().find(|column| column.name == change.column);
-                schema_statements.extend(db::alter_statements(session.driver, &table, change, existing)?);
+                schema_statements.extend(db::alter_statements(
+                    session.driver,
+                    &table,
+                    change,
+                    existing,
+                )?);
             }
         }
         for column in &request.new_columns {
@@ -1440,12 +1778,23 @@ pub async fn run_query(
         .map_err(|err| err.to_string())?;
     session.cancel.store(false, Ordering::Relaxed);
     let mut output = Vec::new();
-    for sql in statements.iter().map(|sql| sql.trim()).filter(|sql| !sql.is_empty()) {
+    for sql in statements
+        .iter()
+        .map(|sql| sql.trim())
+        .filter(|sql| !sql.is_empty())
+    {
         if session.cancelled() {
             break;
         }
         let started = Instant::now();
-        let outcome = conn_run(&session, sql, limit, Some(&session.cancel), QueryOrigin::Editor).await;
+        let outcome = conn_run(
+            &session,
+            sql,
+            limit,
+            Some(&session.cancel),
+            QueryOrigin::Editor,
+        )
+        .await;
         let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         match outcome {
             Ok(raw) if raw.columns.is_empty() => output.push(StatementResult {
@@ -1478,7 +1827,9 @@ pub async fn run_query(
             Err(err) => {
                 let error = if session.cancelled() {
                     "Query cancelled.".to_string()
-                } else if db::is_connection_lost(&err) && recover(&app, &connection_id, &session).await.is_some() {
+                } else if db::is_connection_lost(&err)
+                    && recover(&app, &connection_id, &session).await.is_some()
+                {
                     EDITOR_RECONNECTED.to_string()
                 } else {
                     err
@@ -1517,15 +1868,30 @@ pub fn close_results(results: State<'_, ResultStore>, result_ids: Vec<String>) {
 }
 
 #[tauri::command]
-pub async fn cancel_query(sessions: State<'_, SessionStore>, connection_id: String) -> Result<(), String> {
+pub async fn cancel_query(
+    sessions: State<'_, SessionStore>,
+    connection_id: String,
+) -> Result<(), String> {
     let session = sessions.get(&connection_id).await?;
     session.cancel.store(true, Ordering::Relaxed);
     match (&session.pool, session.backend_id) {
         (Pool::MySql(_), Some(id)) => {
-            pool_run(&session, &format!("KILL QUERY {id}"), 0, QueryOrigin::Schema).await?;
+            pool_run(
+                &session,
+                &format!("KILL QUERY {id}"),
+                0,
+                QueryOrigin::Schema,
+            )
+            .await?;
         }
         (Pool::Postgres(_), Some(id)) => {
-            pool_run(&session, &format!("SELECT pg_cancel_backend({id})"), 1, QueryOrigin::Schema).await?;
+            pool_run(
+                &session,
+                &format!("SELECT pg_cancel_backend({id})"),
+                1,
+                QueryOrigin::Schema,
+            )
+            .await?;
         }
         _ => {}
     }

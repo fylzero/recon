@@ -5,11 +5,11 @@ use sqlx::postgres::{
 };
 use sqlx::{Connection, Postgres, Row, TypeInfo, ValueRef};
 
+use super::tls::TlsMaterial;
 use super::{
     index_columns_from_definition, quote_double, quote_literal, run_raw, with_timeout, CellValue,
     Conn, Dialect, EditStatement, Opened, Pool, RawOutput, CONNECT_TIMEOUT,
 };
-use super::tls::TlsMaterial;
 use crate::models::ConnectionEntry;
 
 fn ssl_mode(mode: &str) -> PgSslMode {
@@ -22,7 +22,11 @@ fn ssl_mode(mode: &str) -> PgSslMode {
     }
 }
 
-pub(super) fn options(entry: &ConnectionEntry, password: Option<&str>, tls: &TlsMaterial) -> PgConnectOptions {
+pub(super) fn options(
+    entry: &ConnectionEntry,
+    password: Option<&str>,
+    tls: &TlsMaterial,
+) -> PgConnectOptions {
     let mut options = PgConnectOptions::new()
         .host(&entry.host)
         .port(entry.port)
@@ -33,7 +37,9 @@ pub(super) fn options(entry: &ConnectionEntry, password: Option<&str>, tls: &Tls
         options = options.ssl_root_cert_from_pem(ca.clone());
     }
     if let (Some(cert), Some(key)) = (&tls.cert, &tls.key) {
-        options = options.ssl_client_cert_from_pem(cert).ssl_client_key_from_pem(key);
+        options = options
+            .ssl_client_cert_from_pem(cert)
+            .ssl_client_key_from_pem(key);
     }
     if let Some(password) = password.filter(|value| !value.is_empty()) {
         options = options.password(password);
@@ -44,7 +50,11 @@ pub(super) fn options(entry: &ConnectionEntry, password: Option<&str>, tls: &Tls
     options
 }
 
-pub async fn open(entry: &ConnectionEntry, password: Option<&str>, tls: &TlsMaterial) -> Result<Opened, String> {
+pub async fn open(
+    entry: &ConnectionEntry,
+    password: Option<&str>,
+    tls: &TlsMaterial,
+) -> Result<Opened, String> {
     let options = options(entry, password, tls);
     let pool = with_timeout(
         PgPoolOptions::new()
@@ -66,7 +76,11 @@ pub async fn open(entry: &ConnectionEntry, password: Option<&str>, tls: &TlsMate
     })
 }
 
-pub async fn test(entry: &ConnectionEntry, password: Option<&str>, tls: &TlsMaterial) -> Result<String, String> {
+pub async fn test(
+    entry: &ConnectionEntry,
+    password: Option<&str>,
+    tls: &TlsMaterial,
+) -> Result<String, String> {
     let mut conn = with_timeout(PgConnection::connect_with(&options(entry, password, tls))).await?;
     let version = run(&mut conn, PostgresDialect.version_sql(), 1, None).await;
     let _ = conn.close().await;
@@ -99,7 +113,10 @@ pub fn cell(row: &PgRow, index: usize) -> CellValue {
         Err(_) => return CellValue::Text(String::new()),
     };
     let typed = match type_name.as_str() {
-        "BOOL" => row.try_get_unchecked::<bool, _>(index).ok().map(CellValue::Bool),
+        "BOOL" => row
+            .try_get_unchecked::<bool, _>(index)
+            .ok()
+            .map(CellValue::Bool),
         "INT2" => row
             .try_get_unchecked::<i16, _>(index)
             .ok()
@@ -108,7 +125,10 @@ pub fn cell(row: &PgRow, index: usize) -> CellValue {
             .try_get_unchecked::<i32, _>(index)
             .ok()
             .map(|value| CellValue::Int(value.into())),
-        "INT8" => row.try_get_unchecked::<i64, _>(index).ok().map(CellValue::Int),
+        "INT8" => row
+            .try_get_unchecked::<i64, _>(index)
+            .ok()
+            .map(CellValue::Int),
         "FLOAT4" => row
             .try_get_unchecked::<f32, _>(index)
             .ok()
@@ -283,7 +303,10 @@ impl Dialect for PostgresDialect {
         if namespace == "public" {
             return Some("SET search_path TO public".into());
         }
-        Some(format!("SET search_path TO {}, public", quote_double(namespace)))
+        Some(format!(
+            "SET search_path TO {}, public",
+            quote_double(namespace)
+        ))
     }
 
     fn create_namespace_sql(&self, namespace: &str) -> Option<String> {
@@ -295,7 +318,11 @@ impl Dialect for PostgresDialect {
     }
 
     fn rename_namespace_sql(&self, from: &str, to: &str) -> Option<String> {
-        Some(format!("ALTER SCHEMA {} RENAME TO {}", quote_double(from), quote_double(to)))
+        Some(format!(
+            "ALTER SCHEMA {} RENAME TO {}",
+            quote_double(from),
+            quote_double(to)
+        ))
     }
 }
 

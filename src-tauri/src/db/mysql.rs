@@ -1,15 +1,16 @@
 use std::sync::atomic::AtomicBool;
 
 use sqlx::mysql::{
-    MySqlConnectOptions, MySqlConnection, MySqlPoolOptions, MySqlQueryResult, MySqlRow, MySqlSslMode,
+    MySqlConnectOptions, MySqlConnection, MySqlPoolOptions, MySqlQueryResult, MySqlRow,
+    MySqlSslMode,
 };
 use sqlx::{Connection, MySql, Row, TypeInfo, ValueRef};
 
+use super::tls::TlsMaterial;
 use super::{
     quote_backtick, run_raw, text_at, with_timeout, CellValue, ColumnChange, Conn, Dialect, Opened,
     Pool, RawOutput, CONNECT_TIMEOUT,
 };
-use super::tls::TlsMaterial;
 use crate::models::ConnectionEntry;
 
 fn ssl_mode(mode: &str) -> MySqlSslMode {
@@ -22,7 +23,11 @@ fn ssl_mode(mode: &str) -> MySqlSslMode {
     }
 }
 
-pub(super) fn options(entry: &ConnectionEntry, password: Option<&str>, tls: &TlsMaterial) -> MySqlConnectOptions {
+pub(super) fn options(
+    entry: &ConnectionEntry,
+    password: Option<&str>,
+    tls: &TlsMaterial,
+) -> MySqlConnectOptions {
     let mut options = MySqlConnectOptions::new()
         .host(&entry.host)
         .port(entry.port)
@@ -33,7 +38,9 @@ pub(super) fn options(entry: &ConnectionEntry, password: Option<&str>, tls: &Tls
         options = options.ssl_ca_from_pem(ca.clone());
     }
     if let (Some(cert), Some(key)) = (&tls.cert, &tls.key) {
-        options = options.ssl_client_cert_from_pem(cert).ssl_client_key_from_pem(key);
+        options = options
+            .ssl_client_cert_from_pem(cert)
+            .ssl_client_key_from_pem(key);
     }
     if let Some(password) = password.filter(|value| !value.is_empty()) {
         options = options.password(password);
@@ -44,7 +51,11 @@ pub(super) fn options(entry: &ConnectionEntry, password: Option<&str>, tls: &Tls
     options
 }
 
-pub async fn open(entry: &ConnectionEntry, password: Option<&str>, tls: &TlsMaterial) -> Result<Opened, String> {
+pub async fn open(
+    entry: &ConnectionEntry,
+    password: Option<&str>,
+    tls: &TlsMaterial,
+) -> Result<Opened, String> {
     let options = options(entry, password, tls);
     let pool = with_timeout(
         MySqlPoolOptions::new()
@@ -65,8 +76,15 @@ pub async fn open(entry: &ConnectionEntry, password: Option<&str>, tls: &TlsMate
     })
 }
 
-pub async fn test(entry: &ConnectionEntry, password: Option<&str>, tls: &TlsMaterial) -> Result<String, String> {
-    let mut conn = with_timeout(MySqlConnection::connect_with(&options(entry, password, tls))).await?;
+pub async fn test(
+    entry: &ConnectionEntry,
+    password: Option<&str>,
+    tls: &TlsMaterial,
+) -> Result<String, String> {
+    let mut conn = with_timeout(MySqlConnection::connect_with(&options(
+        entry, password, tls,
+    )))
+    .await?;
     let version = run(&mut conn, MysqlDialect.version_sql(), 1, None).await;
     let _ = conn.close().await;
     Ok(super::first_text(&version?))
@@ -102,6 +120,21 @@ fn text_or_bytes(row: &MySqlRow, index: usize) -> CellValue {
     }
 }
 
+fn readable_or_bytes(bytes: Vec<u8>) -> CellValue {
+    match String::from_utf8(bytes) {
+        Ok(text)
+            if !text.is_empty()
+                && !text
+                    .chars()
+                    .any(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r')) =>
+        {
+            CellValue::Text(text)
+        }
+        Ok(text) => CellValue::Bytes(text.into_bytes()),
+        Err(error) => CellValue::Bytes(error.into_bytes()),
+    }
+}
+
 fn text_as(row: &MySqlRow, index: usize, wrap: fn(String) -> CellValue) -> CellValue {
     match row.try_get_unchecked::<String, _>(index) {
         Ok(text) => wrap(text),
@@ -132,8 +165,15 @@ pub fn cell(row: &MySqlRow, index: usize) -> CellValue {
             .unwrap_or_else(|_| text_or_bytes(row, index)),
         "JSON" => text_as(row, index, CellValue::Json),
         "DATE" | "TIME" | "DATETIME" | "TIMESTAMP" => text_as(row, index, CellValue::DateTime),
-        "BINARY" | "VARBINARY" | "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" | "BIT"
-        | "GEOMETRY" => row
+        /*
+         * MySQL flags `_bin` collated text (`mysql.user.User`, `SHOW DATABASES`)
+         * as binary too, and sqlx hides the collation that would tell them apart.
+         */
+        "BINARY" | "VARBINARY" | "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" => row
+            .try_get_unchecked::<Vec<u8>, _>(index)
+            .map(readable_or_bytes)
+            .unwrap_or_else(|_| text_or_bytes(row, index)),
+        "BIT" | "GEOMETRY" => row
             .try_get_unchecked::<Vec<u8>, _>(index)
             .map(CellValue::Bytes)
             .unwrap_or_else(|_| text_or_bytes(row, index)),
@@ -258,7 +298,11 @@ pub fn column_definitions(output: &RawOutput) -> Vec<ColumnDefinition> {
                 nullable: text_at(&row, 2).eq_ignore_ascii_case("YES"),
                 default_value: row.get(3).cloned().flatten(),
                 comment: text_at(&row, 5),
-                collation: row.get(6).cloned().flatten().filter(|value| !value.is_empty()),
+                collation: row
+                    .get(6)
+                    .cloned()
+                    .flatten()
+                    .filter(|value| !value.is_empty()),
                 generated: !text_at(&row, 7).is_empty()
                     || upper.contains("VIRTUAL GENERATED")
                     || upper.contains("STORED GENERATED"),
@@ -270,27 +314,51 @@ pub fn column_definitions(output: &RawOutput) -> Vec<ColumnDefinition> {
 
 fn is_textual(column_type: &str) -> bool {
     let lower = column_type.trim().to_ascii_lowercase();
-    ["char", "varchar", "tinytext", "text", "mediumtext", "longtext", "enum(", "set("]
-        .iter()
-        .any(|prefix| lower.starts_with(prefix))
+    [
+        "char",
+        "varchar",
+        "tinytext",
+        "text",
+        "mediumtext",
+        "longtext",
+        "enum(",
+        "set(",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
 }
 
 /**
  * Keeps attributes the grid doesn't show (collation, auto_increment,
  * ON UPDATE, INVISIBLE, comment) so editing one field never drops them.
  */
-pub fn change_column_sql(table: &str, change: &ColumnChange, current: &ColumnDefinition) -> Result<String, String> {
+pub fn change_column_sql(
+    table: &str,
+    change: &ColumnChange,
+    current: &ColumnDefinition,
+) -> Result<String, String> {
     let old = quote_backtick(&current.name);
     let new = quote_backtick(change.name.as_deref().unwrap_or(&current.name));
     if current.generated {
         if !change.only_renames() {
-            return Err(format!("{} is a generated column, so Recon can only rename it.", current.name));
+            return Err(format!(
+                "{} is a generated column, so Recon can only rename it.",
+                current.name
+            ));
         }
         return Ok(format!("ALTER TABLE {table} RENAME COLUMN {old} TO {new}"));
     }
-    let column_type = change.data_type.as_deref().unwrap_or(&current.column_type).trim();
+    let column_type = change
+        .data_type
+        .as_deref()
+        .unwrap_or(&current.column_type)
+        .trim();
     let mut definition = column_type.to_string();
-    if let Some(collation) = current.collation.as_deref().filter(|_| is_textual(column_type)) {
+    if let Some(collation) = current
+        .collation
+        .as_deref()
+        .filter(|_| is_textual(column_type))
+    {
         definition.push_str(&format!(" COLLATE {collation}"));
     }
     let nullable = change.nullable.unwrap_or(current.nullable);
@@ -315,7 +383,9 @@ pub fn change_column_sql(table: &str, change: &ColumnChange, current: &ColumnDef
     if !current.comment.is_empty() {
         definition.push_str(&format!(" COMMENT {}", literal(&current.comment)));
     }
-    Ok(format!("ALTER TABLE {table} CHANGE COLUMN {old} {new} {definition}"))
+    Ok(format!(
+        "ALTER TABLE {table} CHANGE COLUMN {old} {new} {definition}"
+    ))
 }
 
 pub struct MysqlDialect;
@@ -450,6 +520,27 @@ mod tests {
     }
 
     #[test]
+    fn shows_binary_collated_text_as_text() {
+        assert!(
+            matches!(readable_or_bytes(b"mysql.sys".to_vec()), CellValue::Text(text) if text == "mysql.sys")
+        );
+        assert!(matches!(
+            readable_or_bytes("caf\u{e9}\n".into()),
+            CellValue::Text(_)
+        ));
+        assert!(
+            matches!(readable_or_bytes(vec![0xCA, 0xFE]), CellValue::Bytes(bytes) if bytes == [0xCA, 0xFE])
+        );
+        assert!(matches!(
+            readable_or_bytes(vec![b'a', 0x00]),
+            CellValue::Bytes(_)
+        ));
+        assert!(
+            matches!(readable_or_bytes(Vec::new()), CellValue::Bytes(bytes) if bytes.is_empty())
+        );
+    }
+
+    #[test]
     fn builds_database_rename_statements() {
         let tables = vec!["users".to_string(), "we`ird".to_string()];
         assert_eq!(
@@ -496,10 +587,14 @@ mod tests {
         let Some((entry, password)) = live_entry() else {
             return;
         };
-        let version = test(&entry, password.as_deref(), &Default::default()).await.unwrap();
+        let version = test(&entry, password.as_deref(), &Default::default())
+            .await
+            .unwrap();
         assert!(!version.is_empty());
 
-        let opened = open(&entry, password.as_deref(), &Default::default()).await.unwrap();
+        let opened = open(&entry, password.as_deref(), &Default::default())
+            .await
+            .unwrap();
         assert!(opened.backend_id.is_some());
         let Conn::MySql(mut conn) = opened.conn else {
             panic!("expected a MySQL connection");
@@ -510,15 +605,22 @@ mod tests {
             "USE recon_live_test",
             "CREATE TABLE things (id INT PRIMARY KEY AUTO_INCREMENT, big BIGINT UNSIGNED, \
              price DECIMAL(8,2), ratio DOUBLE, label VARCHAR(40), doc JSON, at DATETIME, \
-             raw VARBINARY(8), flag TINYINT(1), note TEXT NULL, UNIQUE KEY label_idx (label))",
-            "INSERT INTO things (big, price, ratio, label, doc, at, raw, flag) VALUES \
-             (18446744073709551615, 12.50, 0.25, 'it''s', '{\"a\":1}', '2026-01-02 03:04:05', 0xCAFE, 1)",
+             raw VARBINARY(8), flag TINYINT(1), note TEXT NULL, \
+             handle VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, UNIQUE KEY label_idx (label))",
+            "INSERT INTO things (big, price, ratio, label, doc, at, raw, flag, handle) VALUES \
+             (18446744073709551615, 12.50, 0.25, 'it''s', '{\"a\":1}', '2026-01-02 03:04:05', 0xCAFE, 1, 'root')",
         ] {
             run(&mut conn, sql, 0, None).await.unwrap();
         }
 
-        let output = run(&mut conn, "SELECT * FROM things", 100, None).await.unwrap();
-        let names: Vec<_> = output.columns.iter().map(|column| column.name.as_str()).collect();
+        let output = run(&mut conn, "SELECT * FROM things", 100, None)
+            .await
+            .unwrap();
+        let names: Vec<_> = output
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect();
         assert_eq!(names[..3], ["id", "big", "price"]);
         let row = &output.rows[0];
         assert!(matches!(row[0], CellValue::Int(1)));
@@ -531,35 +633,60 @@ mod tests {
         assert!(matches!(&row[7], CellValue::Bytes(bytes) if bytes == &[0xCA, 0xFE]));
         assert!(matches!(row[8], CellValue::Int(1)));
         assert!(matches!(row[9], CellValue::Null));
+        assert!(matches!(&row[10], CellValue::Text(text) if text == "root"));
 
-        let empty = run(&mut conn, "SELECT id, label FROM things WHERE id < 0", 100, None)
-            .await
-            .unwrap();
+        let empty = run(
+            &mut conn,
+            "SELECT id, label FROM things WHERE id < 0",
+            100,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(empty.columns.len(), 2);
         assert!(empty.rows.is_empty());
 
-        let affected = run(&mut conn, "UPDATE things SET note = 'x'", 0, None).await.unwrap();
+        let affected = run(&mut conn, "UPDATE things SET note = 'x'", 0, None)
+            .await
+            .unwrap();
         assert!(affected.columns.is_empty());
         assert_eq!(affected.rows_affected, 1);
 
-        let tables = run(&mut conn, &MysqlDialect.tables_sql("recon_live_test"), 100, None)
-            .await
-            .unwrap();
+        let tables = run(
+            &mut conn,
+            &MysqlDialect.tables_sql("recon_live_test"),
+            100,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(tables.text_rows()[0][0].as_deref(), Some("things"));
-        let columns = run(&mut conn, &MysqlDialect.columns_sql("recon_live_test", "things"), 100, None)
-            .await
-            .unwrap();
-        assert_eq!(columns.rows.len(), 10);
+        let columns = run(
+            &mut conn,
+            &MysqlDialect.columns_sql("recon_live_test", "things"),
+            100,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(columns.rows.len(), 11);
         assert!(columns.rows[0][4].is_truthy());
-        let indexes = run(&mut conn, &MysqlDialect.indexes_sql("recon_live_test", "things"), 100, None)
-            .await
-            .unwrap();
+        let indexes = run(
+            &mut conn,
+            &MysqlDialect.indexes_sql("recon_live_test", "things"),
+            100,
+            None,
+        )
+        .await
+        .unwrap();
         let index_rows = indexes.text_rows();
         assert_eq!(index_rows[0][0].as_deref(), Some("PRIMARY"));
         assert_eq!(index_rows[1][1].as_deref(), Some("label"));
         assert!(indexes.rows[1][2].is_truthy());
 
-        let error = run(&mut conn, "SELECT * FROM missing_table", 100, None).await.unwrap_err();
+        let error = run(&mut conn, "SELECT * FROM missing_table", 100, None)
+            .await
+            .unwrap_err();
         assert!(error.contains("missing_table"), "{error}");
 
         let table = MysqlDialect.qualified("recon_live_test", "things");
@@ -575,7 +702,8 @@ mod tests {
             .unwrap()
         };
         let statement = |id: i64, label: &str| {
-            super::super::update_statement(crate::models::Driver::Mysql, &table, &update(id, label)).unwrap()
+            super::super::update_statement(crate::models::Driver::Mysql, &table, &update(id, label))
+                .unwrap()
         };
         let missing = opened
             .pool
@@ -583,11 +711,24 @@ mod tests {
             .await
             .unwrap_err();
         assert!(missing.contains("id = 404"), "{missing}");
-        opened.pool.apply(&[statement(1, "a\\b 'c'")]).await.unwrap();
-        opened.pool.apply(&[statement(1, "a\\b 'c'")]).await.unwrap();
-        let saved = run(&mut conn, "SELECT label, flag, ratio FROM things WHERE id = 1", 1, None)
+        opened
+            .pool
+            .apply(&[statement(1, "a\\b 'c'")])
             .await
             .unwrap();
+        opened
+            .pool
+            .apply(&[statement(1, "a\\b 'c'")])
+            .await
+            .unwrap();
+        let saved = run(
+            &mut conn,
+            "SELECT label, flag, ratio FROM things WHERE id = 1",
+            1,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(matches!(&saved.rows[0][0], CellValue::Text(text) if text == "a\\b 'c'"));
         assert!(matches!(saved.rows[0][1], CellValue::Int(0)));
 
@@ -605,7 +746,8 @@ mod tests {
         .await
         .unwrap();
         let definitions_sql = column_definitions_sql("recon_live_test", "shapes");
-        let before = column_definitions(&run(&mut conn, &definitions_sql, 100, None).await.unwrap());
+        let before =
+            column_definitions(&run(&mut conn, &definitions_sql, 100, None).await.unwrap());
         let shapes = MysqlDialect.qualified("recon_live_test", "shapes");
         let mut statements = Vec::new();
         for change in [
@@ -618,13 +760,22 @@ mod tests {
             let change: ColumnChange = serde_json::from_value(change).unwrap();
             let current = before.iter().find(|column| column.name == change.column);
             statements.extend(
-                super::super::alter_statements(crate::models::Driver::Mysql, &shapes, &change, current).unwrap(),
+                super::super::alter_statements(
+                    crate::models::Driver::Mysql,
+                    &shapes,
+                    &change,
+                    current,
+                )
+                .unwrap(),
             );
         }
         opened.pool.apply(&statements).await.unwrap();
         let after = column_definitions(&run(&mut conn, &definitions_sql, 100, None).await.unwrap());
         let names: Vec<_> = after.iter().map(|column| column.name.as_str()).collect();
-        assert_eq!(names, ["shape_id", "title", "uid", "created", "n", "double_id"]);
+        assert_eq!(
+            names,
+            ["shape_id", "title", "uid", "created", "n", "double_id"]
+        );
         assert!(after[0].extra.contains("auto_increment"));
         assert!(after[1].nullable);
         assert_eq!(after[1].collation.as_deref(), Some("utf8mb4_unicode_ci"));
@@ -639,7 +790,10 @@ mod tests {
 
         let indexes_sql = MysqlDialect.index_definitions_sql("recon_live_test", "shapes");
         let driver = crate::models::Driver::Mysql;
-        let before = super::super::index_definitions(driver, &run(&mut conn, &indexes_sql, 100, None).await.unwrap());
+        let before = super::super::index_definitions(
+            driver,
+            &run(&mut conn, &indexes_sql, 100, None).await.unwrap(),
+        );
         let mut statements = Vec::new();
         for change in [
             serde_json::json!({ "index": "by_title", "name": "title_n", "unique": true }),
@@ -648,11 +802,21 @@ mod tests {
             let change: super::super::IndexChange = serde_json::from_value(change).unwrap();
             let current = before.iter().find(|index| index.name == change.index);
             statements.extend(
-                super::super::index_statements(driver, "recon_live_test", &shapes, &change, current).unwrap(),
+                super::super::index_statements(
+                    driver,
+                    "recon_live_test",
+                    &shapes,
+                    &change,
+                    current,
+                )
+                .unwrap(),
             );
         }
         opened.pool.apply(&statements).await.unwrap();
-        let after = super::super::index_definitions(driver, &run(&mut conn, &indexes_sql, 100, None).await.unwrap());
+        let after = super::super::index_definitions(
+            driver,
+            &run(&mut conn, &indexes_sql, 100, None).await.unwrap(),
+        );
         let find = |name: &str| after.iter().find(|index| index.name == name).unwrap();
         assert_eq!(find("title_n").columns, "title(10), n DESC");
         assert!(find("title_n").unique);
@@ -666,15 +830,22 @@ mod tests {
         let killer = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             let mut other = pool.acquire().await.unwrap();
-            run(&mut other, &format!("KILL QUERY {backend}"), 0, None).await.unwrap();
+            run(&mut other, &format!("KILL QUERY {backend}"), 0, None)
+                .await
+                .unwrap();
             pool
         });
         let started = std::time::Instant::now();
         let slept = run(&mut conn, "SELECT SLEEP(10)", 1, None).await;
-        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{slept:?}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{slept:?}"
+        );
         let pool = killer.await.unwrap();
 
-        run(&mut conn, "DROP DATABASE recon_live_test", 0, None).await.unwrap();
+        run(&mut conn, "DROP DATABASE recon_live_test", 0, None)
+            .await
+            .unwrap();
         let _ = conn.close().await;
         pool.close().await;
     }

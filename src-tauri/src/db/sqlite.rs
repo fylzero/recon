@@ -1,14 +1,14 @@
 use std::sync::atomic::AtomicBool;
 
+use futures_util::TryStreamExt;
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteConnection, SqlitePoolOptions, SqliteQueryResult, SqliteRow,
 };
-use futures_util::TryStreamExt;
 use sqlx::{Connection, Executor, Row, Sqlite, TypeInfo, ValueRef};
 
 use super::{
-    column_meta, describe_error, quote_double, quote_literal, returns_rows, run_raw, with_timeout, CellValue, Conn, Dialect,
-    EditValue, Opened, Pool, RawOutput, CONNECT_TIMEOUT,
+    column_meta, describe_error, quote_double, quote_literal, returns_rows, run_raw, with_timeout,
+    CellValue, Conn, Dialect, EditValue, Opened, Pool, RawOutput, CONNECT_TIMEOUT,
 };
 use crate::models::ConnectionEntry;
 
@@ -39,7 +39,11 @@ pub async fn test(entry: &ConnectionEntry) -> Result<String, String> {
     if !std::path::Path::new(&entry.file_path).is_file() {
         return Err(format!("{} does not exist.", entry.file_path));
     }
-    let mut conn = with_timeout(SqliteConnection::connect_with(&options(&entry.file_path, false))).await?;
+    let mut conn = with_timeout(SqliteConnection::connect_with(&options(
+        &entry.file_path,
+        false,
+    )))
+    .await?;
     let version = run(&mut conn, SqliteDialect.version_sql(), 1, None).await;
     let _ = conn.close().await;
     Ok(super::first_text(&version?))
@@ -82,7 +86,12 @@ pub async fn run_bound(
     }
     if !returns_rows(sql) {
         let result = query.execute(&mut *conn).await.map_err(describe_error)?;
-        return Ok(RawOutput { columns: Vec::new(), rows: Vec::new(), rows_affected: affected(&result), truncated: false });
+        return Ok(RawOutput {
+            columns: Vec::new(),
+            rows: Vec::new(),
+            rows_affected: affected(&result),
+            truncated: false,
+        });
     }
     let mut columns = None;
     let mut rows = Vec::new();
@@ -107,7 +116,12 @@ pub async fn run_bound(
             Err(_) => Vec::new(),
         },
     };
-    Ok(RawOutput { columns, rows, rows_affected: 0, truncated })
+    Ok(RawOutput {
+        columns,
+        rows,
+        rows_affected: 0,
+        truncated,
+    })
 }
 
 pub fn cell(row: &SqliteRow, index: usize) -> CellValue {
@@ -118,9 +132,10 @@ pub fn cell(row: &SqliteRow, index: usize) -> CellValue {
     };
     let typed = match type_name.as_str() {
         "NULL" => Some(CellValue::Null),
-        "INTEGER" | "INT" | "BIGINT" | "BOOLEAN" => {
-            row.try_get_unchecked::<i64, _>(index).ok().map(CellValue::Int)
-        }
+        "INTEGER" | "INT" | "BIGINT" | "BOOLEAN" => row
+            .try_get_unchecked::<i64, _>(index)
+            .ok()
+            .map(CellValue::Int),
         "REAL" | "FLOAT" | "DOUBLE" | "NUMERIC" => row
             .try_get_unchecked::<f64, _>(index)
             .ok()
@@ -306,7 +321,9 @@ mod tests {
         assert_eq!(insert.rows_affected, 2);
         assert!(insert.columns.is_empty());
 
-        let select = run(&mut conn, "SELECT * FROM users ORDER BY id", 100, None).await.unwrap();
+        let select = run(&mut conn, "SELECT * FROM users ORDER BY id", 100, None)
+            .await
+            .unwrap();
         assert_eq!(select.columns.len(), 4);
         assert_eq!(select.columns[1].name, "name");
         assert_eq!(
@@ -320,11 +337,15 @@ mod tests {
         );
         assert_eq!(select.rows[1][2], CellValue::Null);
 
-        let limited = run(&mut conn, "SELECT * FROM users", 1, None).await.unwrap();
+        let limited = run(&mut conn, "SELECT * FROM users", 1, None)
+            .await
+            .unwrap();
         assert_eq!(limited.rows.len(), 1);
         assert!(limited.truncated);
 
-        let empty = run(&mut conn, "SELECT id, name FROM users WHERE 0", 100, None).await.unwrap();
+        let empty = run(&mut conn, "SELECT id, name FROM users WHERE 0", 100, None)
+            .await
+            .unwrap();
         assert!(empty.rows.is_empty());
         assert_eq!(empty.columns.len(), 2);
     }
@@ -340,35 +361,63 @@ mod tests {
         )
         .await
         .unwrap();
-        run(&mut conn, "CREATE VIEW recent AS SELECT id FROM posts", 0, None).await.unwrap();
+        run(
+            &mut conn,
+            "CREATE VIEW recent AS SELECT id FROM posts",
+            0,
+            None,
+        )
+        .await
+        .unwrap();
 
         let dialect = SqliteDialect;
-        let tables = run(&mut conn, &dialect.tables_sql("main"), 100, None).await.unwrap();
+        let tables = run(&mut conn, &dialect.tables_sql("main"), 100, None)
+            .await
+            .unwrap();
         let names: Vec<_> = tables.rows.iter().map(|row| texts(row)).collect();
         assert_eq!(names[0], vec![Some("posts".into()), Some("table".into())]);
         assert_eq!(names[1], vec![Some("recent".into()), Some("view".into())]);
 
-        let columns = run(&mut conn, &dialect.columns_sql("main", "posts"), 100, None).await.unwrap();
+        let columns = run(&mut conn, &dialect.columns_sql("main", "posts"), 100, None)
+            .await
+            .unwrap();
         let title = texts(&columns.rows[1]);
         assert_eq!(title[0].as_deref(), Some("title"));
         assert_eq!(title[2].as_deref(), Some("NO"));
         assert_eq!(title[3].as_deref(), Some("'x'"));
         assert!(columns.rows[0][4].is_truthy());
-        assert_eq!(texts(&columns.rows[0])[5].as_deref(), Some("auto_increment"));
+        assert_eq!(
+            texts(&columns.rows[0])[5].as_deref(),
+            Some("auto_increment")
+        );
         assert_eq!(title[5].as_deref(), Some(""));
 
-        run(&mut conn, "CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT) WITHOUT ROWID", 0, None)
-            .await
-            .unwrap();
-        run(&mut conn, "CREATE TABLE pairs (a INTEGER, b INTEGER, PRIMARY KEY (a, b))", 0, None)
-            .await
-            .unwrap();
+        run(
+            &mut conn,
+            "CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT) WITHOUT ROWID",
+            0,
+            None,
+        )
+        .await
+        .unwrap();
+        run(
+            &mut conn,
+            "CREATE TABLE pairs (a INTEGER, b INTEGER, PRIMARY KEY (a, b))",
+            0,
+            None,
+        )
+        .await
+        .unwrap();
         for table in ["tags", "pairs"] {
-            let columns = run(&mut conn, &dialect.columns_sql("main", table), 100, None).await.unwrap();
+            let columns = run(&mut conn, &dialect.columns_sql("main", table), 100, None)
+                .await
+                .unwrap();
             assert_eq!(texts(&columns.rows[0])[5].as_deref(), Some(""), "{table}");
         }
 
-        let indexes = run(&mut conn, &dialect.indexes_sql("main", "posts"), 100, None).await.unwrap();
+        let indexes = run(&mut conn, &dialect.indexes_sql("main", "posts"), 100, None)
+            .await
+            .unwrap();
         let slug = indexes
             .rows
             .iter()
@@ -377,7 +426,9 @@ mod tests {
             .unwrap();
         assert_eq!(slug[2].as_deref(), Some("1"));
 
-        let schema = run(&mut conn, &dialect.schema_columns_sql("main"), 100, None).await.unwrap();
+        let schema = run(&mut conn, &dialect.schema_columns_sql("main"), 100, None)
+            .await
+            .unwrap();
         assert!(schema.rows.len() >= 4);
     }
 }

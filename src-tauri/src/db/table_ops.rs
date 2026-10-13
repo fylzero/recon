@@ -50,14 +50,21 @@ pub fn truncate_statements(
     has_sequence: bool,
 ) -> Vec<String> {
     let dialect = dialect(driver);
-    let qualified: Vec<String> = tables.iter().map(|table| dialect.qualified(namespace, table)).collect();
+    let qualified: Vec<String> = tables
+        .iter()
+        .map(|table| dialect.qualified(namespace, table))
+        .collect();
     let mut sql = Vec::new();
     match driver {
         Driver::Mysql => {
             if options.disable_foreign_keys {
                 sql.push("SET FOREIGN_KEY_CHECKS = 0".to_string());
             }
-            sql.extend(qualified.iter().map(|table| format!("TRUNCATE TABLE {table}")));
+            sql.extend(
+                qualified
+                    .iter()
+                    .map(|table| format!("TRUNCATE TABLE {table}")),
+            );
         }
         Driver::Postgres => {
             let mut statement = format!("TRUNCATE TABLE {}", qualified.join(", "));
@@ -90,9 +97,17 @@ pub fn truncate_statements(
 }
 
 /** Like `truncate_statements`, for removing `tables` altogether. */
-pub fn drop_statements(driver: Driver, namespace: &str, tables: &[String], options: DropOptions) -> Vec<String> {
+pub fn drop_statements(
+    driver: Driver,
+    namespace: &str,
+    tables: &[String],
+    options: DropOptions,
+) -> Vec<String> {
     let dialect = dialect(driver);
-    let qualified: Vec<String> = tables.iter().map(|table| dialect.qualified(namespace, table)).collect();
+    let qualified: Vec<String> = tables
+        .iter()
+        .map(|table| dialect.qualified(namespace, table))
+        .collect();
     let mut sql = Vec::new();
     match driver {
         Driver::Mysql => {
@@ -132,26 +147,55 @@ mod tests {
 
     #[test]
     fn builds_mysql_truncates() {
-        let options = TruncateOptions { disable_foreign_keys: true, ..Default::default() };
+        let options = TruncateOptions {
+            disable_foreign_keys: true,
+            ..Default::default()
+        };
         assert_eq!(
-            truncate_statements(Driver::Mysql, "app", &names(&["users", "posts"]), options, false),
-            ["SET FOREIGN_KEY_CHECKS = 0", "TRUNCATE TABLE `app`.`users`", "TRUNCATE TABLE `app`.`posts`"]
+            truncate_statements(
+                Driver::Mysql,
+                "app",
+                &names(&["users", "posts"]),
+                options,
+                false
+            ),
+            [
+                "SET FOREIGN_KEY_CHECKS = 0",
+                "TRUNCATE TABLE `app`.`users`",
+                "TRUNCATE TABLE `app`.`posts`"
+            ]
         );
         assert_eq!(
-            truncate_statements(Driver::Mysql, "app", &names(&["users"]), TruncateOptions::default(), false),
+            truncate_statements(
+                Driver::Mysql,
+                "app",
+                &names(&["users"]),
+                TruncateOptions::default(),
+                false
+            ),
             ["TRUNCATE TABLE `app`.`users`"]
         );
     }
 
     #[test]
     fn builds_one_postgres_truncate() {
-        let options = TruncateOptions { restart_identity: true, cascade: true, ..Default::default() };
+        let options = TruncateOptions {
+            restart_identity: true,
+            cascade: true,
+            ..Default::default()
+        };
         assert_eq!(
             truncate_statements(Driver::Postgres, "public", &names(&["users", "posts"]), options, false),
             ["TRUNCATE TABLE \"public\".\"users\", \"public\".\"posts\" RESTART IDENTITY CASCADE"]
         );
         assert_eq!(
-            truncate_statements(Driver::Postgres, "public", &names(&["users"]), TruncateOptions::default(), false),
+            truncate_statements(
+                Driver::Postgres,
+                "public",
+                &names(&["users"]),
+                TruncateOptions::default(),
+                false
+            ),
             ["TRUNCATE TABLE \"public\".\"users\""]
         );
     }
@@ -164,12 +208,21 @@ mod tests {
     }
 
     async fn scalar(conn: &mut Conn, sql: &str) -> CellValue {
-        conn.run(sql, 1, None).await.unwrap().rows.remove(0).remove(0)
+        conn.run(sql, 1, None)
+            .await
+            .unwrap()
+            .rows
+            .remove(0)
+            .remove(0)
     }
 
     #[tokio::test]
     async fn empties_sqlite_tables_and_restarts_their_counters() {
-        let mut conn = Conn::Sqlite(sqlx::SqliteConnection::connect("sqlite::memory:").await.unwrap());
+        let mut conn = Conn::Sqlite(
+            sqlx::SqliteConnection::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
         for sql in [
             "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)",
             "CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users (id))",
@@ -180,29 +233,65 @@ mod tests {
         }
         let users = names(&["users"]);
 
-        let checked = truncate_statements(Driver::Sqlite, "main", &users, TruncateOptions::default(), true);
+        let checked = truncate_statements(
+            Driver::Sqlite,
+            "main",
+            &users,
+            TruncateOptions::default(),
+            true,
+        );
         let error = run_all(&mut conn, &checked).await.unwrap_err();
         assert!(error.contains("FOREIGN KEY"), "{error}");
         conn.run("ROLLBACK", 0, None).await.unwrap();
-        assert_eq!(scalar(&mut conn, "SELECT COUNT(*) FROM users").await, CellValue::Int(2));
+        assert_eq!(
+            scalar(&mut conn, "SELECT COUNT(*) FROM users").await,
+            CellValue::Int(2)
+        );
 
-        let has_sequence = scalar(&mut conn, &sqlite_sequence_sql("main")).await == CellValue::Int(1);
+        let has_sequence =
+            scalar(&mut conn, &sqlite_sequence_sql("main")).await == CellValue::Int(1);
         assert!(has_sequence);
-        let options = TruncateOptions { disable_foreign_keys: true, restart_identity: true, ..Default::default() };
-        run_all(&mut conn, &truncate_statements(Driver::Sqlite, "main", &users, options, has_sequence)).await.unwrap();
-        assert_eq!(scalar(&mut conn, "SELECT COUNT(*) FROM users").await, CellValue::Int(0));
-        assert_eq!(scalar(&mut conn, "SELECT COUNT(*) FROM posts").await, CellValue::Int(1));
-        conn.run("INSERT INTO users (name) VALUES ('cy')", 0, None).await.unwrap();
-        assert_eq!(scalar(&mut conn, "SELECT id FROM users").await, CellValue::Int(1));
+        let options = TruncateOptions {
+            disable_foreign_keys: true,
+            restart_identity: true,
+            ..Default::default()
+        };
+        run_all(
+            &mut conn,
+            &truncate_statements(Driver::Sqlite, "main", &users, options, has_sequence),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            scalar(&mut conn, "SELECT COUNT(*) FROM users").await,
+            CellValue::Int(0)
+        );
+        assert_eq!(
+            scalar(&mut conn, "SELECT COUNT(*) FROM posts").await,
+            CellValue::Int(1)
+        );
+        conn.run("INSERT INTO users (name) VALUES ('cy')", 0, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            scalar(&mut conn, "SELECT id FROM users").await,
+            CellValue::Int(1)
+        );
     }
 
     #[test]
     fn builds_one_drop_for_mysql_and_postgres() {
         let tables = names(&["users", "posts"]);
-        let options = DropOptions { disable_foreign_keys: true, cascade: true };
+        let options = DropOptions {
+            disable_foreign_keys: true,
+            cascade: true,
+        };
         assert_eq!(
             drop_statements(Driver::Mysql, "app", &tables, options),
-            ["SET FOREIGN_KEY_CHECKS = 0", "DROP TABLE `app`.`users`, `app`.`posts`"]
+            [
+                "SET FOREIGN_KEY_CHECKS = 0",
+                "DROP TABLE `app`.`users`, `app`.`posts`"
+            ]
         );
         assert_eq!(
             drop_statements(Driver::Postgres, "public", &tables, options),
@@ -216,7 +305,11 @@ mod tests {
 
     #[tokio::test]
     async fn drops_referenced_sqlite_tables_only_without_foreign_key_checks() {
-        let mut conn = Conn::Sqlite(sqlx::SqliteConnection::connect("sqlite::memory:").await.unwrap());
+        let mut conn = Conn::Sqlite(
+            sqlx::SqliteConnection::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
         for sql in [
             "CREATE TABLE users (id INTEGER PRIMARY KEY)",
             "CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users (id))",
@@ -234,9 +327,20 @@ mod tests {
         conn.run("ROLLBACK", 0, None).await.unwrap();
         assert_eq!(scalar(&mut conn, tables).await, CellValue::Int(2));
 
-        let options = DropOptions { disable_foreign_keys: true, ..Default::default() };
-        run_all(&mut conn, &drop_statements(Driver::Sqlite, "main", &users, options)).await.unwrap();
+        let options = DropOptions {
+            disable_foreign_keys: true,
+            ..Default::default()
+        };
+        run_all(
+            &mut conn,
+            &drop_statements(Driver::Sqlite, "main", &users, options),
+        )
+        .await
+        .unwrap();
         assert_eq!(scalar(&mut conn, tables).await, CellValue::Int(1));
-        assert_eq!(scalar(&mut conn, "SELECT COUNT(*) FROM posts").await, CellValue::Int(1));
+        assert_eq!(
+            scalar(&mut conn, "SELECT COUNT(*) FROM posts").await,
+            CellValue::Int(1)
+        );
     }
 }

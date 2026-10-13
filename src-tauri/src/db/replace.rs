@@ -66,7 +66,9 @@ pub fn check(request: &ReplaceRequest, kind: FilterKind) -> Result<(), String> {
     let column = &request.column;
     if !replaceable(kind, request.mode) {
         return Err(match kind {
-            FilterKind::Enum => format!("{column} is an enum, so only whole values can be replaced."),
+            FilterKind::Enum => {
+                format!("{column} is an enum, so only whole values can be replaced.")
+            }
             _ => format!("Find and replace only works on text columns, and {column} isn't one."),
         });
     }
@@ -74,10 +76,14 @@ pub fn check(request: &ReplaceRequest, kind: FilterKind) -> Result<(), String> {
         return Err("Enter the text to find.".into());
     }
     if request.find.len() > MAX_TEXT_LENGTH || request.replace.len() > MAX_TEXT_LENGTH {
-        return Err(format!("Find and replace text can be at most {MAX_TEXT_LENGTH} characters."));
+        return Err(format!(
+            "Find and replace text can be at most {MAX_TEXT_LENGTH} characters."
+        ));
     }
     if request.find == request.replace {
-        return Err("The replacement is the same as the text to find, so nothing would change.".into());
+        return Err(
+            "The replacement is the same as the text to find, so nothing would change.".into(),
+        );
     }
     Ok(())
 }
@@ -154,7 +160,12 @@ fn match_condition(driver: Driver, ident: &str, request: &ReplaceRequest) -> Fra
     }
 }
 
-fn where_clause(driver: Driver, ident: &str, request: &ReplaceRequest, filter: Option<Fragment>) -> Fragment {
+fn where_clause(
+    driver: Driver,
+    ident: &str,
+    request: &ReplaceRequest,
+    filter: Option<Fragment>,
+) -> Fragment {
     let mut sql = Fragment::new(" WHERE ");
     if let Some(filter) = filter {
         sql.push_sql("(");
@@ -166,7 +177,12 @@ fn where_clause(driver: Driver, ident: &str, request: &ReplaceRequest, filter: O
 }
 
 /** `table` is already qualified and quoted; `filter` is the compiled filter condition, if any. */
-pub fn statements(driver: Driver, table: &str, request: &ReplaceRequest, filter: Option<Fragment>) -> ReplaceStatements {
+pub fn statements(
+    driver: Driver,
+    table: &str,
+    request: &ReplaceRequest,
+    filter: Option<Fragment>,
+) -> ReplaceStatements {
     let ident = dialect(driver).quote_ident(&request.column);
     let condition = where_clause(driver, &ident, request, filter);
 
@@ -184,7 +200,11 @@ pub fn statements(driver: Driver, table: &str, request: &ReplaceRequest, filter:
     }
     update.append(condition);
 
-    ReplaceStatements { count, sample, update }
+    ReplaceStatements {
+        count,
+        sample,
+        update,
+    }
 }
 
 #[cfg(test)]
@@ -221,7 +241,9 @@ mod tests {
              WHERE REPLACE(\"body\"::text, E'http://', E'https://') <> \"body\"::text"
         );
         assert_eq!(
-            statements(Driver::Sqlite, "\"main\".\"posts\"", &contains, None).update.inline(Driver::Sqlite),
+            statements(Driver::Sqlite, "\"main\".\"posts\"", &contains, None)
+                .update
+                .inline(Driver::Sqlite),
             "UPDATE \"main\".\"posts\" SET \"body\" = REPLACE(\"body\", 'http://', 'https://') \
              WHERE REPLACE(\"body\", 'http://', 'https://') <> \"body\" COLLATE BINARY"
         );
@@ -242,7 +264,11 @@ mod tests {
         assert!(check(&request(ReplaceMode::Contains, "", "x"), FilterKind::Text).is_err());
         assert!(check(&request(ReplaceMode::Whole, "a", "a"), FilterKind::Text).is_err());
         assert!(check(&request(ReplaceMode::Contains, "a", "b"), FilterKind::Enum).is_err());
-        assert!(check(&request(ReplaceMode::Contains, "a", "b"), FilterKind::Number).is_err());
+        assert!(check(
+            &request(ReplaceMode::Contains, "a", "b"),
+            FilterKind::Number
+        )
+        .is_err());
         assert!(check(&request(ReplaceMode::Whole, "a", "b"), FilterKind::Enum).is_ok());
         assert!(check(&request(ReplaceMode::Contains, "a", "b"), FilterKind::Text).is_ok());
     }
@@ -253,8 +279,14 @@ mod tests {
     }
 
     async fn bodies(conn: &mut SqliteConnection) -> Vec<CellValue> {
-        let output = sqlite::run(conn, "SELECT body FROM posts ORDER BY id", 100, None).await.unwrap();
-        output.rows.into_iter().map(|mut row| row.remove(0)).collect()
+        let output = sqlite::run(conn, "SELECT body FROM posts ORDER BY id", 100, None)
+            .await
+            .unwrap();
+        output
+            .rows
+            .into_iter()
+            .map(|mut row| row.remove(0))
+            .collect()
     }
 
     async fn posts() -> SqliteConnection {
@@ -273,9 +305,17 @@ mod tests {
     async fn replaces_every_occurrence_case_sensitively_in_filtered_rows() {
         let mut conn = posts().await;
         let contains = request(ReplaceMode::Contains, "http://", "https://");
-        let built = statements(Driver::Sqlite, "\"posts\"", &contains, Some(Fragment::new("\"draft\" = 0")));
+        let built = statements(
+            Driver::Sqlite,
+            "\"posts\"",
+            &contains,
+            Some(Fragment::new("\"draft\" = 0")),
+        );
 
-        assert_eq!(run(&mut conn, &built.count).await.rows[0][0], CellValue::Int(1));
+        assert_eq!(
+            run(&mut conn, &built.count).await.rows[0][0],
+            CellValue::Int(1)
+        );
         let sample = run(&mut conn, &built.sample).await;
         let before = sample.rows[0][0].to_text().unwrap();
         assert_eq!(replaced(&contains, &before), "see https://a and https://b");
@@ -298,12 +338,24 @@ mod tests {
         let mut conn = posts().await;
         let whole = request(ReplaceMode::Whole, "plain", "fancy");
         let built = statements(Driver::Sqlite, "\"posts\"", &whole, None);
-        sqlite::run(&mut conn, "INSERT INTO posts (body) VALUES ('PLAIN'), ('plain text')", 0, None).await.unwrap();
+        sqlite::run(
+            &mut conn,
+            "INSERT INTO posts (body) VALUES ('PLAIN'), ('plain text')",
+            0,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(run(&mut conn, &built.update).await.rows_affected, 1);
-        let changed = sqlite::run(&mut conn, "SELECT COUNT(*) FROM posts WHERE body = 'fancy' COLLATE BINARY", 1, None)
-            .await
-            .unwrap();
+        let changed = sqlite::run(
+            &mut conn,
+            "SELECT COUNT(*) FROM posts WHERE body = 'fancy' COLLATE BINARY",
+            1,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(changed.rows[0][0], CellValue::Int(1));
     }
 }

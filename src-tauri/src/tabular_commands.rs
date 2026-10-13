@@ -15,18 +15,19 @@ use tokio::sync::mpsc;
 
 use crate::db::dump::{self, DumpSummary, DumpTable};
 use crate::db::tabular::{
-    self, Format, ImportValue, Position, SourceSpec, TabularOptions, TabularWriter, TargetColumn, TypeGuess,
+    self, Format, ImportValue, Position, SourceSpec, TabularOptions, TabularWriter, TargetColumn,
+    TypeGuess,
 };
 use crate::db::{
-    describe_error, dialect, mysql, postgres, sqlite, BrowseRequest, CellValue, Conn, EditValue, ResultStore, Session,
-    SessionStore,
+    describe_error, dialect, mysql, postgres, sqlite, BrowseRequest, CellValue, Conn, EditValue,
+    ResultStore, Session, SessionStore,
 };
 use crate::db_commands::{export_statement, table_columns, tables_in};
 use crate::models::Driver;
 use crate::query_log::{self, QueryOrigin, QueryRecord};
 use crate::transfer_commands::{
-    file_name, open_sql_file, sibling, ExportProgressEvent, ExportResult, Sink, SqlFile, Throttle, Transfer,
-    TransferStore, EXPORT_PROGRESS_EVENT, IMPORT_CANCELLED, IMPORT_PROGRESS_EVENT,
+    file_name, open_sql_file, sibling, ExportProgressEvent, ExportResult, Sink, SqlFile, Throttle,
+    Transfer, TransferStore, EXPORT_PROGRESS_EVENT, IMPORT_CANCELLED, IMPORT_PROGRESS_EVENT,
 };
 
 const REPORT_EVERY: u64 = 500;
@@ -42,12 +43,21 @@ fn yes() -> bool {
 
 fn file_safe(name: &str) -> String {
     name.chars()
-        .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '-' } else { c })
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '-'
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
 fn column_names<C: Column>(columns: &[C]) -> Vec<String> {
-    columns.iter().map(|column| column.name().to_string()).collect()
+    columns
+        .iter()
+        .map(|column| column.name().to_string())
+        .collect()
 }
 
 async fn drain<R: Row>(
@@ -91,7 +101,14 @@ pub(crate) async fn write_query(
 ) -> Result<(), String> {
     match conn {
         Conn::MySql(conn) => {
-            drain(sqlx::raw_sql(sql).fetch(&mut *conn), mysql::cell, writer, cancel, report).await?;
+            drain(
+                sqlx::raw_sql(sql).fetch(&mut *conn),
+                mysql::cell,
+                writer,
+                cancel,
+                report,
+            )
+            .await?;
             if !writer.has_columns() {
                 if let Ok(described) = (&mut *conn).describe(sql).await {
                     writer.set_columns(column_names(described.columns()))?;
@@ -99,7 +116,14 @@ pub(crate) async fn write_query(
             }
         }
         Conn::Postgres(conn) => {
-            drain(sqlx::raw_sql(sql).fetch(&mut *conn), postgres::cell, writer, cancel, report).await?;
+            drain(
+                sqlx::raw_sql(sql).fetch(&mut *conn),
+                postgres::cell,
+                writer,
+                cancel,
+                report,
+            )
+            .await?;
             if !writer.has_columns() {
                 if let Ok(described) = (&mut *conn).describe(sql).await {
                     writer.set_columns(column_names(described.columns()))?;
@@ -117,7 +141,14 @@ pub(crate) async fn write_query(
                     EditValue::Text(value) => query.bind(value.as_str()),
                 };
             }
-            drain(query.fetch(&mut *conn), sqlite::cell, writer, cancel, report).await?;
+            drain(
+                query.fetch(&mut *conn),
+                sqlite::cell,
+                writer,
+                cancel,
+                report,
+            )
+            .await?;
             if !writer.has_columns() {
                 if let Ok(described) = (&mut *conn).describe(sql).await {
                     writer.set_columns(column_names(described.columns()))?;
@@ -176,11 +207,17 @@ pub(crate) async fn export_tables(
         vec![path.to_path_buf()]
     } else {
         if !path.is_dir() {
-            return Err(format!("{} isn't a folder. Choose a folder to save one file per table in.", file_name(path)));
+            return Err(format!(
+                "{} isn't a folder. Choose a folder to save one file per table in.",
+                file_name(path)
+            ));
         }
         table_files(path, tables, options)
     };
-    let parts: Vec<PathBuf> = targets.iter().map(|target| sibling(target, "part")).collect();
+    let parts: Vec<PathBuf> = targets
+        .iter()
+        .map(|target| sibling(target, "part"))
+        .collect();
     let dialect = dialect(session.driver);
     let mut summary = DumpSummary::default();
 
@@ -192,8 +229,9 @@ pub(crate) async fn export_tables(
             }
             let mut throttle = Throttle(None);
             for (index, table) in tables.iter().enumerate() {
-                let file = File::create(&parts[index])
-                    .map_err(|err| format!("Could not create {}: {err}", file_name(&targets[index])))?;
+                let file = File::create(&parts[index]).map_err(|err| {
+                    format!("Could not create {}: {err}", file_name(&targets[index]))
+                })?;
                 let mut sink = Sink::new(file, options.gzip);
                 let mut report = |rows: u64| {
                     if throttle.ready(rows == 0) {
@@ -211,10 +249,22 @@ pub(crate) async fn export_tables(
                 };
                 report(0);
                 let mut writer = TabularWriter::new(&mut sink, options);
-                let sql = format!("SELECT * FROM {}", dialect.qualified(namespace, &table.name));
-                write_query(&mut conn, &sql, &[], &mut writer, &transfer.cancel, &mut report).await?;
+                let sql = format!(
+                    "SELECT * FROM {}",
+                    dialect.qualified(namespace, &table.name)
+                );
+                write_query(
+                    &mut conn,
+                    &sql,
+                    &[],
+                    &mut writer,
+                    &transfer.cancel,
+                    &mut report,
+                )
+                .await?;
                 summary.rows += writer.finish()?;
-                sink.finish().map_err(|err| format!("Could not write the export file: {err}"))?;
+                sink.finish()
+                    .map_err(|err| format!("Could not write the export file: {err}"))?;
                 summary.tables += 1;
             }
             conn.execute("COMMIT").await?;
@@ -228,7 +278,8 @@ pub(crate) async fn export_tables(
 
     let finished = outcome.and_then(|()| {
         for (part, target) in parts.iter().zip(&targets) {
-            fs::rename(part, target).map_err(|err| format!("Could not save {}: {err}", file_name(target)))?;
+            fs::rename(part, target)
+                .map_err(|err| format!("Could not save {}: {err}", file_name(target)))?;
         }
         Ok(())
     });
@@ -238,13 +289,28 @@ pub(crate) async fn export_tables(
         }
         return Err(err);
     }
-    let bytes = targets.iter().map(|target| fs::metadata(target).map(|meta| meta.len()).unwrap_or(0)).sum();
-    Ok(ExportResult { summary, bytes, path: path.display().to_string() })
+    let bytes = targets
+        .iter()
+        .map(|target| fs::metadata(target).map(|meta| meta.len()).unwrap_or(0))
+        .sum();
+    Ok(ExportResult {
+        summary,
+        bytes,
+        path: path.display().to_string(),
+    })
 }
 
 fn single_result(rows: u64, path: String) -> ExportResult {
     let bytes = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
-    ExportResult { summary: DumpSummary { tables: 1, rows, skipped: Vec::new() }, bytes, path }
+    ExportResult {
+        summary: DumpSummary {
+            tables: 1,
+            rows,
+            skipped: Vec::new(),
+        },
+        bytes,
+        path,
+    }
 }
 
 /** A table view's rows, with its filters and sort, as CSV or JSON. */
@@ -272,7 +338,8 @@ pub async fn export_browse(
     let part = sibling(&target, "part");
 
     let outcome = async {
-        let file = File::create(&part).map_err(|err| format!("Could not create {}: {err}", file_name(&target)))?;
+        let file = File::create(&part)
+            .map_err(|err| format!("Could not create {}: {err}", file_name(&target)))?;
         let mut sink = Sink::new(file, options.gzip);
         let mut conn = session.pool.detached().await?;
         let mut throttle = Throttle(None);
@@ -280,20 +347,36 @@ pub async fn export_browse(
             if throttle.ready(false) {
                 let _ = app.emit(
                     EXPORT_PROGRESS_EVENT,
-                    ExportProgressEvent { transfer_id: &transfer_id, table: &request.table, index: 1, total: 1, rows },
+                    ExportProgressEvent {
+                        transfer_id: &transfer_id,
+                        table: &request.table,
+                        index: 1,
+                        total: 1,
+                        rows,
+                    },
                 );
             }
         };
         let written = async {
             let mut writer = TabularWriter::new(&mut sink, &options);
-            write_query(&mut conn, &sql, &params, &mut writer, &transfer.cancel, &mut report).await?;
+            write_query(
+                &mut conn,
+                &sql,
+                &params,
+                &mut writer,
+                &transfer.cancel,
+                &mut report,
+            )
+            .await?;
             writer.finish()
         }
         .await;
         conn.close().await;
         let rows = written?;
-        sink.finish().map_err(|err| format!("Could not write the export file: {err}"))?;
-        fs::rename(&part, &target).map_err(|err| format!("Could not save {}: {err}", file_name(&target)))?;
+        sink.finish()
+            .map_err(|err| format!("Could not write the export file: {err}"))?;
+        fs::rename(&part, &target)
+            .map_err(|err| format!("Could not save {}: {err}", file_name(&target)))?;
         Ok::<_, String>(rows)
     }
     .await;
@@ -306,10 +389,16 @@ pub async fn export_browse(
     }
 }
 
-fn write_held_rows(columns: Vec<String>, rows: &[Vec<CellValue>], options: &TabularOptions, path: &Path) -> Result<u64, String> {
+fn write_held_rows(
+    columns: Vec<String>,
+    rows: &[Vec<CellValue>],
+    options: &TabularOptions,
+    path: &Path,
+) -> Result<u64, String> {
     let part = sibling(path, "part");
     let written = (|| {
-        let file = File::create(&part).map_err(|err| format!("Could not create {}: {err}", file_name(path)))?;
+        let file = File::create(&part)
+            .map_err(|err| format!("Could not create {}: {err}", file_name(path)))?;
         let mut sink = Sink::new(file, options.gzip);
         let mut writer = TabularWriter::new(&mut sink, options);
         writer.set_columns(columns)?;
@@ -317,8 +406,10 @@ fn write_held_rows(columns: Vec<String>, rows: &[Vec<CellValue>], options: &Tabu
             writer.write_row(row)?;
         }
         let count = writer.finish()?;
-        sink.finish().map_err(|err| format!("Could not write the export file: {err}"))?;
-        fs::rename(&part, path).map_err(|err| format!("Could not save {}: {err}", file_name(path)))?;
+        sink.finish()
+            .map_err(|err| format!("Could not write the export file: {err}"))?;
+        fs::rename(&part, path)
+            .map_err(|err| format!("Could not save {}: {err}", file_name(path)))?;
         Ok(count)
     })();
     if written.is_err() {
@@ -338,9 +429,11 @@ pub async fn export_result(
 ) -> Result<ExportResult, String> {
     let rows = results.rows(&result_id)?;
     let target = path.clone();
-    let count = tauri::async_runtime::spawn_blocking(move || write_held_rows(columns, &rows, &options, Path::new(&target)))
-        .await
-        .map_err(|err| err.to_string())??;
+    let count = tauri::async_runtime::spawn_blocking(move || {
+        write_held_rows(columns, &rows, &options, Path::new(&target))
+    })
+    .await
+    .map_err(|err| err.to_string())??;
     Ok(single_result(count, path))
 }
 
@@ -379,16 +472,26 @@ fn base_name(path: &str) -> String {
     lower.strip_suffix(".gz").unwrap_or(&lower).to_string()
 }
 
-fn resolve_spec(path: &str, file: &mut SqlFile, options: &ImportFileOptions) -> Result<SourceSpec, String> {
+fn resolve_spec(
+    path: &str,
+    file: &mut SqlFile,
+    options: &ImportFileOptions,
+) -> Result<SourceSpec, String> {
     let base = base_name(path);
     let sample = file
         .reader
         .fill_buf()
         .map_err(|err| format!("Could not read {}: {err}", file.name))?;
     let format = options.format.unwrap_or_else(|| {
-        if [".json", ".ndjson", ".jsonl"].iter().any(|ext| base.ends_with(ext)) {
+        if [".json", ".ndjson", ".jsonl"]
+            .iter()
+            .any(|ext| base.ends_with(ext))
+        {
             Format::Json
-        } else if [".csv", ".tsv", ".txt"].iter().any(|ext| base.ends_with(ext)) {
+        } else if [".csv", ".tsv", ".txt"]
+            .iter()
+            .any(|ext| base.ends_with(ext))
+        {
             Format::Csv
         } else if tabular::looks_like_json(sample) {
             Format::Json
@@ -397,15 +500,28 @@ fn resolve_spec(path: &str, file: &mut SqlFile, options: &ImportFileOptions) -> 
         }
     });
     let delimiter = match options.delimiter {
-        Some(delimiter) if delimiter.is_ascii() && delimiter != '"' && delimiter != '\n' => delimiter as u8,
-        Some(_) => return Err("The delimiter has to be a single character other than a quote.".into()),
+        Some(delimiter) if delimiter.is_ascii() && delimiter != '"' && delimiter != '\n' => {
+            delimiter as u8
+        }
+        Some(_) => {
+            return Err("The delimiter has to be a single character other than a quote.".into())
+        }
         None if base.ends_with(".tsv") => b'\t',
         None => tabular::detect_delimiter(sample),
     };
-    Ok(SourceSpec { format, delimiter, header: options.header, null_markers: options.null_markers.clone() })
+    Ok(SourceSpec {
+        format,
+        delimiter,
+        header: options.header,
+        null_markers: options.null_markers.clone(),
+    })
 }
 
-pub(crate) fn preview_file(driver: Driver, path: &str, options: &ImportFileOptions) -> Result<ImportPreview, String> {
+pub(crate) fn preview_file(
+    driver: Driver,
+    path: &str,
+    options: &ImportFileOptions,
+) -> Result<ImportPreview, String> {
     let mut file = open_sql_file(path)?;
     let spec = resolve_spec(path, &mut file, options)?;
     let mut columns = Vec::new();
@@ -582,11 +698,16 @@ pub(crate) async fn insert_batches(
             continue;
         }
         conn.execute(&format!("SAVEPOINT {SAVEPOINT}")).await?;
-        if let Err(err) = conn.execute(&plan.statement(batch.iter().map(|(_, values)| values))).await {
-            conn.execute(&format!("ROLLBACK TO SAVEPOINT {SAVEPOINT}")).await?;
+        if let Err(err) = conn
+            .execute(&plan.statement(batch.iter().map(|(_, values)| values)))
+            .await
+        {
+            conn.execute(&format!("ROLLBACK TO SAVEPOINT {SAVEPOINT}"))
+                .await?;
             return Err(pinpoint(conn, plan, &batch, err).await);
         }
-        conn.execute(&format!("RELEASE SAVEPOINT {SAVEPOINT}")).await?;
+        conn.execute(&format!("RELEASE SAVEPOINT {SAVEPOINT}"))
+            .await?;
         rows += batch.len() as u64;
         progress(rows);
     }
@@ -607,24 +728,30 @@ pub(crate) fn parse_batches(
 ) {
     let mut batch: Batch = Vec::new();
     let mut bytes = 0;
-    let read = tabular::read_source(&mut *reader, &spec, &mut columns, false, |position, values| {
-        if cancel.load(Ordering::Relaxed) {
-            return Ok(false);
-        }
-        let picked: Vec<ImportValue> = sources
-            .iter()
-            .map(|&source| values.get(source).cloned().unwrap_or(ImportValue::Null))
-            .collect();
-        bytes += picked.iter().map(ImportValue::size).sum::<usize>();
-        batch.push((position, picked));
-        if batch.len() >= BATCH_ROWS || bytes >= BATCH_BYTES {
-            bytes = 0;
-            if tx.blocking_send(Ok(std::mem::take(&mut batch))).is_err() {
+    let read = tabular::read_source(
+        &mut *reader,
+        &spec,
+        &mut columns,
+        false,
+        |position, values| {
+            if cancel.load(Ordering::Relaxed) {
                 return Ok(false);
             }
-        }
-        Ok(true)
-    });
+            let picked: Vec<ImportValue> = sources
+                .iter()
+                .map(|&source| values.get(source).cloned().unwrap_or(ImportValue::Null))
+                .collect();
+            bytes += picked.iter().map(ImportValue::size).sum::<usize>();
+            batch.push((position, picked));
+            if batch.len() >= BATCH_ROWS || bytes >= BATCH_BYTES {
+                bytes = 0;
+                if tx.blocking_send(Ok(std::mem::take(&mut batch))).is_err() {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        },
+    );
     let last = read.map(|()| batch);
     if !matches!(&last, Ok(batch) if batch.is_empty()) {
         let _ = tx.blocking_send(last);
@@ -668,23 +795,58 @@ pub async fn import_rows(
     if request.mapping.is_empty() {
         return Err("Choose at least one column to import.".into());
     }
-    if let Some(bad) = request.mapping.iter().find(|mapping| mapping.source >= request.source_columns.len()) {
-        return Err(format!("Column {} isn't in the file. Load the file again.", bad.source + 1));
+    if let Some(bad) = request
+        .mapping
+        .iter()
+        .find(|mapping| mapping.source >= request.source_columns.len())
+    {
+        return Err(format!(
+            "Column {} isn't in the file. Load the file again.",
+            bad.source + 1
+        ));
     }
-    check_names(request.mapping.iter().map(|mapping| mapping.target.as_str()), "imported column")?;
+    check_names(
+        request
+            .mapping
+            .iter()
+            .map(|mapping| mapping.target.as_str()),
+        "imported column",
+    )?;
     let qualified = dialect(driver).qualified(namespace, table);
-    let target_names: Vec<String> = request.mapping.iter().map(|mapping| mapping.target.clone()).collect();
+    let target_names: Vec<String> = request
+        .mapping
+        .iter()
+        .map(|mapping| mapping.target.clone())
+        .collect();
 
     let (create_sql, targets) = match &request.create {
         Some(new_table) => {
-            if tables_in(session.clone(), namespace).await?.iter().any(|known| known.name == table) {
-                return Err(format!("A table named “{table}” already exists. Pick another name, or import into it."));
+            if tables_in(session.clone(), namespace)
+                .await?
+                .iter()
+                .any(|known| known.name == table)
+            {
+                return Err(format!(
+                    "A table named “{table}” already exists. Pick another name, or import into it."
+                ));
             }
-            check_names(new_table.columns.iter().map(|column| column.name.as_str()), "column")?;
-            if let Some(column) = new_table.columns.iter().find(|column| column.data_type.trim().is_empty()) {
+            check_names(
+                new_table.columns.iter().map(|column| column.name.as_str()),
+                "column",
+            )?;
+            if let Some(column) = new_table
+                .columns
+                .iter()
+                .find(|column| column.data_type.trim().is_empty())
+            {
                 return Err(format!("Choose a type for “{}”.", column.name));
             }
-            if new_table.id_column && new_table.columns.iter().any(|column| column.name.eq_ignore_ascii_case("id")) {
+            if new_table.id_column
+                && new_table
+                    .columns
+                    .iter()
+                    .any(|column| column.name.eq_ignore_ascii_case("id"))
+            {
                 return Err("The file already has an id column. Rename it, or turn off the added id column.".into());
             }
             let targets = target_names
@@ -703,12 +865,22 @@ pub async fn import_rows(
                 .iter()
                 .map(|column| (column.name.clone(), column.data_type.clone()))
                 .collect();
-            (Some(tabular::create_table_sql(driver, &qualified, &columns, new_table.id_column)), targets)
+            (
+                Some(tabular::create_table_sql(
+                    driver,
+                    &qualified,
+                    &columns,
+                    new_table.id_column,
+                )),
+                targets,
+            )
         }
         None => {
             let columns = table_columns(&session, namespace, table).await?;
             if columns.is_empty() {
-                return Err(format!("“{table}” no longer exists. Refresh the table list and try again."));
+                return Err(format!(
+                    "“{table}” no longer exists. Refresh the table list and try again."
+                ));
             }
             let targets = target_names
                 .iter()
@@ -724,7 +896,13 @@ pub async fn import_rows(
         }
     };
     let sequences = if driver == Driver::Postgres && create_sql.is_none() {
-        let output = session.pool.run(&postgres::sequence_columns_sql(namespace, table), usize::MAX).await?;
+        let output = session
+            .pool
+            .run(
+                &postgres::sequence_columns_sql(namespace, table),
+                usize::MAX,
+            )
+            .await?;
         postgres::sequence_columns(&output)
             .into_iter()
             .filter(|column| target_names.contains(&column.name))
@@ -733,8 +911,19 @@ pub async fn import_rows(
         Vec::new()
     };
     let overriding = sequences.iter().any(|column| column.always);
-    let (prefix, suffix) = tabular::insert_parts(driver, &qualified, &target_names, request.skip_conflicts, overriding);
-    let plan = InsertPlan { driver, prefix, suffix, targets };
+    let (prefix, suffix) = tabular::insert_parts(
+        driver,
+        &qualified,
+        &target_names,
+        request.skip_conflicts,
+        overriding,
+    );
+    let plan = InsertPlan {
+        driver,
+        prefix,
+        suffix,
+        targets,
+    };
 
     let mut file = open_sql_file(&request.path)?;
     let spec = resolve_spec(&request.path, &mut file, &request.file)?;
@@ -744,11 +933,17 @@ pub async fn import_rows(
     let transfer = transfers.start(&transfer_id);
     let started = Instant::now();
     let (tx, mut rx) = mpsc::channel(4);
-    let sources = request.mapping.iter().map(|mapping| mapping.source).collect();
+    let sources = request
+        .mapping
+        .iter()
+        .map(|mapping| mapping.source)
+        .collect();
     let parser = {
         let cancel = transfer.cancel.clone();
         let columns = request.source_columns.clone();
-        tauri::async_runtime::spawn_blocking(move || parse_batches(file.reader, spec, columns, sources, cancel, tx))
+        tauri::async_runtime::spawn_blocking(move || {
+            parse_batches(file.reader, spec, columns, sources, cancel, tx)
+        })
     };
 
     let mut created = false;
@@ -759,7 +954,12 @@ pub async fn import_rows(
                 conn.execute(sql).await?;
                 created = true;
             }
-            conn.execute(if driver == Driver::Mysql { "START TRANSACTION" } else { "BEGIN" }).await?;
+            conn.execute(if driver == Driver::Mysql {
+                "START TRANSACTION"
+            } else {
+                "BEGIN"
+            })
+            .await?;
             let ran = async {
                 if request.empty_first && create_sql.is_none() {
                     conn.execute(&format!("DELETE FROM {qualified}")).await?;
@@ -778,12 +978,15 @@ pub async fn import_rows(
                         );
                     }
                 };
-                let rows = insert_batches(&mut conn, &plan, &mut rx, &transfer.cancel, &mut progress).await?;
+                let rows =
+                    insert_batches(&mut conn, &plan, &mut rx, &transfer.cancel, &mut progress)
+                        .await?;
                 if transfer.cancelled() {
                     return Err(IMPORT_CANCELLED.to_string());
                 }
                 for column in &sequences {
-                    conn.execute(&postgres::sync_sequence_statement(&qualified, column).sql).await?;
+                    conn.execute(&postgres::sync_sequence_statement(&qualified, column).sql)
+                        .await?;
                 }
                 conn.execute("COMMIT").await?;
                 Ok(rows)
@@ -844,7 +1047,11 @@ mod tests {
     use sqlx::Connection;
 
     async fn sqlite() -> Conn {
-        Conn::Sqlite(sqlx::SqliteConnection::connect("sqlite::memory:").await.unwrap())
+        Conn::Sqlite(
+            sqlx::SqliteConnection::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        )
     }
 
     async fn export(conn: &mut Conn, sql: &str, options: &TabularOptions) -> String {
@@ -852,28 +1059,56 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let mut report = |_: u64| {};
         let mut writer = TabularWriter::new(&mut out, options);
-        write_query(conn, sql, &[], &mut writer, &cancel, &mut report).await.unwrap();
+        write_query(conn, sql, &[], &mut writer, &cancel, &mut report)
+            .await
+            .unwrap();
         writer.finish().unwrap();
         String::from_utf8(out).unwrap()
     }
 
-    async fn import(conn: &mut Conn, text: String, spec: SourceSpec, columns: &[&str], table: &str) -> Result<u64, String> {
+    async fn import(
+        conn: &mut Conn,
+        text: String,
+        spec: SourceSpec,
+        columns: &[&str],
+        table: &str,
+    ) -> Result<u64, String> {
         let names: Vec<String> = columns.iter().map(|name| name.to_string()).collect();
         let mut targets = vec![TargetColumn::default(); names.len()];
         if let Some(slot) = names.iter().position(|name| name == "avatar") {
             targets[slot] = TargetColumn::of("BLOB");
         }
-        let (prefix, suffix) = tabular::insert_parts(Driver::Sqlite, &format!("\"{table}\""), &names, false, false);
-        let plan = InsertPlan { driver: Driver::Sqlite, prefix, suffix, targets };
+        let (prefix, suffix) = tabular::insert_parts(
+            Driver::Sqlite,
+            &format!("\"{table}\""),
+            &names,
+            false,
+            false,
+        );
+        let plan = InsertPlan {
+            driver: Driver::Sqlite,
+            prefix,
+            suffix,
+            targets,
+        };
         let (tx, mut rx) = mpsc::channel(4);
         let cancel = Arc::new(AtomicBool::new(false));
         let sources = (0..names.len()).collect();
         let reader: Box<dyn BufRead + Send> = Box::new(std::io::Cursor::new(text.into_bytes()));
-        let parser = tokio::task::spawn_blocking(move || parse_batches(reader, spec, names, sources, cancel, tx));
+        let parser = tokio::task::spawn_blocking(move || {
+            parse_batches(reader, spec, names, sources, cancel, tx)
+        });
         conn.execute("BEGIN").await.unwrap();
         let mut progress = |_: u64| {};
-        let outcome = insert_batches(conn, &plan, &mut rx, &AtomicBool::new(false), &mut progress).await;
-        conn.execute(if outcome.is_ok() { "COMMIT" } else { "ROLLBACK" }).await.unwrap();
+        let outcome =
+            insert_batches(conn, &plan, &mut rx, &AtomicBool::new(false), &mut progress).await;
+        conn.execute(if outcome.is_ok() {
+            "COMMIT"
+        } else {
+            "ROLLBACK"
+        })
+        .await
+        .unwrap();
         drop(rx);
         parser.await.unwrap();
         outcome
@@ -904,34 +1139,71 @@ mod tests {
         let mut conn = seeded().await;
         let csv = export(&mut conn, "SELECT * FROM users", &TabularOptions::default()).await;
         assert!(csv.starts_with("id,name,score,avatar,active\n1,\"o'brien, \"\"jr\"\"\",2.5,\\xcafe,1\n2,\"\",,,0\n"), "{csv}");
-        let spec = SourceSpec { format: Format::Csv, delimiter: b',', header: true, null_markers: vec![String::new()] };
+        let spec = SourceSpec {
+            format: Format::Csv,
+            delimiter: b',',
+            header: true,
+            null_markers: vec![String::new()],
+        };
         let columns = ["id", "name", "score", "avatar", "active"];
-        assert_eq!(import(&mut conn, csv, spec, &columns, "copy").await.unwrap(), 4);
-        assert_eq!(rows(&mut conn, "copy").await, rows(&mut conn, "users").await);
+        assert_eq!(
+            import(&mut conn, csv, spec, &columns, "copy")
+                .await
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            rows(&mut conn, "copy").await,
+            rows(&mut conn, "users").await
+        );
     }
 
     #[tokio::test]
     async fn json_lines_round_trip_through_a_table() {
         let mut conn = seeded().await;
-        let options = TabularOptions { format: Format::Json, json_style: JsonStyle::Lines, ..TabularOptions::default() };
+        let options = TabularOptions {
+            format: Format::Json,
+            json_style: JsonStyle::Lines,
+            ..TabularOptions::default()
+        };
         let json = export(&mut conn, "SELECT * FROM users", &options).await;
-        let spec = SourceSpec { format: Format::Json, delimiter: b',', header: true, null_markers: Vec::new() };
+        let spec = SourceSpec {
+            format: Format::Json,
+            delimiter: b',',
+            header: true,
+            null_markers: Vec::new(),
+        };
         let columns = ["id", "name", "score", "avatar", "active"];
-        assert_eq!(import(&mut conn, json, spec, &columns, "copy").await.unwrap(), 4);
-        assert_eq!(rows(&mut conn, "copy").await, rows(&mut conn, "users").await);
+        assert_eq!(
+            import(&mut conn, json, spec, &columns, "copy")
+                .await
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            rows(&mut conn, "copy").await,
+            rows(&mut conn, "users").await
+        );
     }
 
     #[tokio::test]
     async fn exports_column_names_for_an_empty_result() {
         let mut conn = seeded().await;
-        let csv = export(&mut conn, "SELECT id, name FROM users WHERE id < 0", &TabularOptions::default()).await;
+        let csv = export(
+            &mut conn,
+            "SELECT id, name FROM users WHERE id < 0",
+            &TabularOptions::default(),
+        )
+        .await;
         assert_eq!(csv, "id,name\n");
     }
 
     #[tokio::test]
     async fn a_failing_row_names_its_line_and_rolls_back() {
         let mut conn = sqlite().await;
-        conn.execute("CREATE TABLE strict_t (id INTEGER PRIMARY KEY, name TEXT NOT NULL)").await.unwrap();
+        conn.execute("CREATE TABLE strict_t (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+            .await
+            .unwrap();
         let mut csv = String::from("id,name\n");
         for id in 1..=700 {
             if id == 650 {
@@ -940,24 +1212,46 @@ mod tests {
                 csv.push_str(&format!("{id},n{id}\n"));
             }
         }
-        let spec = SourceSpec { format: Format::Csv, delimiter: b',', header: true, null_markers: vec![String::new()] };
-        let err = import(&mut conn, csv, spec, &["id", "name"], "strict_t").await.unwrap_err();
+        let spec = SourceSpec {
+            format: Format::Csv,
+            delimiter: b',',
+            header: true,
+            null_markers: vec![String::new()],
+        };
+        let err = import(&mut conn, csv, spec, &["id", "name"], "strict_t")
+            .await
+            .unwrap_err();
         assert!(err.starts_with("Line 651: "), "{err}");
-        let count = conn.run("SELECT COUNT(*) FROM strict_t", 1, None).await.unwrap();
+        let count = conn
+            .run("SELECT COUNT(*) FROM strict_t", 1, None)
+            .await
+            .unwrap();
         assert_eq!(crate::db::first_text(&count), "0");
     }
 
     #[test]
     fn previews_a_file_and_guesses_types() {
         let path = std::env::temp_dir().join(format!("recon-preview-{}.csv", uuid::Uuid::new_v4()));
-        fs::write(&path, "id;price;when;flag;note\n1;2.5;2024-01-02;true;a\n2;3;2024-01-03;false;\n").unwrap();
-        let options = ImportFileOptions { format: None, delimiter: None, header: true, null_markers: vec![String::new()] };
+        fs::write(
+            &path,
+            "id;price;when;flag;note\n1;2.5;2024-01-02;true;a\n2;3;2024-01-03;false;\n",
+        )
+        .unwrap();
+        let options = ImportFileOptions {
+            format: None,
+            delimiter: None,
+            header: true,
+            null_markers: vec![String::new()],
+        };
         let preview = preview_file(Driver::Postgres, path.to_str().unwrap(), &options).unwrap();
         let _ = fs::remove_file(&path);
         assert_eq!(preview.format, Format::Csv);
         assert_eq!(preview.delimiter, ';');
         assert_eq!(preview.columns, vec!["id", "price", "when", "flag", "note"]);
-        assert_eq!(preview.types, vec!["BIGINT", "DOUBLE PRECISION", "DATE", "BOOLEAN", "TEXT"]);
+        assert_eq!(
+            preview.types,
+            vec!["BIGINT", "DOUBLE PRECISION", "DATE", "BOOLEAN", "TEXT"]
+        );
         assert_eq!(preview.rows[1][4], None);
         assert_eq!(preview.sampled, 2);
     }
@@ -965,11 +1259,23 @@ mod tests {
     #[test]
     fn names_table_files_uniquely() {
         let tables = [
-            DumpTable { name: "Users".into(), view: false },
-            DumpTable { name: "users".into(), view: false },
-            DumpTable { name: "a/b".into(), view: true },
+            DumpTable {
+                name: "Users".into(),
+                view: false,
+            },
+            DumpTable {
+                name: "users".into(),
+                view: false,
+            },
+            DumpTable {
+                name: "a/b".into(),
+                view: true,
+            },
         ];
-        let options = TabularOptions { gzip: true, ..TabularOptions::default() };
+        let options = TabularOptions {
+            gzip: true,
+            ..TabularOptions::default()
+        };
         let files = table_files(Path::new("/tmp/out"), &tables, &options);
         let names: Vec<String> = files.iter().map(|path| file_name(path)).collect();
         assert_eq!(names, vec!["Users.csv.gz", "users-2.csv.gz", "a-b.csv.gz"]);

@@ -4,7 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use super::dump::mysql_literal;
-use super::{dialect, first_text, quote_backtick, quote_double, quote_literal, text_at, CellValue, Conn};
+use super::{
+    dialect, first_text, quote_backtick, quote_double, quote_literal, text_at, CellValue, Conn,
+};
 use crate::models::Driver;
 
 pub const BACKUP_VERSION: u32 = 1;
@@ -72,7 +74,11 @@ fn next_line(reader: &mut dyn BufRead) -> Result<Option<String>, String> {
     if read == 0 {
         return Ok(None);
     }
-    Ok(Some(String::from_utf8_lossy(&line).trim_end_matches(['\r', '\n']).to_string()))
+    Ok(Some(
+        String::from_utf8_lossy(&line)
+            .trim_end_matches(['\r', '\n'])
+            .to_string(),
+    ))
 }
 
 /// Reads only the header block, so checking a large backup never scans the whole file.
@@ -98,7 +104,10 @@ pub fn parse_header(reader: &mut dyn BufRead) -> Result<BackupInfo, String> {
         let Some(line) = next_line(reader)? else {
             break;
         };
-        let Some((key, value)) = line.strip_prefix("-- ").and_then(|rest| rest.split_once(": ")) else {
+        let Some((key, value)) = line
+            .strip_prefix("-- ")
+            .and_then(|rest| rest.split_once(": "))
+        else {
             break;
         };
         match key {
@@ -116,7 +125,10 @@ pub fn parse_header(reader: &mut dyn BufRead) -> Result<BackupInfo, String> {
 
 /// The current time as an RFC 3339 UTC timestamp.
 pub fn utc_timestamp() -> String {
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|elapsed| elapsed.as_secs()).unwrap_or(0);
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
     let (days, rest) = (secs / 86_400, secs % 86_400);
     // Howard Hinnant's days-to-civil conversion.
     let z = days as i64 + 719_468;
@@ -141,7 +153,11 @@ pub fn utc_timestamp() -> String {
  * the connection pointed at it. On Postgres this is meant to run inside the
  * restore's transaction.
  */
-pub async fn reset_namespace(conn: &mut Conn, driver: Driver, namespace: &str) -> Result<(), String> {
+pub async fn reset_namespace(
+    conn: &mut Conn,
+    driver: Driver,
+    namespace: &str,
+) -> Result<(), String> {
     match driver {
         Driver::Mysql => reset_mysql(conn, namespace).await,
         Driver::Postgres => reset_postgres(conn, namespace).await,
@@ -162,7 +178,8 @@ async fn reset_mysql(conn: &mut Conn, namespace: &str) -> Result<(), String> {
         false,
         "Restoring could leave these broken or pointing at rows that no longer exist.",
     )?;
-    conn.execute("SET @recon_foreign_key_checks = @@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS = 0").await?;
+    conn.execute("SET @recon_foreign_key_checks = @@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS = 0")
+        .await?;
     let result = async {
         let relations = conn
             .run(
@@ -197,7 +214,9 @@ async fn reset_mysql(conn: &mut Conn, namespace: &str) -> Result<(), String> {
         Ok::<_, String>(())
     }
     .await;
-    let restored = conn.execute("SET FOREIGN_KEY_CHECKS = @recon_foreign_key_checks").await;
+    let restored = conn
+        .execute("SET FOREIGN_KEY_CHECKS = @recon_foreign_key_checks")
+        .await;
     result.and(restored.map(|_| ()))
 }
 
@@ -208,34 +227,62 @@ async fn reset_mysql(conn: &mut Conn, namespace: &str) -> Result<(), String> {
  * databases. Views the user can't read the definition of, and triggers and
  * routines elsewhere, can't be checked.
  */
-async fn mysql_dependents(conn: &mut Conn, namespace: &str, schema: &str) -> Result<Vec<String>, String> {
+async fn mysql_dependents(
+    conn: &mut Conn,
+    namespace: &str,
+    schema: &str,
+) -> Result<Vec<String>, String> {
     let keys = format!(
         "SELECT CONCAT('foreign key ', CONSTRAINT_NAME, ' on ', CONSTRAINT_SCHEMA, '.', TABLE_NAME) \
          FROM information_schema.REFERENTIAL_CONSTRAINTS \
          WHERE UNIQUE_CONSTRAINT_SCHEMA = {schema} AND CONSTRAINT_SCHEMA <> {schema}"
     );
-    let mut names: Vec<String> = conn.run(&keys, usize::MAX, None).await?.text_rows().iter().map(|row| text_at(row, 0)).collect();
+    let mut names: Vec<String> = conn
+        .run(&keys, usize::MAX, None)
+        .await?
+        .text_rows()
+        .iter()
+        .map(|row| text_at(row, 0))
+        .collect();
     let needle = mysql_literal(&CellValue::Text(format!("{}.", quote_backtick(namespace))));
     let views = format!(
         "SELECT CONCAT('view ', TABLE_SCHEMA, '.', TABLE_NAME) FROM information_schema.VIEWS \
          WHERE TABLE_SCHEMA <> {schema} AND LOCATE({needle}, VIEW_DEFINITION) > 0"
     );
-    names.extend(conn.run(&views, usize::MAX, None).await?.text_rows().iter().map(|row| text_at(row, 0)));
+    names.extend(
+        conn.run(&views, usize::MAX, None)
+            .await?
+            .text_rows()
+            .iter()
+            .map(|row| text_at(row, 0)),
+    );
     names.sort();
     names.dedup();
     Ok(names)
 }
 
 /// Fails with the first few `names` when anything outside the namespace depends on it.
-fn refuse_dependents(namespace: &str, mut names: Vec<String>, more: bool, consequence: &str) -> Result<(), String> {
+fn refuse_dependents(
+    namespace: &str,
+    mut names: Vec<String>,
+    more: bool,
+    consequence: &str,
+) -> Result<(), String> {
     if names.is_empty() {
         return Ok(());
     }
     let more = more || names.len() > DEPENDENTS_SHOWN;
     names.truncate(DEPENDENTS_SHOWN);
-    let verb = if names.len() == 1 && !more { "depends" } else { "depend" };
+    let verb = if names.len() == 1 && !more {
+        "depends"
+    } else {
+        "depend"
+    };
     let rest = if more { ", and more" } else { "" };
-    Err(format!("Can't restore into “{namespace}”: {}{rest} {verb} on it. {consequence}", names.join(", ")))
+    Err(format!(
+        "Can't restore into “{namespace}”: {}{rest} {verb} on it. {consequence}",
+        names.join(", ")
+    ))
 }
 
 /**
@@ -307,9 +354,20 @@ fn postgres_dependents_sql(namespace: &str) -> String {
 }
 
 async fn reset_postgres(conn: &mut Conn, namespace: &str) -> Result<(), String> {
-    let dependents = conn.run(&postgres_dependents_sql(namespace), DEPENDENTS_SHOWN, None).await?;
-    let names: Vec<String> = dependents.text_rows().iter().map(|row| text_at(row, 0)).collect();
-    refuse_dependents(namespace, names, dependents.truncated, "Restoring would delete these.")?;
+    let dependents = conn
+        .run(&postgres_dependents_sql(namespace), DEPENDENTS_SHOWN, None)
+        .await?;
+    let names: Vec<String> = dependents
+        .text_rows()
+        .iter()
+        .map(|row| text_at(row, 0))
+        .collect();
+    refuse_dependents(
+        namespace,
+        names,
+        dependents.truncated,
+        "Restoring would delete these.",
+    )?;
     let owner = first_text(
         &conn
             .run(
@@ -329,13 +387,18 @@ async fn reset_postgres(conn: &mut Conn, namespace: &str) -> Result<(), String> 
     if let Some(sql) = dialect.drop_namespace_sql(namespace) {
         conn.execute(&sql).await?;
     }
-    conn.execute(&format!("CREATE SCHEMA {} AUTHORIZATION {}", quote_double(namespace), quote_double(&owner)))
-        .await?;
+    conn.execute(&format!(
+        "CREATE SCHEMA {} AUTHORIZATION {}",
+        quote_double(namespace),
+        quote_double(&owner)
+    ))
+    .await?;
     /*
      * Only the schema itself, unlike `use_namespace_sql`: with public on the
      * path, the backup's `DROP ... IF EXISTS` statements could reach it.
      */
-    conn.execute(&format!("SET search_path TO {}", quote_double(namespace))).await?;
+    conn.execute(&format!("SET search_path TO {}", quote_double(namespace)))
+        .await?;
     Ok(())
 }
 
@@ -356,17 +419,30 @@ async fn reset_sqlite(conn: &mut Conn, namespace: &str) -> Result<(), String> {
         .text_rows();
     let virtual_tables: Vec<String> = entries
         .iter()
-        .filter(|row| text_at(row, 0) == "table" && text_at(row, 2).to_ascii_uppercase().starts_with("CREATE VIRTUAL TABLE"))
+        .filter(|row| {
+            text_at(row, 0) == "table"
+                && text_at(row, 2)
+                    .to_ascii_uppercase()
+                    .starts_with("CREATE VIRTUAL TABLE")
+        })
         .map(|row| text_at(row, 1))
         .collect();
-    let shadow = |name: &str| virtual_tables.iter().any(|parent| name.starts_with(&format!("{parent}_")));
+    let shadow = |name: &str| {
+        virtual_tables
+            .iter()
+            .any(|parent| name.starts_with(&format!("{parent}_")))
+    };
     for (kind, keyword) in [("trigger", "TRIGGER"), ("view", "VIEW"), ("table", "TABLE")] {
         for row in entries.iter().filter(|row| text_at(row, 0) == kind) {
             let name = text_at(row, 1);
             if kind == "table" && shadow(&name) {
                 continue;
             }
-            conn.execute(&format!("DROP {keyword} IF EXISTS main.{}", quote_double(&name))).await?;
+            conn.execute(&format!(
+                "DROP {keyword} IF EXISTS main.{}",
+                quote_double(&name)
+            ))
+            .await?;
         }
     }
     Ok(())
@@ -390,7 +466,10 @@ mod tests {
 
     #[test]
     fn round_trips_the_header() {
-        let text = format!("{}-- Recon SQL export\n-- Server: other\n", header(&sample()));
+        let text = format!(
+            "{}-- Recon SQL export\n-- Server: other\n",
+            header(&sample())
+        );
         let parsed = parse_header(&mut BufReader::new(text.as_bytes())).unwrap();
         assert_eq!(parsed, sample());
     }
@@ -403,7 +482,10 @@ mod tests {
         use std::io::Write;
 
         let mut bytes = Vec::new();
-        for part in [header(&sample()), "-- Recon SQL export\nSELECT 1;\n".to_string()] {
+        for part in [
+            header(&sample()),
+            "-- Recon SQL export\nSELECT 1;\n".to_string(),
+        ] {
             let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
             encoder.write_all(part.as_bytes()).unwrap();
             bytes.extend(encoder.finish().unwrap());
@@ -417,7 +499,8 @@ mod tests {
 
     #[test]
     fn rejects_files_that_are_not_backups() {
-        let err = parse_header(&mut BufReader::new("-- Recon SQL export\n".as_bytes())).unwrap_err();
+        let err =
+            parse_header(&mut BufReader::new("-- Recon SQL export\n".as_bytes())).unwrap_err();
         assert_eq!(err, NOT_A_BACKUP);
         let err = parse_header(&mut BufReader::new(&b""[..])).unwrap_err();
         assert_eq!(err, NOT_A_BACKUP);
@@ -436,7 +519,10 @@ mod tests {
 
     #[test]
     fn keeps_header_values_on_one_line() {
-        let info = BackupInfo { namespace: "a\nb".into(), ..sample() };
+        let info = BackupInfo {
+            namespace: "a\nb".into(),
+            ..sample()
+        };
         let parsed = parse_header(&mut BufReader::new(header(&info).as_bytes())).unwrap();
         assert_eq!(parsed.namespace, "a b");
     }
@@ -446,20 +532,39 @@ mod tests {
         use std::sync::atomic::AtomicBool;
 
         let tables: Vec<DumpTable> = conn
-            .run(&dialect(Driver::Sqlite).tables_sql("main"), usize::MAX, None)
+            .run(
+                &dialect(Driver::Sqlite).tables_sql("main"),
+                usize::MAX,
+                None,
+            )
             .await
             .unwrap()
             .text_rows()
             .iter()
-            .map(|row| DumpTable { name: text_at(row, 0), view: text_at(row, 1) == "view" })
+            .map(|row| DumpTable {
+                name: text_at(row, 0),
+                view: text_at(row, 1) == "view",
+            })
             .collect();
         let mut out: Vec<u8> = Vec::new();
         let cancel = AtomicBool::new(false);
         let mut progress = |_: DumpProgress| {};
         let mut dump = Dump::new(&mut out, &cancel, &mut progress);
-        let options = dump::DumpOptions { structure: true, data: true, drop_tables: true, routines: true };
-        dump::run(conn, "SQLite 3", "main", &tables, options, &mut dump).await.unwrap();
-        let info = BackupInfo { driver: Driver::Sqlite, namespace: "main".into(), skipped: Vec::new(), ..sample() };
+        let options = dump::DumpOptions {
+            structure: true,
+            data: true,
+            drop_tables: true,
+            routines: true,
+        };
+        dump::run(conn, "SQLite 3", "main", &tables, options, &mut dump)
+            .await
+            .unwrap();
+        let info = BackupInfo {
+            driver: Driver::Sqlite,
+            namespace: "main".into(),
+            skipped: Vec::new(),
+            ..sample()
+        };
         format!("{}{}", header(&info), String::from_utf8(out).unwrap())
     }
 
@@ -471,25 +576,35 @@ mod tests {
         }
         splitter.finish(&mut statements);
         for statement in &statements {
-            conn.execute(&statement.sql).await.unwrap_or_else(|err| panic!("{err}: {}", statement.sql));
+            conn.execute(&statement.sql)
+                .await
+                .unwrap_or_else(|err| panic!("{err}: {}", statement.sql));
         }
     }
 
     async fn names(conn: &mut Conn) -> Vec<String> {
-        conn.run("SELECT type || ' ' || name FROM main.sqlite_master ORDER BY 1", usize::MAX, None)
-            .await
-            .unwrap()
-            .text_rows()
-            .iter()
-            .map(|row| text_at(row, 0))
-            .collect()
+        conn.run(
+            "SELECT type || ' ' || name FROM main.sqlite_master ORDER BY 1",
+            usize::MAX,
+            None,
+        )
+        .await
+        .unwrap()
+        .text_rows()
+        .iter()
+        .map(|row| text_at(row, 0))
+        .collect()
     }
 
     #[tokio::test]
     async fn restores_a_sqlite_backup_over_changed_data() {
         use sqlx::Connection;
 
-        let mut conn = Conn::Sqlite(sqlx::SqliteConnection::connect("sqlite::memory:").await.unwrap());
+        let mut conn = Conn::Sqlite(
+            sqlx::SqliteConnection::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
         for sql in [
             "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
             "CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INT REFERENCES users(id), body TEXT)",
@@ -505,7 +620,12 @@ mod tests {
         let before = names(&mut conn).await;
         let compare = "SELECT u.id, u.name, p.body FROM users u LEFT JOIN posts p ON p.user_id = u.id ORDER BY u.id";
         let rows = conn.run(compare, 10, None).await.unwrap().text_rows();
-        assert_eq!(parse_header(&mut std::io::BufReader::new(backup.as_bytes())).unwrap().driver, Driver::Sqlite);
+        assert_eq!(
+            parse_header(&mut std::io::BufReader::new(backup.as_bytes()))
+                .unwrap()
+                .driver,
+            Driver::Sqlite
+        );
 
         for sql in [
             "INSERT INTO users VALUES (3, 'cy')",
@@ -516,17 +636,26 @@ mod tests {
         ] {
             conn.execute(sql).await.unwrap();
         }
-        reset_namespace(&mut conn, Driver::Sqlite, "main").await.unwrap();
+        reset_namespace(&mut conn, Driver::Sqlite, "main")
+            .await
+            .unwrap();
         assert!(names(&mut conn).await.is_empty());
         replay(&mut conn, &backup).await;
 
         assert_eq!(names(&mut conn).await, before);
         assert_eq!(conn.run(compare, 10, None).await.unwrap().text_rows(), rows);
-        conn.execute("INSERT INTO posts VALUES (2, 2, 'again')").await.unwrap();
-        let bob = conn.run("SELECT name FROM users WHERE id = 2", 1, None).await.unwrap();
+        conn.execute("INSERT INTO posts VALUES (2, 2, 'again')")
+            .await
+            .unwrap();
+        let bob = conn
+            .run("SELECT name FROM users WHERE id = 2", 1, None)
+            .await
+            .unwrap();
         assert_eq!(first_text(&bob), "bob+");
 
-        reset_namespace(&mut conn, Driver::Sqlite, "main").await.unwrap();
+        reset_namespace(&mut conn, Driver::Sqlite, "main")
+            .await
+            .unwrap();
         let empty = sqlite_backup(&mut conn).await;
         replay(&mut conn, &empty).await;
         assert!(names(&mut conn).await.is_empty());
@@ -537,8 +666,14 @@ mod tests {
     async fn only_restores_sqlite_into_main() {
         use sqlx::Connection;
 
-        let mut conn = Conn::Sqlite(sqlx::SqliteConnection::connect("sqlite::memory:").await.unwrap());
-        let err = reset_namespace(&mut conn, Driver::Sqlite, "other").await.unwrap_err();
+        let mut conn = Conn::Sqlite(
+            sqlx::SqliteConnection::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        let err = reset_namespace(&mut conn, Driver::Sqlite, "other")
+            .await
+            .unwrap_err();
         assert!(err.contains("main database"), "{err}");
         conn.close().await;
     }
@@ -551,7 +686,9 @@ mod tests {
         }))
         .unwrap();
         match driver {
-            "postgres" => super::super::postgres::open(&entry, None, &Default::default()).await.unwrap(),
+            "postgres" => super::super::postgres::open(&entry, None, &Default::default())
+                .await
+                .unwrap(),
             _ => super::super::mysql::open(
                 &entry,
                 std::env::var("RECON_TEST_MYSQL_PASSWORD").ok().as_deref(),
@@ -582,13 +719,22 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn live_postgres_dependency_check() {
-        let Some(port) = std::env::var("RECON_TEST_POSTGRES_PORT").ok().and_then(|port| port.parse().ok()) else {
+        let Some(port) = std::env::var("RECON_TEST_POSTGRES_PORT")
+            .ok()
+            .and_then(|port| port.parse().ok())
+        else {
             return;
         };
         let admin = open_live("postgres", port, "postgres", "postgres").await;
         let mut admin_conn = admin.conn;
-        admin_conn.execute("DROP DATABASE IF EXISTS recon_restore_probe").await.unwrap();
-        admin_conn.execute("CREATE DATABASE recon_restore_probe").await.unwrap();
+        admin_conn
+            .execute("DROP DATABASE IF EXISTS recon_restore_probe")
+            .await
+            .unwrap();
+        admin_conn
+            .execute("CREATE DATABASE recon_restore_probe")
+            .await
+            .unwrap();
         let probe = open_live("postgres", port, "postgres", "recon_restore_probe").await;
         let mut conn = probe.conn;
         for sql in [
@@ -619,14 +765,27 @@ mod tests {
         try_reset(&mut conn, Driver::Postgres, "app").await.unwrap();
 
         for (setup, expected) in [
-            ("CREATE VIEW other.peek AS SELECT id FROM app.t", "view other.peek"),
+            (
+                "CREATE VIEW other.peek AS SELECT id FROM app.t",
+                "view other.peek",
+            ),
             ("CREATE TABLE other.feelings (f app.mood)", "other.feelings"),
             ("CREATE TABLE other.emails (e app.citext)", "other.emails"),
-            ("CREATE TABLE other.refs (t_id int REFERENCES app.t (id))", "other.refs"),
-            ("CREATE FUNCTION other.lookup(app.t) RETURNS int LANGUAGE sql AS 'SELECT 1'", "other.lookup"),
+            (
+                "CREATE TABLE other.refs (t_id int REFERENCES app.t (id))",
+                "other.refs",
+            ),
+            (
+                "CREATE FUNCTION other.lookup(app.t) RETURNS int LANGUAGE sql AS 'SELECT 1'",
+                "other.lookup",
+            ),
         ] {
-            conn.execute(setup).await.unwrap_or_else(|err| panic!("{err}: {setup}"));
-            let err = try_reset(&mut conn, Driver::Postgres, "app").await.unwrap_err();
+            conn.execute(setup)
+                .await
+                .unwrap_or_else(|err| panic!("{err}: {setup}"));
+            let err = try_reset(&mut conn, Driver::Postgres, "app")
+                .await
+                .unwrap_err();
             assert!(err.contains(expected), "{setup}: {err}");
             conn.execute("DROP SCHEMA other CASCADE").await.unwrap();
             conn.execute("CREATE SCHEMA other").await.unwrap();
@@ -635,7 +794,10 @@ mod tests {
 
         conn.close().await;
         probe.pool.close().await;
-        admin_conn.execute("DROP DATABASE recon_restore_probe").await.unwrap();
+        admin_conn
+            .execute("DROP DATABASE recon_restore_probe")
+            .await
+            .unwrap();
         admin_conn.close().await;
         admin.pool.close().await;
     }
@@ -661,7 +823,9 @@ mod tests {
             "CREATE FUNCTION recon_restore_a.twice(x INT) RETURNS INT DETERMINISTIC RETURN x * 2",
             "CREATE VIEW recon_restore_a.v AS SELECT id FROM recon_restore_a.t",
         ] {
-            conn.execute(sql).await.unwrap_or_else(|err| panic!("{err}: {sql}"));
+            conn.execute(sql)
+                .await
+                .unwrap_or_else(|err| panic!("{err}: {sql}"));
         }
         for (setup, expected) in [
             ("CREATE VIEW recon_restore_b.peek AS SELECT id FROM recon_restore_a.t", "view recon_restore_b.peek"),
@@ -677,9 +841,12 @@ mod tests {
             conn.execute("DROP DATABASE recon_restore_b").await.unwrap();
             conn.execute("CREATE DATABASE recon_restore_b").await.unwrap();
         }
-        let tables = "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'recon_restore_a'";
+        let tables =
+            "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'recon_restore_a'";
         assert_eq!(first_text(&conn.run(tables, 1, None).await.unwrap()), "2");
-        try_reset(&mut conn, Driver::Mysql, "recon_restore_a").await.unwrap();
+        try_reset(&mut conn, Driver::Mysql, "recon_restore_a")
+            .await
+            .unwrap();
         assert_eq!(first_text(&conn.run(tables, 1, None).await.unwrap()), "0");
 
         conn.execute("DROP DATABASE recon_restore_a").await.unwrap();
@@ -692,6 +859,9 @@ mod tests {
     fn formats_utc_timestamps() {
         let stamp = utc_timestamp();
         assert_eq!(stamp.len(), 20, "{stamp}");
-        assert!(stamp.ends_with('Z') && stamp.as_bytes()[10] == b'T', "{stamp}");
+        assert!(
+            stamp.ends_with('Z') && stamp.as_bytes()[10] == b'T',
+            "{stamp}"
+        );
     }
 }

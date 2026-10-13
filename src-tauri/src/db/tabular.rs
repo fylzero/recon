@@ -82,7 +82,9 @@ pub fn cell_text(cell: &CellValue) -> Option<String> {
         CellValue::Int(value) => Some(value.to_string()),
         CellValue::Float(value) => Some(value.to_string()),
         CellValue::Bytes(bytes) => Some(format!("\\x{}", hex(bytes))),
-        CellValue::Text(text) | CellValue::Json(text) | CellValue::DateTime(text) => Some(text.clone()),
+        CellValue::Text(text) | CellValue::Json(text) | CellValue::DateTime(text) => {
+            Some(text.clone())
+        }
     }
 }
 
@@ -91,8 +93,12 @@ pub fn json_value(cell: &CellValue) -> Value {
         CellValue::Null => Value::Null,
         CellValue::Bool(value) => Value::Bool(*value),
         CellValue::Int(value) => Value::from(*value),
-        CellValue::Float(value) => serde_json::Number::from_f64(*value).map_or(Value::Null, Value::Number),
-        CellValue::Json(text) => serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.clone())),
+        CellValue::Float(value) => {
+            serde_json::Number::from_f64(*value).map_or(Value::Null, Value::Number)
+        }
+        CellValue::Json(text) => {
+            serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.clone()))
+        }
         other => cell_text(other).map_or(Value::Null, Value::String),
     }
 }
@@ -140,7 +146,13 @@ pub struct TabularWriter<'a> {
 
 impl<'a> TabularWriter<'a> {
     pub fn new(out: &'a mut (dyn Write + Send), options: &'a TabularOptions) -> Self {
-        TabularWriter { out, options, columns: None, rows: 0, line: String::new() }
+        TabularWriter {
+            out,
+            options,
+            columns: None,
+            rows: 0,
+            line: String::new(),
+        }
     }
 
     pub fn has_columns(&self) -> bool {
@@ -172,7 +184,12 @@ impl<'a> TabularWriter<'a> {
                         if index > 0 {
                             line.push(self.options.delimiter);
                         }
-                        push_csv_field(&mut line, name, self.options.delimiter, &self.options.null_as);
+                        push_csv_field(
+                            &mut line,
+                            name,
+                            self.options.delimiter,
+                            &self.options.null_as,
+                        );
                     }
                     line.push('\n');
                     self.write(line.as_bytes())?;
@@ -190,7 +207,10 @@ impl<'a> TabularWriter<'a> {
     }
 
     pub fn write_row(&mut self, row: &[CellValue]) -> Result<(), String> {
-        let columns = self.columns.as_ref().ok_or("The export started writing rows before it knew the columns.")?;
+        let columns = self
+            .columns
+            .as_ref()
+            .ok_or("The export started writing rows before it knew the columns.")?;
         let mut line = std::mem::take(&mut self.line);
         line.clear();
         match self.options.format {
@@ -200,7 +220,12 @@ impl<'a> TabularWriter<'a> {
                         line.push(self.options.delimiter);
                     }
                     match cell_text(cell) {
-                        Some(text) => push_csv_field(&mut line, &text, self.options.delimiter, &self.options.null_as),
+                        Some(text) => push_csv_field(
+                            &mut line,
+                            &text,
+                            self.options.delimiter,
+                            &self.options.null_as,
+                        ),
                         None => line.push_str(&self.options.null_as),
                     }
                 }
@@ -217,7 +242,9 @@ impl<'a> TabularWriter<'a> {
                     }
                     line.push_str(&serde_json::to_string(name).unwrap_or_default());
                     line.push(':');
-                    line.push_str(&serde_json::to_string(&json_value(cell)).unwrap_or_else(|_| "null".into()));
+                    line.push_str(
+                        &serde_json::to_string(&json_value(cell)).unwrap_or_else(|_| "null".into()),
+                    );
                 }
                 line.push('}');
                 if self.options.json_style == JsonStyle::Lines {
@@ -275,7 +302,12 @@ pub struct CsvReader<R> {
 
 impl<R: BufRead> CsvReader<R> {
     pub fn new(reader: R, delimiter: u8) -> Self {
-        CsvReader { reader, delimiter, line: 0, buf: Vec::new() }
+        CsvReader {
+            reader,
+            delimiter,
+            line: 0,
+            buf: Vec::new(),
+        }
     }
 
     /// The next record and the line it starts on. Blank lines are skipped.
@@ -320,7 +352,9 @@ impl<R: BufRead> CsvReader<R> {
                     } else if byte == self.delimiter {
                         fields.push(finish_field(std::mem::take(&mut field), quoted, start)?);
                         quoted = false;
-                    } else if byte == b'\n' || (byte == b'\r' && matches!(bytes.get(index + 1), Some(b'\n') | None)) {
+                    } else if byte == b'\n'
+                        || (byte == b'\r' && matches!(bytes.get(index + 1), Some(b'\n') | None))
+                    {
                         break;
                     } else if byte == b'"' && field.is_empty() && !quoted {
                         in_quotes = true;
@@ -344,8 +378,9 @@ impl<R: BufRead> CsvReader<R> {
 }
 
 fn finish_field(bytes: Vec<u8>, quoted: bool, line: u64) -> Result<Field, String> {
-    let text = String::from_utf8(bytes)
-        .map_err(|_| format!("Line {line}: the file isn't UTF-8 text. Save it as UTF-8 and try again."))?;
+    let text = String::from_utf8(bytes).map_err(|_| {
+        format!("Line {line}: the file isn't UTF-8 text. Save it as UTF-8 and try again.")
+    })?;
     Ok(Field { text, quoted })
 }
 
@@ -366,10 +401,11 @@ pub fn detect_delimiter(sample: &[u8]) -> u8 {
             _ => {}
         }
     }
-    let (best, count) = counts
-        .iter()
-        .enumerate()
-        .fold((0, 0), |best, (slot, &count)| if count > best.1 { (slot, count) } else { best });
+    let (best, count) =
+        counts.iter().enumerate().fold(
+            (0, 0),
+            |best, (slot, &count)| if count > best.1 { (slot, count) } else { best },
+        );
     if count == 0 {
         b','
     } else {
@@ -452,12 +488,18 @@ where
  * Reads a top-level array of objects, streamed, or one object per line. Stops
  * early when `each` returns false.
  */
-pub fn read_json(reader: &mut dyn BufRead, mut each: impl FnMut(Position, JsonObject) -> Result<bool, String>) -> Result<(), String> {
+pub fn read_json(
+    reader: &mut dyn BufRead,
+    mut each: impl FnMut(Position, JsonObject) -> Result<bool, String>,
+) -> Result<(), String> {
     let first = skip_leading_space(reader)?;
     if first == Some(b'[') {
         let mut stop = Stop::No;
         let mut deserializer = serde_json::Deserializer::from_reader(&mut *reader);
-        let read = (&mut deserializer).deserialize_seq(ArrayRows { each: &mut each, stop: &mut stop });
+        let read = (&mut deserializer).deserialize_seq(ArrayRows {
+            each: &mut each,
+            stop: &mut stop,
+        });
         return match stop {
             Stop::Early => Ok(()),
             Stop::Failed(err) => Err(err),
@@ -478,13 +520,15 @@ pub fn read_json(reader: &mut dyn BufRead, mut each: impl FnMut(Position, JsonOb
             return Ok(());
         }
         number += 1;
-        let text = std::str::from_utf8(&line)
-            .map_err(|_| format!("Line {number}: the file isn't UTF-8 text. Save it as UTF-8 and try again."))?;
+        let text = std::str::from_utf8(&line).map_err(|_| {
+            format!("Line {number}: the file isn't UTF-8 text. Save it as UTF-8 and try again.")
+        })?;
         let text = text.trim();
         if text.is_empty() {
             continue;
         }
-        let object = serde_json::from_str::<JsonObject>(text).map_err(|err| format!("Line {number}: {err}"))?;
+        let object = serde_json::from_str::<JsonObject>(text)
+            .map_err(|err| format!("Line {number}: {err}"))?;
         if !each(Position::Line(number), object)? {
             return Ok(());
         }
@@ -521,7 +565,10 @@ fn skip_leading_space(reader: &mut dyn BufRead) -> Result<Option<u8>, String> {
 /// The first non-blank byte of `sample`, for telling JSON from CSV.
 pub fn looks_like_json(sample: &[u8]) -> bool {
     let sample = sample.strip_prefix(BOM).unwrap_or(sample);
-    matches!(sample.iter().find(|byte| !byte.is_ascii_whitespace()), Some(b'[' | b'{'))
+    matches!(
+        sample.iter().find(|byte| !byte.is_ascii_whitespace()),
+        Some(b'[' | b'{')
+    )
 }
 
 /// A value read from a file, before it's written out as SQL.
@@ -558,7 +605,9 @@ impl ImportValue {
         match self {
             ImportValue::Null => None,
             ImportValue::Bool(value) => Some(value.to_string()),
-            ImportValue::Text(text) | ImportValue::Number(text) | ImportValue::Json(text) => Some(text.clone()),
+            ImportValue::Text(text) | ImportValue::Number(text) | ImportValue::Json(text) => {
+                Some(text.clone())
+            }
         }
     }
 
@@ -566,7 +615,9 @@ impl ImportValue {
     pub fn size(&self) -> usize {
         match self {
             ImportValue::Null | ImportValue::Bool(_) => 5,
-            ImportValue::Text(text) | ImportValue::Number(text) | ImportValue::Json(text) => text.len() + 4,
+            ImportValue::Text(text) | ImportValue::Number(text) | ImportValue::Json(text) => {
+                text.len() + 4
+            }
         }
     }
 }
@@ -636,8 +687,11 @@ pub fn read_source(
             Ok(())
         }
         Format::Json => {
-            let mut index: HashMap<String, usize> =
-                columns.iter().enumerate().map(|(slot, name)| (name.clone(), slot)).collect();
+            let mut index: HashMap<String, usize> = columns
+                .iter()
+                .enumerate()
+                .map(|(slot, name)| (name.clone(), slot))
+                .collect();
             read_json(reader, |position, object| {
                 let mut values = vec![ImportValue::Null; columns.len()];
                 for (key, value) in object.0 {
@@ -676,7 +730,9 @@ fn is_int(text: &str) -> bool {
 
 fn is_float(text: &str) -> bool {
     text.bytes().any(|byte| byte.is_ascii_digit())
-        && text.bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.' | b'e' | b'E'))
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.' | b'e' | b'E'))
         && text.parse::<f64>().is_ok_and(f64::is_finite)
         && plain_number(text)
 }
@@ -686,7 +742,10 @@ fn is_bool(text: &str) -> bool {
 }
 
 fn in_range(text: &str, low: u32, high: u32) -> bool {
-    is_digits(text) && text.parse::<u32>().is_ok_and(|value| (low..=high).contains(&value))
+    is_digits(text)
+        && text
+            .parse::<u32>()
+            .is_ok_and(|value| (low..=high).contains(&value))
 }
 
 fn is_date(text: &str) -> bool {
@@ -722,11 +781,16 @@ fn timestamp_parts(text: &str) -> Option<(bool, bool)> {
         && parts[0].len() == 2
         && in_range(parts[1], 0, 59)
         && parts[1].len() == 2
-        && parts.get(2).is_none_or(|seconds| seconds.len() == 2 && in_range(seconds, 0, 60));
+        && parts
+            .get(2)
+            .is_none_or(|seconds| seconds.len() == 2 && in_range(seconds, 0, 60));
     let valid_fraction = fraction.is_none_or(is_digits);
     let valid_zone = zone.is_empty()
         || zone.eq_ignore_ascii_case("z")
-        || zone.len() > 1 && zone[1..].split(':').all(|part| matches!(part.len(), 2 | 4) && is_digits(part));
+        || zone.len() > 1
+            && zone[1..]
+                .split(':')
+                .all(|part| matches!(part.len(), 2 | 4) && is_digits(part));
     (valid_clock && valid_fraction && valid_zone).then_some((!zone.is_empty(), fraction.is_some()))
 }
 
@@ -876,12 +940,15 @@ pub fn import_literal(driver: Driver, value: &ImportValue, target: TargetColumn)
     match (driver, value) {
         (_, ImportValue::Null) => "NULL".into(),
         (Driver::Postgres, ImportValue::Bool(value)) => postgres_text(&value.to_string()),
-        (Driver::Postgres, ImportValue::Text(text) | ImportValue::Number(text) | ImportValue::Json(text)) => {
-            postgres_text(text)
-        }
+        (
+            Driver::Postgres,
+            ImportValue::Text(text) | ImportValue::Number(text) | ImportValue::Json(text),
+        ) => postgres_text(text),
         (_, ImportValue::Bool(value)) => as_bool(*value),
         (_, ImportValue::Number(text)) => text.clone(),
-        (_, ImportValue::Text(text)) if target.boolean && is_bool(text) => as_bool(text.eq_ignore_ascii_case("true")),
+        (_, ImportValue::Text(text)) if target.boolean && is_bool(text) => {
+            as_bool(text.eq_ignore_ascii_case("true"))
+        }
         (Driver::Mysql, ImportValue::Text(text)) if target.binary && hex_body(text).is_some() => {
             match hex_body(text).unwrap_or_default() {
                 "" => "''".into(),
@@ -897,13 +964,24 @@ pub fn import_literal(driver: Driver, value: &ImportValue, target: TargetColumn)
 }
 
 /** `CREATE TABLE` for an import, with an optional auto-increment `id` primary key first. */
-pub fn create_table_sql(driver: Driver, table: &str, columns: &[(String, String)], id_column: bool) -> String {
+pub fn create_table_sql(
+    driver: Driver,
+    table: &str,
+    columns: &[(String, String)],
+    id_column: bool,
+) -> String {
     let quote = |name: &str| dialect(driver).quote_ident(name);
     let mut definitions = Vec::new();
     if id_column {
         definitions.push(match driver {
-            Driver::Postgres => format!("{} BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY", quote("id")),
-            Driver::Mysql => format!("{} BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY", quote("id")),
+            Driver::Postgres => format!(
+                "{} BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY",
+                quote("id")
+            ),
+            Driver::Mysql => format!(
+                "{} BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY",
+                quote("id")
+            ),
             Driver::Sqlite => format!("{} INTEGER PRIMARY KEY AUTOINCREMENT", quote("id")),
         });
     }
@@ -922,20 +1000,41 @@ pub fn insert_parts(
     overriding: bool,
 ) -> (String, String) {
     let quote = |name: &str| dialect(driver).quote_ident(name);
-    let list = columns.iter().map(|name| quote(name)).collect::<Vec<_>>().join(", ");
+    let list = columns
+        .iter()
+        .map(|name| quote(name))
+        .collect::<Vec<_>>()
+        .join(", ");
     match driver {
         Driver::Mysql => {
             let ignore = if skip_conflicts { "IGNORE " } else { "" };
-            (format!("INSERT {ignore}INTO {table} ({list}) VALUES "), String::new())
+            (
+                format!("INSERT {ignore}INTO {table} ({list}) VALUES "),
+                String::new(),
+            )
         }
         Driver::Sqlite => {
             let ignore = if skip_conflicts { "OR IGNORE " } else { "" };
-            (format!("INSERT {ignore}INTO {table} ({list}) VALUES "), String::new())
+            (
+                format!("INSERT {ignore}INTO {table} ({list}) VALUES "),
+                String::new(),
+            )
         }
         Driver::Postgres => {
-            let overriding = if overriding { "OVERRIDING SYSTEM VALUE " } else { "" };
-            let conflict = if skip_conflicts { " ON CONFLICT DO NOTHING" } else { "" };
-            (format!("INSERT INTO {table} ({list}) {overriding}VALUES "), conflict.to_string())
+            let overriding = if overriding {
+                "OVERRIDING SYSTEM VALUE "
+            } else {
+                ""
+            };
+            let conflict = if skip_conflicts {
+                " ON CONFLICT DO NOTHING"
+            } else {
+                ""
+            };
+            (
+                format!("INSERT INTO {table} ({list}) {overriding}VALUES "),
+                conflict.to_string(),
+            )
         }
     }
 }
@@ -947,7 +1046,11 @@ pub fn row_values(driver: Driver, values: &[ImportValue], targets: &[TargetColum
         if index > 0 {
             out.push_str(", ");
         }
-        out.push_str(&import_literal(driver, value, targets.get(index).copied().unwrap_or_default()));
+        out.push_str(&import_literal(
+            driver,
+            value,
+            targets.get(index).copied().unwrap_or_default(),
+        ));
     }
     out.push(')');
     out
@@ -964,7 +1067,9 @@ mod tests {
     fn write_rows(options: &TabularOptions, columns: &[&str], rows: &[Vec<CellValue>]) -> String {
         let mut out: Vec<u8> = Vec::new();
         let mut writer = TabularWriter::new(&mut out, options);
-        writer.set_columns(columns.iter().map(|name| name.to_string()).collect()).unwrap();
+        writer
+            .set_columns(columns.iter().map(|name| name.to_string()).collect())
+            .unwrap();
         for row in rows {
             writer.write_row(row).unwrap();
         }
@@ -985,39 +1090,80 @@ mod tests {
     }
 
     fn csv_spec() -> SourceSpec {
-        SourceSpec { format: Format::Csv, delimiter: b',', header: true, null_markers: vec![String::new()] }
+        SourceSpec {
+            format: Format::Csv,
+            delimiter: b',',
+            header: true,
+            null_markers: vec![String::new()],
+        }
     }
 
     #[test]
     fn writes_csv_with_quoting_and_nulls() {
         let rows = vec![
-            vec![CellValue::Int(1), CellValue::Text("a,b".into()), CellValue::Null],
-            vec![CellValue::Int(2), CellValue::Text("say \"hi\"\nthere".into()), CellValue::Text(String::new())],
-            vec![CellValue::Bool(true), CellValue::Bytes(vec![0xca, 0xfe]), CellValue::Text(" pad".into())],
+            vec![
+                CellValue::Int(1),
+                CellValue::Text("a,b".into()),
+                CellValue::Null,
+            ],
+            vec![
+                CellValue::Int(2),
+                CellValue::Text("say \"hi\"\nthere".into()),
+                CellValue::Text(String::new()),
+            ],
+            vec![
+                CellValue::Bool(true),
+                CellValue::Bytes(vec![0xca, 0xfe]),
+                CellValue::Text(" pad".into()),
+            ],
         ];
         let csv = write_rows(&csv_options(), &["id", "note", "extra"], &rows);
-        assert_eq!(csv, "id,note,extra\n1,\"a,b\",\n2,\"say \"\"hi\"\"\nthere\",\"\"\ntrue,\\xcafe,\" pad\"\n");
+        assert_eq!(
+            csv,
+            "id,note,extra\n1,\"a,b\",\n2,\"say \"\"hi\"\"\nthere\",\"\"\ntrue,\\xcafe,\" pad\"\n"
+        );
     }
 
     #[test]
     fn quotes_text_that_matches_the_null_marker() {
-        let options = TabularOptions { null_as: "\\N".into(), ..csv_options() };
-        let csv = write_rows(&options, &["a", "b"], &[vec![CellValue::Null, CellValue::Text("\\N".into())]]);
+        let options = TabularOptions {
+            null_as: "\\N".into(),
+            ..csv_options()
+        };
+        let csv = write_rows(
+            &options,
+            &["a", "b"],
+            &[vec![CellValue::Null, CellValue::Text("\\N".into())]],
+        );
         assert_eq!(csv, "a,b\n\\N,\"\\N\"\n");
-        let spec = SourceSpec { null_markers: vec!["\\N".into()], ..csv_spec() };
+        let spec = SourceSpec {
+            null_markers: vec!["\\N".into()],
+            ..csv_spec()
+        };
         let (_, rows) = read_all(&csv, &spec);
-        assert_eq!(rows, vec![vec![ImportValue::Null, ImportValue::Text("\\N".into())]]);
+        assert_eq!(
+            rows,
+            vec![vec![ImportValue::Null, ImportValue::Text("\\N".into())]]
+        );
     }
 
     #[test]
     fn csv_round_trips_empty_strings_and_nulls() {
-        let rows = vec![vec![CellValue::Null, CellValue::Text(String::new()), CellValue::Text("x\r\ny".into())]];
+        let rows = vec![vec![
+            CellValue::Null,
+            CellValue::Text(String::new()),
+            CellValue::Text("x\r\ny".into()),
+        ]];
         let csv = write_rows(&csv_options(), &["a", "b", "c"], &rows);
         let (columns, read) = read_all(&csv, &csv_spec());
         assert_eq!(columns, vec!["a", "b", "c"]);
         assert_eq!(
             read,
-            vec![vec![ImportValue::Null, ImportValue::Text(String::new()), ImportValue::Text("x\r\ny".into())]]
+            vec![vec![
+                ImportValue::Null,
+                ImportValue::Text(String::new()),
+                ImportValue::Text("x\r\ny".into())
+            ]]
         );
     }
 
@@ -1036,11 +1182,15 @@ mod tests {
     #[test]
     fn reports_line_numbers_and_unclosed_quotes() {
         let mut reader = CsvReader::new("a\nb\n\"c\nd\"\ne".as_bytes(), b',');
-        let lines: Vec<u64> = std::iter::from_fn(|| reader.next_record().unwrap().map(|(line, _)| line)).collect();
+        let lines: Vec<u64> =
+            std::iter::from_fn(|| reader.next_record().unwrap().map(|(line, _)| line)).collect();
         assert_eq!(lines, vec![1, 2, 3, 5]);
         let mut broken = CsvReader::new("a\n\"open\nmore".as_bytes(), b',');
         broken.next_record().unwrap();
-        assert_eq!(broken.next_record().unwrap_err(), "Line 2: a quoted field is never closed.");
+        assert_eq!(
+            broken.next_record().unwrap_err(),
+            "Line 2: a quoted field is never closed."
+        );
     }
 
     #[test]
@@ -1054,61 +1204,126 @@ mod tests {
     #[test]
     fn writes_json_arrays_and_lines() {
         let rows = vec![
-            vec![CellValue::Int(1), CellValue::Json("{\"k\":[1,2]}".into()), CellValue::Null],
-            vec![CellValue::Int(2), CellValue::Text("x".into()), CellValue::Float(1.5)],
+            vec![
+                CellValue::Int(1),
+                CellValue::Json("{\"k\":[1,2]}".into()),
+                CellValue::Null,
+            ],
+            vec![
+                CellValue::Int(2),
+                CellValue::Text("x".into()),
+                CellValue::Float(1.5),
+            ],
         ];
-        let array = write_rows(&TabularOptions { format: Format::Json, ..csv_options() }, &["id", "data", "id"], &rows);
+        let array = write_rows(
+            &TabularOptions {
+                format: Format::Json,
+                ..csv_options()
+            },
+            &["id", "data", "id"],
+            &rows,
+        );
         assert_eq!(array, "[\n  {\"id\":1,\"data\":{\"k\":[1,2]},\"id_2\":null},\n  {\"id\":2,\"data\":\"x\",\"id_2\":1.5}\n]\n");
         let lines = write_rows(
-            &TabularOptions { format: Format::Json, json_style: JsonStyle::Lines, ..csv_options() },
+            &TabularOptions {
+                format: Format::Json,
+                json_style: JsonStyle::Lines,
+                ..csv_options()
+            },
             &["id"],
             &[vec![CellValue::Int(1)]],
         );
         assert_eq!(lines, "{\"id\":1}\n");
-        let empty = write_rows(&TabularOptions { format: Format::Json, ..csv_options() }, &["id"], &[]);
+        let empty = write_rows(
+            &TabularOptions {
+                format: Format::Json,
+                ..csv_options()
+            },
+            &["id"],
+            &[],
+        );
         assert_eq!(empty, "[]\n");
     }
 
     #[test]
     fn reads_json_arrays_and_lines_in_key_order() {
-        let spec = SourceSpec { format: Format::Json, ..csv_spec() };
-        let (columns, rows) = read_all("\u{feff} [{\"z\":1,\"a\":\"x\"},{\"a\":null,\"n\":{\"b\":true},\"y\":false}]", &spec);
+        let spec = SourceSpec {
+            format: Format::Json,
+            ..csv_spec()
+        };
+        let (columns, rows) = read_all(
+            "\u{feff} [{\"z\":1,\"a\":\"x\"},{\"a\":null,\"n\":{\"b\":true},\"y\":false}]",
+            &spec,
+        );
         assert_eq!(columns, vec!["z", "a", "n", "y"]);
         assert_eq!(
             rows[1],
-            vec![ImportValue::Null, ImportValue::Null, ImportValue::Json("{\"b\":true}".into()), ImportValue::Bool(false)]
+            vec![
+                ImportValue::Null,
+                ImportValue::Null,
+                ImportValue::Json("{\"b\":true}".into()),
+                ImportValue::Bool(false)
+            ]
         );
         let (columns, rows) = read_all("{\"a\":1}\n\n{\"b\":2.5}\n", &spec);
         assert_eq!(columns, vec!["a", "b"]);
-        assert_eq!(rows[1], vec![ImportValue::Null, ImportValue::Number("2.5".into())]);
+        assert_eq!(
+            rows[1],
+            vec![ImportValue::Null, ImportValue::Number("2.5".into())]
+        );
     }
 
     #[test]
     fn json_errors_say_where() {
-        let spec = SourceSpec { format: Format::Json, ..csv_spec() };
+        let spec = SourceSpec {
+            format: Format::Json,
+            ..csv_spec()
+        };
         let mut columns = Vec::new();
-        let err = read_source(&mut "{\"a\":1}\n[1]\n".as_bytes(), &spec, &mut columns, true, |_, _| Ok(true)).unwrap_err();
+        let err = read_source(
+            &mut "{\"a\":1}\n[1]\n".as_bytes(),
+            &spec,
+            &mut columns,
+            true,
+            |_, _| Ok(true),
+        )
+        .unwrap_err();
         assert!(err.starts_with("Line 2:"), "{err}");
-        let err = read_source(&mut "[{\"a\":1},{\"a\":2}]".as_bytes(), &spec, &mut columns, true, |position, _| {
-            if position == Position::Item(2) {
-                Err("Item 2: boom".into())
-            } else {
-                Ok(true)
-            }
-        })
+        let err = read_source(
+            &mut "[{\"a\":1},{\"a\":2}]".as_bytes(),
+            &spec,
+            &mut columns,
+            true,
+            |position, _| {
+                if position == Position::Item(2) {
+                    Err("Item 2: boom".into())
+                } else {
+                    Ok(true)
+                }
+            },
+        )
         .unwrap_err();
         assert_eq!(err, "Item 2: boom");
     }
 
     #[test]
     fn stops_reading_when_asked() {
-        let spec = SourceSpec { format: Format::Json, ..csv_spec() };
+        let spec = SourceSpec {
+            format: Format::Json,
+            ..csv_spec()
+        };
         let mut seen = 0;
         let mut columns = Vec::new();
-        read_source(&mut "[{\"a\":1},{\"a\":2},{\"a\":3}".as_bytes(), &spec, &mut columns, true, |_, _| {
-            seen += 1;
-            Ok(seen < 2)
-        })
+        read_source(
+            &mut "[{\"a\":1},{\"a\":2},{\"a\":3}".as_bytes(),
+            &spec,
+            &mut columns,
+            true,
+            |_, _| {
+                seen += 1;
+                Ok(seen < 2)
+            },
+        )
         .unwrap();
         assert_eq!(seen, 2);
     }
@@ -1122,22 +1337,67 @@ mod tests {
     }
 
     fn texts(values: &[&str]) -> Vec<ImportValue> {
-        values.iter().map(|text| ImportValue::Text(text.to_string())).collect()
+        values
+            .iter()
+            .map(|text| ImportValue::Text(text.to_string()))
+            .collect()
     }
 
     #[test]
     fn guesses_column_types() {
-        assert_eq!(guess(Driver::Postgres, &texts(&["1", "-20", "300"])), "BIGINT");
-        assert_eq!(guess(Driver::Postgres, &texts(&["1", "2.5", "1e3"])), "DOUBLE PRECISION");
+        assert_eq!(
+            guess(Driver::Postgres, &texts(&["1", "-20", "300"])),
+            "BIGINT"
+        );
+        assert_eq!(
+            guess(Driver::Postgres, &texts(&["1", "2.5", "1e3"])),
+            "DOUBLE PRECISION"
+        );
         assert_eq!(guess(Driver::Postgres, &texts(&["007", "12"])), "TEXT");
-        assert_eq!(guess(Driver::Mysql, &texts(&["true", "FALSE"])), "TINYINT(1)");
-        assert_eq!(guess(Driver::Sqlite, &texts(&["2024-02-29", "1999-12-31"])), "DATE");
-        assert_eq!(guess(Driver::Postgres, &texts(&["2024-02-29 10:00:00", "2024-03-01T08:30"])), "TIMESTAMP");
-        assert_eq!(guess(Driver::Postgres, &texts(&["2024-02-29T10:00:00Z"])), "TIMESTAMPTZ");
-        assert_eq!(guess(Driver::Mysql, &texts(&["2024-02-29T10:00:00+02:00"])), "TEXT");
-        assert_eq!(guess(Driver::Mysql, &texts(&["2024-02-29 10:00:00.123"])), "DATETIME(6)");
-        assert_eq!(guess(Driver::Postgres, &[ImportValue::Json("{}".into()), ImportValue::Null]), "JSONB");
-        assert_eq!(guess(Driver::Postgres, &[ImportValue::Number("3".into()), ImportValue::Number("4.5".into())]), "DOUBLE PRECISION");
+        assert_eq!(
+            guess(Driver::Mysql, &texts(&["true", "FALSE"])),
+            "TINYINT(1)"
+        );
+        assert_eq!(
+            guess(Driver::Sqlite, &texts(&["2024-02-29", "1999-12-31"])),
+            "DATE"
+        );
+        assert_eq!(
+            guess(
+                Driver::Postgres,
+                &texts(&["2024-02-29 10:00:00", "2024-03-01T08:30"])
+            ),
+            "TIMESTAMP"
+        );
+        assert_eq!(
+            guess(Driver::Postgres, &texts(&["2024-02-29T10:00:00Z"])),
+            "TIMESTAMPTZ"
+        );
+        assert_eq!(
+            guess(Driver::Mysql, &texts(&["2024-02-29T10:00:00+02:00"])),
+            "TEXT"
+        );
+        assert_eq!(
+            guess(Driver::Mysql, &texts(&["2024-02-29 10:00:00.123"])),
+            "DATETIME(6)"
+        );
+        assert_eq!(
+            guess(
+                Driver::Postgres,
+                &[ImportValue::Json("{}".into()), ImportValue::Null]
+            ),
+            "JSONB"
+        );
+        assert_eq!(
+            guess(
+                Driver::Postgres,
+                &[
+                    ImportValue::Number("3".into()),
+                    ImportValue::Number("4.5".into())
+                ]
+            ),
+            "DOUBLE PRECISION"
+        );
         assert_eq!(guess(Driver::Postgres, &[ImportValue::Null]), "TEXT");
         assert_eq!(guess(Driver::Postgres, &texts(&["inf"])), "TEXT");
         assert_eq!(guess(Driver::Postgres, &texts(&["1", ""])), "TEXT");
@@ -1149,15 +1409,39 @@ mod tests {
         let plain = TargetColumn::default();
         let binary = TargetColumn::of("BLOB");
         let boolean = TargetColumn::of("tinyint(1)");
-        assert_eq!(import_literal(Driver::Postgres, &text("it's \\ ok"), plain), "E'it''s \\\\ ok'");
-        assert_eq!(import_literal(Driver::Postgres, &ImportValue::Bool(true), plain), "E'true'");
-        assert_eq!(import_literal(Driver::Mysql, &text("it's"), plain), "'it\\'s'");
-        assert_eq!(import_literal(Driver::Mysql, &text("\\xcafe"), binary), "0xcafe");
-        assert_eq!(import_literal(Driver::Mysql, &text("\\xcafe"), plain), "'\\\\xcafe'");
+        assert_eq!(
+            import_literal(Driver::Postgres, &text("it's \\ ok"), plain),
+            "E'it''s \\\\ ok'"
+        );
+        assert_eq!(
+            import_literal(Driver::Postgres, &ImportValue::Bool(true), plain),
+            "E'true'"
+        );
+        assert_eq!(
+            import_literal(Driver::Mysql, &text("it's"), plain),
+            "'it\\'s'"
+        );
+        assert_eq!(
+            import_literal(Driver::Mysql, &text("\\xcafe"), binary),
+            "0xcafe"
+        );
+        assert_eq!(
+            import_literal(Driver::Mysql, &text("\\xcafe"), plain),
+            "'\\\\xcafe'"
+        );
         assert_eq!(import_literal(Driver::Mysql, &text("TRUE"), boolean), "1");
-        assert_eq!(import_literal(Driver::Sqlite, &text("\\x01"), binary), "X'01'");
-        assert_eq!(import_literal(Driver::Sqlite, &ImportValue::Number("2.5".into()), plain), "2.5");
-        assert_eq!(import_literal(Driver::Sqlite, &ImportValue::Null, plain), "NULL");
+        assert_eq!(
+            import_literal(Driver::Sqlite, &text("\\x01"), binary),
+            "X'01'"
+        );
+        assert_eq!(
+            import_literal(Driver::Sqlite, &ImportValue::Number("2.5".into()), plain),
+            "2.5"
+        );
+        assert_eq!(
+            import_literal(Driver::Sqlite, &ImportValue::Null, plain),
+            "NULL"
+        );
     }
 
     #[test]
@@ -1170,8 +1454,14 @@ mod tests {
         let names = vec!["a".to_string(), "b".to_string()];
         assert_eq!(
             insert_parts(Driver::Postgres, "\"t\"", &names, true, true),
-            ("INSERT INTO \"t\" (\"a\", \"b\") OVERRIDING SYSTEM VALUE VALUES ".to_string(), " ON CONFLICT DO NOTHING".to_string())
+            (
+                "INSERT INTO \"t\" (\"a\", \"b\") OVERRIDING SYSTEM VALUE VALUES ".to_string(),
+                " ON CONFLICT DO NOTHING".to_string()
+            )
         );
-        assert_eq!(insert_parts(Driver::Mysql, "`t`", &names, true, false).0, "INSERT IGNORE INTO `t` (`a`, `b`) VALUES ");
+        assert_eq!(
+            insert_parts(Driver::Mysql, "`t`", &names, true, false).0,
+            "INSERT IGNORE INTO `t` (`a`, `b`) VALUES "
+        );
     }
 }

@@ -85,8 +85,12 @@ fn parse_resolved(output: &str, local_user: &str, home: &Path) -> ResolvedHost {
             "identityagent" if !value.eq_ignore_ascii_case("none") && value != "SSH_AUTH_SOCK" => {
                 resolved.identity_agent = abbreviate_home(value, home);
             }
-            "proxyjump" if !value.eq_ignore_ascii_case("none") => resolved.proxy_jump = value.to_string(),
-            "proxycommand" if !value.eq_ignore_ascii_case("none") => resolved.proxy_command = value.to_string(),
+            "proxyjump" if !value.eq_ignore_ascii_case("none") => {
+                resolved.proxy_jump = value.to_string()
+            }
+            "proxycommand" if !value.eq_ignore_ascii_case("none") => {
+                resolved.proxy_command = value.to_string()
+            }
             _ => {}
         }
     }
@@ -99,7 +103,8 @@ fn parse_resolved(output: &str, local_user: &str, home: &Path) -> ResolvedHost {
                     Some(rest) => home.join(rest),
                     None => PathBuf::from(&path),
                 };
-                full.is_file().then(|| abbreviate_home(&full.to_string_lossy(), home))
+                full.is_file()
+                    .then(|| abbreviate_home(&full.to_string_lossy(), home))
             })
             .collect();
     }
@@ -122,13 +127,20 @@ pub async fn resolve(host: &str) -> Option<ResolvedHost> {
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .output();
-    let output = tokio::time::timeout(RESOLVE_TIMEOUT, run).await.ok()?.ok()?;
+    let output = tokio::time::timeout(RESOLVE_TIMEOUT, run)
+        .await
+        .ok()?
+        .ok()?;
     if !output.status.success() {
         return None;
     }
     let local_user = std::env::var("USER").unwrap_or_default();
     let home = home().unwrap_or_default();
-    Some(parse_resolved(&String::from_utf8_lossy(&output.stdout), &local_user, &home))
+    Some(parse_resolved(
+        &String::from_utf8_lossy(&output.stdout),
+        &local_user,
+        &home,
+    ))
 }
 
 static LOGIN_PATH: OnceCell<String> = OnceCell::const_new();
@@ -150,7 +162,9 @@ pub async fn login_path() -> &'static str {
                 .kill_on_drop(true)
                 .output();
             let printed = match tokio::time::timeout(RESOLVE_TIMEOUT, run).await {
-                Ok(Ok(output)) if output.status.success() => String::from_utf8_lossy(&output.stdout).into_owned(),
+                Ok(Ok(output)) if output.status.success() => {
+                    String::from_utf8_lossy(&output.stdout).into_owned()
+                }
                 _ => String::new(),
             };
             let path = printed.rsplit('\n').next().unwrap_or_default().trim();
@@ -210,7 +224,10 @@ fn include_paths(pattern: &str, ssh_dir: &Path) -> Vec<PathBuf> {
     } else {
         ssh_dir.join(pattern)
     };
-    let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
     if !name.contains(['*', '?']) {
         return vec![path];
     }
@@ -229,7 +246,13 @@ fn include_paths(pattern: &str, ssh_dir: &Path) -> Vec<PathBuf> {
     matches
 }
 
-fn collect_hosts(path: &Path, ssh_dir: &Path, depth: usize, seen: &mut HashSet<String>, hosts: &mut Vec<String>) {
+fn collect_hosts(
+    path: &Path,
+    ssh_dir: &Path,
+    depth: usize,
+    seen: &mut HashSet<String>,
+    hosts: &mut Vec<String>,
+) {
     if depth > MAX_INCLUDE_DEPTH {
         return;
     }
@@ -264,7 +287,13 @@ pub fn list_hosts() -> Vec<String> {
     };
     let ssh_dir = home.join(".ssh");
     let mut hosts = Vec::new();
-    collect_hosts(&ssh_dir.join("config"), &ssh_dir, 0, &mut HashSet::new(), &mut hosts);
+    collect_hosts(
+        &ssh_dir.join("config"),
+        &ssh_dir,
+        0,
+        &mut HashSet::new(),
+        &mut hosts,
+    );
     hosts
 }
 
@@ -300,8 +329,15 @@ mod tests {
         assert_eq!(resolved.proxy_command, "");
         assert!(resolved.has_proxy());
 
-        let command = parse_resolved("hostname db\nproxycommand cloudflared access ssh --hostname %h\n", "me", &dir);
-        assert_eq!(command.proxy_command, "cloudflared access ssh --hostname %h");
+        let command = parse_resolved(
+            "hostname db\nproxycommand cloudflared access ssh --hostname %h\n",
+            "me",
+            &dir,
+        );
+        assert_eq!(
+            command.proxy_command,
+            "cloudflared access ssh --hostname %h"
+        );
         assert_eq!(command.proxy_jump, "");
 
         let defaults = "user me\nhostname example.com\nport 22\nidentityfile ~/.ssh/id_rsa\n\
@@ -324,9 +360,19 @@ mod tests {
              Host *.internal !secret\nHost=db\nMatch host foo\n",
         )
         .unwrap();
-        std::fs::write(dir.join("config.d/work"), "Host work \"quoted\"\nHost prod-bastion\n").unwrap();
+        std::fs::write(
+            dir.join("config.d/work"),
+            "Host work \"quoted\"\nHost prod-bastion\n",
+        )
+        .unwrap();
         let mut hosts = Vec::new();
-        collect_hosts(&dir.join("config"), &dir, 0, &mut HashSet::new(), &mut hosts);
+        collect_hosts(
+            &dir.join("config"),
+            &dir,
+            0,
+            &mut HashSet::new(),
+            &mut hosts,
+        );
         assert_eq!(hosts, ["work", "quoted", "prod-bastion", "staging", "db"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }

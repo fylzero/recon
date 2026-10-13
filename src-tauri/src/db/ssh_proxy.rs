@@ -50,7 +50,11 @@ impl ProxyProcess {
             return format!("{message} {reason}");
         }
         tokio::time::sleep(ERROR_SETTLE).await;
-        let tail = self.tail.lock().map(|tail| last_lines(&tail)).unwrap_or_default();
+        let tail = self
+            .tail
+            .lock()
+            .map(|tail| last_lines(&tail))
+            .unwrap_or_default();
         if tail.is_empty() {
             format!("{message} (through {})", self.label)
         } else {
@@ -68,7 +72,11 @@ impl Drop for ProxyProcess {
 
 fn last_lines(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
-    let lines: Vec<&str> = text.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
     lines[lines.len().saturating_sub(ERROR_TAIL_LINES)..].join(" ")
 }
 
@@ -96,15 +104,28 @@ fn destination(hop: &str) -> String {
  * settings still come from ~/.ssh/config.
  */
 pub fn jump_args(jumps: &str, address: &str, port: u16) -> Result<Vec<String>, String> {
-    let mut hops: Vec<&str> = jumps.split(',').map(str::trim).filter(|hop| !hop.is_empty()).collect();
-    let last = hops.pop().ok_or_else(|| "The ProxyJump setting in ~/.ssh/config is empty.".to_string())?;
+    let mut hops: Vec<&str> = jumps
+        .split(',')
+        .map(str::trim)
+        .filter(|hop| !hop.is_empty())
+        .collect();
+    let last = hops
+        .pop()
+        .ok_or_else(|| "The ProxyJump setting in ~/.ssh/config is empty.".to_string())?;
     if last.starts_with('-') || hops.iter().any(|hop| hop.starts_with('-')) {
         return Err(format!("Recon can't use the ProxyJump host {jumps}."));
     }
-    let mut args: Vec<String> = ["-T", "-o", "ControlMaster=no", "-o", "ExitOnForwardFailure=yes", "-W"]
-        .into_iter()
-        .map(String::from)
-        .collect();
+    let mut args: Vec<String> = [
+        "-T",
+        "-o",
+        "ControlMaster=no",
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-W",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
     args.push(forward_spec(address, port));
     if !hops.is_empty() {
         args.push("-J".into());
@@ -160,11 +181,18 @@ pub async fn spawn(
 ) -> Result<(ProxyProcess, ProxyStream), String> {
     let (mut command, label) = if resolved.proxy_command.is_empty() {
         let mut command = Command::new(SSH);
-        command.args(jump_args(&resolved.proxy_jump, target.address, target.port)?);
+        command.args(jump_args(
+            &resolved.proxy_jump,
+            target.address,
+            target.port,
+        )?);
         (command, resolved.proxy_jump.clone())
     } else {
         let mut command = Command::new("/bin/sh");
-        command.arg("-c").arg(format!("exec {}", expand_tokens(&resolved.proxy_command, target)));
+        command.arg("-c").arg(format!(
+            "exec {}",
+            expand_tokens(&resolved.proxy_command, target)
+        ));
         (command, resolved.proxy_command.clone())
     };
     let bridge = Bridge::start(prompter.clone())?;
@@ -178,7 +206,8 @@ pub async fn spawn(
     let mut child = command
         .spawn()
         .map_err(|err| format!("Could not start the SSH proxy ({label}): {err}"))?;
-    let (Some(stdin), Some(stdout), Some(stderr)) = (child.stdin.take(), child.stdout.take(), child.stderr.take())
+    let (Some(stdin), Some(stdout), Some(stderr)) =
+        (child.stdin.take(), child.stdout.take(), child.stderr.take())
     else {
         return Err(format!("Could not connect to the SSH proxy ({label})."));
     };
@@ -215,10 +244,16 @@ mod tests {
         assert!(!single.contains(&"-J".to_string()));
 
         let chain = jump_args("first, me@second:2222 ,third", "db.internal", 2200).unwrap();
-        assert_eq!(chain[chain.len() - 4..], ["db.internal:2200", "-J", "first,me@second:2222", "third"]);
+        assert_eq!(
+            chain[chain.len() - 4..],
+            ["db.internal:2200", "-J", "first,me@second:2222", "third"]
+        );
 
         let ported = jump_args("me@bastion:2222", "fe80::1", 22).unwrap();
-        assert_eq!(ported[ported.len() - 2..], ["[fe80::1]:22", "ssh://me@bastion:2222"]);
+        assert_eq!(
+            ported[ported.len() - 2..],
+            ["[fe80::1]:22", "ssh://me@bastion:2222"]
+        );
 
         assert!(jump_args(" , ", "db", 22).is_err());
         assert!(jump_args("-oProxyCommand=evil", "db", 22).is_err());
@@ -227,7 +262,10 @@ mod tests {
     #[test]
     fn expands_proxy_command_tokens() {
         assert_eq!(
-            expand_tokens("nc -X connect -x proxy:8080 %h %p # %r@%n 100%% %z %", &target()),
+            expand_tokens(
+                "nc -X connect -x proxy:8080 %h %p # %r@%n 100%% %z %",
+                &target()
+            ),
             "nc -X connect -x proxy:8080 10.0.0.5 22 # deploy@prod-db 100% %z %"
         );
     }
@@ -244,7 +282,9 @@ mod tests {
             proxy_command: "cat".into(),
             ..Default::default()
         };
-        let (process, mut stream) = spawn(&resolved, &target(), &Prompter::answering(None)).await.unwrap();
+        let (process, mut stream) = spawn(&resolved, &target(), &Prompter::answering(None))
+            .await
+            .unwrap();
         stream.write_all(b"SSH-2.0-test\r\n").await.unwrap();
         let mut echoed = [0u8; 14];
         stream.read_exact(&mut echoed).await.unwrap();
@@ -252,8 +292,12 @@ mod tests {
 
         drop(process);
         let mut rest = Vec::new();
-        let read = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut rest)).await;
-        assert!(matches!(read, Ok(Ok(0))), "the proxy should stop when dropped");
+        let read =
+            tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut rest)).await;
+        assert!(
+            matches!(read, Ok(Ok(0))),
+            "the proxy should stop when dropped"
+        );
     }
 
     #[tokio::test]
@@ -262,7 +306,9 @@ mod tests {
             proxy_command: "echo 'channel 0: open failed: connect failed' >&2; exit 1".into(),
             ..Default::default()
         };
-        let (process, _stream) = spawn(&resolved, &target(), &Prompter::answering(None)).await.unwrap();
+        let (process, _stream) = spawn(&resolved, &target(), &Prompter::answering(None))
+            .await
+            .unwrap();
         let message = process.explain("SSH connection failed.".into()).await;
         assert!(message.contains("open failed: connect failed"), "{message}");
     }

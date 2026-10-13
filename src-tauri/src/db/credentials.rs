@@ -33,7 +33,11 @@ fn aws_args(entry: &ConnectionEntry) -> Vec<String> {
 
 fn last_lines(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
-    let lines: Vec<&str> = text.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
     lines[lines.len().saturating_sub(ERROR_TAIL_LINES)..].join(" ")
 }
 
@@ -48,7 +52,11 @@ pub(super) fn aws_command(args: impl IntoIterator<Item = String>) -> Command {
  * Failures name the tool through `label` and include the end of its stderr.
  */
 pub(super) async fn run_tool(command: &mut Command, label: &str) -> Result<Vec<u8>, String> {
-    let program = command.as_std().get_program().to_string_lossy().into_owned();
+    let program = command
+        .as_std()
+        .get_program()
+        .to_string_lossy()
+        .into_owned();
     let run = command
         .env("PATH", ssh_config::login_path().await)
         .stdin(Stdio::null())
@@ -57,7 +65,12 @@ pub(super) async fn run_tool(command: &mut Command, label: &str) -> Result<Vec<u
         .kill_on_drop(true)
         .output();
     let output = match tokio::time::timeout(FETCH_TIMEOUT, run).await {
-        Err(_) => return Err(format!("{label} didn't finish within {} seconds.", FETCH_TIMEOUT.as_secs())),
+        Err(_) => {
+            return Err(format!(
+                "{label} didn't finish within {} seconds.",
+                FETCH_TIMEOUT.as_secs()
+            ))
+        }
         Ok(Err(err)) if err.kind() == std::io::ErrorKind::NotFound && program == "aws" => {
             return Err("The AWS CLI (aws) wasn't found on your shell's PATH. Install it to use AWS features.".into());
         }
@@ -82,7 +95,9 @@ pub(super) async fn run_tool(command: &mut Command, label: &str) -> Result<Vec<u
  */
 pub async fn fetch(entry: &ConnectionEntry) -> Result<String, String> {
     let (mut command, label) = match entry.password_source {
-        PasswordSource::Password => return Err("This connection doesn't fetch its password.".into()),
+        PasswordSource::Password => {
+            return Err("This connection doesn't fetch its password.".into())
+        }
         PasswordSource::AwsIam => (aws_command(aws_args(entry)), "The AWS CLI"),
         PasswordSource::Command => {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
@@ -129,21 +144,29 @@ mod tests {
             format!("rds generate-db-auth-token --hostname {HOST} --port 5432 --username app --region us-east-1")
         );
         iam.aws_profile = "prod-sso".into();
-        assert!(aws_args(&iam).join(" ").ends_with("--region us-east-1 --profile prod-sso"));
+        assert!(aws_args(&iam)
+            .join(" ")
+            .ends_with("--region us-east-1 --profile prod-sso"));
     }
 
     #[tokio::test]
     async fn uses_what_the_command_prints() {
         let mut cmd = entry(PasswordSource::Command);
         cmd.password_command = "printf '  token-for-%s@%s:%s\\n' \"$RECON_DB_USER\" \"$RECON_DB_HOST\" \"$RECON_DB_PORT\"".into();
-        assert_eq!(fetch(&cmd).await.unwrap(), format!("token-for-app@{HOST}:5432"));
+        assert_eq!(
+            fetch(&cmd).await.unwrap(),
+            format!("token-for-app@{HOST}:5432")
+        );
     }
 
     #[tokio::test]
     async fn reports_failures_and_empty_output() {
         let mut cmd = entry(PasswordSource::Command);
         cmd.password_command = "echo 'run aws sso login' >&2; exit 3".into();
-        assert_eq!(fetch(&cmd).await.unwrap_err(), "The password command failed: run aws sso login");
+        assert_eq!(
+            fetch(&cmd).await.unwrap_err(),
+            "The password command failed: run aws sso login"
+        );
         cmd.password_command = "printf '  \\n'".into();
         assert!(fetch(&cmd).await.unwrap_err().contains("printed nothing"));
         assert!(fetch(&entry(PasswordSource::Password)).await.is_err());

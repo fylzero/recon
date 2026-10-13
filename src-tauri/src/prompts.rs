@@ -35,7 +35,11 @@ impl PromptStore {
     }
 
     fn answer(&self, id: &str, answer: Option<String>) {
-        let sender = self.pending.lock().ok().and_then(|mut pending| pending.remove(id));
+        let sender = self
+            .pending
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.remove(id));
         if let Some(sender) = sender {
             let _ = sender.send(answer);
         }
@@ -88,7 +92,9 @@ struct Pending<'a> {
 impl Drop for Pending<'_> {
     fn drop(&mut self) {
         self.app.state::<PromptStore>().forget(&self.id);
-        let _ = self.app.emit(PROMPT_CLOSED_EVENT, PromptClosed { id: &self.id });
+        let _ = self
+            .app
+            .emit(PROMPT_CLOSED_EVENT, PromptClosed { id: &self.id });
     }
 }
 
@@ -134,7 +140,12 @@ impl Prompter {
         busy
     }
 
-    pub async fn ask(&self, instructions: &str, prompt: &str, secret: bool) -> Result<String, String> {
+    pub async fn ask(
+        &self,
+        instructions: &str,
+        prompt: &str,
+        secret: bool,
+    ) -> Result<String, String> {
         let app = match &self.0.responder {
             Responder::App(app) => app,
             Responder::Background => return Err(NEEDS_RECONNECT.into()),

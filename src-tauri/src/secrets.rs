@@ -11,7 +11,9 @@ pub fn get(connection_id: &str) -> Result<Option<String>, String> {
     match entry(connection_id)?.get_password() {
         Ok(password) => Ok(Some(password)),
         Err(keyring::Error::NoEntry) => Ok(None),
-        Err(err) => Err(format!("Could not read the password from the Keychain: {err}")),
+        Err(err) => Err(format!(
+            "Could not read the password from the Keychain: {err}"
+        )),
     }
 }
 
@@ -24,7 +26,9 @@ pub fn set(connection_id: &str, password: &str) -> Result<(), String> {
 pub fn delete(connection_id: &str) -> Result<(), String> {
     match entry(connection_id)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(err) => Err(format!("Could not remove the password from the Keychain: {err}")),
+        Err(err) => Err(format!(
+            "Could not remove the password from the Keychain: {err}"
+        )),
     }
 }
 
