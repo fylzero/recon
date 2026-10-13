@@ -75,7 +75,7 @@ const {
 const GITHUB_URL = "https://github.com/fylzero/recon";
 const appVersion = ref("0.2.0");
 const {
-  connectionTabs,
+  connectionPanes,
   settingsTabOpen,
   changelogTabOpen,
   activeId,
@@ -190,7 +190,7 @@ watch([groups, standaloneConnections], () => {
         <ConnectionsView />
       </div>
       <div
-        v-for="tab in connectionTabs"
+        v-for="tab in connectionPanes"
         :key="tab.id"
         class="main-pane"
         v-show="activeId === tab.id"

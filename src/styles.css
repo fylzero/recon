@@ -1310,6 +1310,8 @@ input[type="search"].diagram-search {
   background: #0c0e12;
   border-bottom: 1px solid var(--border);
   min-height: 38px;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .tab-list {
@@ -1411,6 +1413,16 @@ button.tab-tool.update:hover:not(:disabled) {
 
 .tab.active {
   background: var(--bg);
+  color: var(--text);
+}
+
+.tab-list.reordering,
+.tab-list.reordering .tab {
+  cursor: grabbing;
+}
+
+.tab.dragging {
+  background: var(--bg-active);
   color: var(--text);
 }
 

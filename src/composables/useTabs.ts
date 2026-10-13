@@ -31,9 +31,11 @@ export interface ConnectionTab {
   connectionId: string;
   title: string;
   namespace?: string;
+  openedAt: number;
 }
 
 const connectionTabs = ref<ConnectionTab[]>([]);
+let openCount = 0;
 const settingsTabOpen = ref(false);
 const changelogTabOpen = ref(false);
 const settingsSection = ref<SettingsSection>("general");
@@ -94,6 +96,11 @@ export function useTabs() {
       : []),
   ]);
 
+  // Panes keep their open order so reordering tabs never moves their DOM.
+  const connectionPanes = computed(() =>
+    [...connectionTabs.value].sort((a, b) => a.openedAt - b.openedAt),
+  );
+
   function titleFor(id: string) {
     return findConnection(id)?.connection.name ?? id;
   }
@@ -102,7 +109,10 @@ export function useTabs() {
     if (connectionTabs.value.some((tab) => tab.id === id)) {
       return;
     }
-    connectionTabs.value = [...connectionTabs.value, { id, connectionId: id, title: titleFor(id) }];
+    connectionTabs.value = [
+      ...connectionTabs.value,
+      { id, connectionId: id, title: titleFor(id), openedAt: openCount++ },
+    ];
   }
 
   function routeFor(id: string) {
@@ -133,12 +143,34 @@ export function useTabs() {
 
   function openConnectionTab(connectionId: string, namespace: string, afterId = connectionId) {
     const id = `${connectionId}~${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-    const tab: ConnectionTab = { id, connectionId, title: titleFor(connectionId), namespace };
+    const tab: ConnectionTab = {
+      id,
+      connectionId,
+      title: titleFor(connectionId),
+      namespace,
+      openedAt: openCount++,
+    };
     const index = connectionTabs.value.findIndex((item) => item.id === afterId);
     const next = [...connectionTabs.value];
     next.splice(index >= 0 ? index + 1 : next.length, 0, tab);
     connectionTabs.value = next;
     activate(id);
+  }
+
+  function isReorderable(id: string) {
+    return connectionTabs.value.some((tab) => tab.id === id);
+  }
+
+  function moveTab(id: string, targetId: string) {
+    const from = connectionTabs.value.findIndex((tab) => tab.id === id);
+    const to = connectionTabs.value.findIndex((tab) => tab.id === targetId);
+    if (from === -1 || to === -1 || from === to) {
+      return;
+    }
+    const next = [...connectionTabs.value];
+    const [tab] = next.splice(from, 1);
+    next.splice(to, 0, tab);
+    connectionTabs.value = next;
   }
 
   function openConnections(ids: string[], focusId = ids[ids.length - 1]) {
@@ -291,6 +323,7 @@ export function useTabs() {
   return {
     tabs,
     connectionTabs,
+    connectionPanes,
     settingsTabOpen,
     changelogTabOpen,
     settingsSection,
@@ -298,6 +331,8 @@ export function useTabs() {
     openConnection,
     openConnectionTab,
     openConnections,
+    isReorderable,
+    moveTab,
     openSettings,
     openSettingsJson,
     openChangelog,
