@@ -6,6 +6,13 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.8.0",
+    date: "October 13, 2026",
+    notes: [
+      "Drag connection tabs left or right to put them in any order. The tab you drag becomes the active one, and each tab keeps its place in the grid, scroll position, and open queries as it moves. The Connections, Settings, and Changelog tabs stay where they are.",
+    ],
+  },
+  {
     version: "1.7.1",
     date: "October 10, 2026",
     notes: [
