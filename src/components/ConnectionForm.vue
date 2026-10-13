@@ -18,6 +18,7 @@ import {
   type SshAuth,
   type SslMode,
 } from "../types";
+import AwsProfileField from "./AwsProfileField.vue";
 import Modal from "./Modal.vue";
 
 const SQLITE_FILTERS = [
@@ -78,6 +79,8 @@ const sshPassword = ref("");
 const hasSavedSshPassword = ref(false);
 const sshKeys = ref<string[]>([]);
 const sshHosts = ref<string[]>([]);
+const awsProfiles = ref<string[]>([]);
+const awsProfilesLoaded = ref(false);
 const sshResolved = ref<ResolvedSshHost | null>(null);
 let resolveToken = 0;
 
@@ -356,6 +359,21 @@ async function loadSshHosts() {
   sshHosts.value = await api.listSshHosts().catch(() => []);
   void resolveSshHost(false);
 }
+
+async function loadAwsProfiles() {
+  awsProfiles.value = await api.listAwsProfiles().catch(() => []);
+  awsProfilesLoaded.value = true;
+}
+
+watch(
+  usesAwsSettings,
+  (shown) => {
+    if (shown) {
+      void loadAwsProfiles();
+    }
+  },
+  { immediate: true },
+);
 
 async function loadSshKeys() {
   try {
@@ -656,10 +674,7 @@ async function submit(connectAfter: boolean) {
               <span class="muted tiny">AWS region</span>
               <input v-model="awsRegion" type="text" spellcheck="false" autocomplete="off" placeholder="us-east-1" />
             </label>
-            <label class="modal-label">
-              <span class="muted tiny">AWS profile</span>
-              <input v-model="awsProfile" type="text" spellcheck="false" autocomplete="off" placeholder="Default" />
-            </label>
+            <AwsProfileField v-model="awsProfile" :profiles="awsProfiles" :loading="!awsProfilesLoaded" />
             <p class="muted tiny span-2 ssh-hint">
               Signs in with a token from the AWS CLI (aws rds generate-db-auth-token), fetched again each time
               Recon connects. For SSO profiles, run aws sso login first. IAM logins need SSL.
@@ -775,10 +790,7 @@ async function submit(connectAfter: boolean) {
               <span class="muted tiny">AWS region</span>
               <input v-model="awsRegion" type="text" spellcheck="false" autocomplete="off" placeholder="Optional" />
             </label>
-            <label class="modal-label">
-              <span class="muted tiny">AWS profile</span>
-              <input v-model="awsProfile" type="text" spellcheck="false" autocomplete="off" placeholder="Default" />
-            </label>
+            <AwsProfileField v-model="awsProfile" :profiles="awsProfiles" :loading="!awsProfilesLoaded" />
             <p class="muted tiny span-2 ssh-hint">
               The AWS CLI (aws s3 cp) reads files from S3 each time Recon connects, and keeps keys in memory
               only. For SSO profiles, run aws sso login first.

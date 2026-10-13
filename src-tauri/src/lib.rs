@@ -73,6 +73,7 @@ pub fn run() {
             commands::list_ssh_keys,
             commands::list_ssh_hosts,
             commands::resolve_ssh_host,
+            commands::list_aws_profiles,
             commands::update_preferences,
             commands::replace_app_data,
             commands::write_text_file,

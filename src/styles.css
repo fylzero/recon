@@ -374,7 +374,11 @@ button.commit:hover:not(:disabled) {
 .modal-label select {
   box-sizing: border-box;
   width: 100%;
+  min-width: 0;
   height: calc(1.45em + 0.7rem + 2px);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
   border: 1px solid var(--border);
   background-color: #0d1016;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4.2 6.2 8 10l3.8-3.8' fill='none' stroke='%238b95a8' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
@@ -4427,6 +4431,26 @@ input[type="text"].filter-token-input {
 input[type="text"].filter-token-input:focus {
   outline: none;
   box-shadow: none;
+}
+
+.select-loading {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.modal-label .select-loading select {
+  background-image: none;
+  color: var(--muted);
+}
+
+.select-loading-spinner {
+  position: absolute;
+  right: 0.6rem;
+  width: 0.7rem;
+  height: 0.7rem;
+  color: var(--muted);
+  pointer-events: none;
 }
 
 .filter-suggest-spinner {

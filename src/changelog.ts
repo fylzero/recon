@@ -14,6 +14,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       "MySQL text that uses a binary collation, such as the names from SHOW DATABASES or SELECT User FROM mysql.user, shows as text instead of hex like 0x726F6F74. Binary columns that hold readable text show it as text too, and other binary values still show as hex.",
       "The Color option in the connection window only appears for connections that aren't in a group, since connections in a group always use the group's color. It no longer starts out showing the group's color, which made it look like it would change the group.",
       "When a connection window is tall enough to scroll, such as with an SSH tunnel turned on, the result of Test connection scrolls into view when it appears instead of showing up out of sight below the fields. Errors from saving scroll into view the same way.",
+      "Choose the AWS profile from a menu of the profiles in your AWS config and credentials files, read with aws configure list-profiles, so SSO profiles show up too. Pick Other profile… to type a name that isn't listed. Without the AWS CLI, the field stays a text box.",
     ],
   },
   {

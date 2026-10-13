@@ -122,6 +122,10 @@ export function listSshHosts() {
   return invoke<string[]>("list_ssh_hosts");
 }
 
+export function listAwsProfiles() {
+  return invoke<string[]>("list_aws_profiles");
+}
+
 export function resolveSshHost(host: string) {
   return invoke<ResolvedSshHost | null>("resolve_ssh_host", { host });
 }

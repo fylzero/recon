@@ -88,6 +88,27 @@ pub(super) async fn run_tool(command: &mut Command, label: &str) -> Result<Vec<u
     Ok(output.stdout)
 }
 
+fn parse_profiles(stdout: &[u8]) -> Vec<String> {
+    let mut profiles: Vec<String> = String::from_utf8_lossy(stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(String::from)
+        .collect();
+    profiles.sort();
+    profiles.dedup();
+    profiles
+}
+
+/// Profile names from the AWS CLI's config and credentials files, or none if the CLI isn't usable.
+pub async fn list_aws_profiles() -> Vec<String> {
+    let mut command = aws_command(["configure".to_string(), "list-profiles".into()]);
+    match run_tool(&mut command, "The AWS CLI").await {
+        Ok(stdout) => parse_profiles(&stdout),
+        Err(_) => Vec::new(),
+    }
+}
+
 /**
  * Gets the password for an entry whose password isn't typed or saved. Pass
  * the saved entry, not an SSH tunnel's local one: RDS signs the token for
@@ -147,6 +168,15 @@ mod tests {
         assert!(aws_args(&iam)
             .join(" ")
             .ends_with("--region us-east-1 --profile prod-sso"));
+    }
+
+    #[test]
+    fn parses_profile_list() {
+        assert_eq!(
+            parse_profiles(b"prod-sso\n\n  default \nprod-sso\nci\n"),
+            vec!["ci", "default", "prod-sso"]
+        );
+        assert!(parse_profiles(b"").is_empty());
     }
 
     #[tokio::test]

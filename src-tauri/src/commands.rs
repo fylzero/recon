@@ -690,6 +690,11 @@ pub fn list_ssh_hosts() -> Vec<String> {
 }
 
 #[tauri::command]
+pub async fn list_aws_profiles() -> Vec<String> {
+    crate::db::credentials::list_aws_profiles().await
+}
+
+#[tauri::command]
 pub async fn resolve_ssh_host(host: String) -> Option<crate::db::ssh_config::ResolvedHost> {
     crate::db::ssh_config::resolve(&host).await
 }
