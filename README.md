@@ -80,14 +80,53 @@ Download the latest release:
 
 Current builds are **Apple Silicon only**. Releases are signed with a Developer ID certificate and notarized by Apple.
 
-<!-- SCREENSHOTS_PLACEHOLDER
-Screenshots needed:
-1. Main connection dashboard showing grouped connections
-2. Table browser with data grid and filter panel
-3. Query editor with syntax highlighting and results
-4. Schema diagram showing table relationships
-5. Table structure view with columns, indexes, and foreign keys
--->
+## Screenshots
+
+### Connection Dashboard
+
+<p align="center">
+  <img src="docs/screenshots/01-connections.png" alt="Connection dashboard with grouped connections" width="100%">
+</p>
+
+Organize database connections into groups with custom colors. All credentials are stored securely in the macOS Keychain.
+
+### Table Browser
+
+<p align="center">
+  <img src="docs/screenshots/02-table-browser.png" alt="Table browser with data grid and filter panel" width="100%">
+</p>
+
+Browse table data with filtering, sorting, and inline editing. The visual filter builder supports complex conditions without writing SQL.
+
+### Query Editor
+
+<p align="center">
+  <img src="docs/screenshots/03-query-editor.png" alt="Query editor with syntax highlighting and results" width="100%">
+</p>
+
+Write and execute SQL queries with syntax highlighting, execution time tracking, and result previews.
+
+### Schema Diagram
+
+<p align="center">
+  <img src="docs/screenshots/04-schema-diagram.png" alt="Schema diagram showing table relationships" width="100%">
+</p>
+
+Visualize table relationships with automatic foreign key detection, polymorphic relationship support, and missing foreign key suggestions.
+
+### Table Structure
+
+<p align="center">
+  <img src="docs/screenshots/05-table-structure.png" alt="Table structure with columns, indexes, and foreign keys" width="100%">
+</p>
+
+Inspect and modify table structure including columns, data types, indexes, and foreign key constraints.
+
+### Demo
+
+<p align="center">
+  <img src="docs/demo.gif" alt="Recon demo showing navigation and features" width="100%">
+</p>
 
 ## Development
 

@@ -1,0 +1,47 @@
+#!/usr/bin/osascript -l JavaScript
+/**
+ * Finds the window ID for Recon using JavaScript for Automation (JXA).
+ * Returns the CGWindowID needed for screencapture -l.
+ */
+
+ObjC.import('Cocoa');
+ObjC.import('CoreGraphics');
+
+function run(argv) {
+  const app = Application('Recon');
+  
+  // Wait for the app to have windows
+  let attempts = 0;
+  while (attempts < 30) {
+    if (app.windows.length > 0) {
+      break;
+    }
+    delay(0.5);
+    attempts++;
+  }
+  
+  if (app.windows.length === 0) {
+    throw new Error('Recon has no windows');
+  }
+  
+  // Get all windows from CGWindowList
+  const windowListRef = $.CGWindowListCopyWindowInfo(
+    $.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements,
+    $.kCGNullWindowID
+  );
+  const windowList = ObjC.unwrap(windowListRef);
+  
+  // Find Recon's main window
+  for (let i = 0; i < windowList.length; i++) {
+    const windowInfo = windowList[i];
+    const ownerName = ObjC.unwrap(windowInfo.kCGWindowOwnerName);
+    const windowLayer = ObjC.unwrap(windowInfo.kCGWindowLayer);
+    
+    if (ownerName === 'Recon' && windowLayer === 0) {
+      const windowId = ObjC.unwrap(windowInfo.kCGWindowNumber);
+      return windowId.toString();
+    }
+  }
+  
+  throw new Error('Could not find Recon window ID');
+}
