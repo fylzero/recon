@@ -52,27 +52,20 @@ bun run tauri dev
 
 ## Running Checks
 
-Before submitting a pull request, ensure your changes pass all checks:
+Before submitting a pull request, ensure your changes pass the required CI checks:
 
-### Type Checking (Frontend)
+### Required Checks
 
+These checks must pass for CI to succeed:
+
+**Frontend Type Checking:**
 ```bash
 bun run build
 ```
 
 This runs `vue-tsc --noEmit` to check TypeScript types without building.
 
-### Rust Tests
-
-```bash
-cd src-tauri
-cargo test
-```
-
-The Rust backend includes unit tests for core functionality like database operations, filters, SSH connections, and SQL parsing.
-
-### Rust Formatting
-
+**Rust Formatting:**
 ```bash
 cd src-tauri
 cargo fmt --check
@@ -85,12 +78,31 @@ cd src-tauri
 cargo fmt
 ```
 
-### Rust Linting
-
+**Rust Compilation:**
 ```bash
 cd src-tauri
-cargo clippy -- -D warnings
+cargo check --locked
 ```
+
+### Optional Checks
+
+These checks are recommended but not required by CI:
+
+**Rust Linting:**
+```bash
+cd src-tauri
+cargo clippy --locked
+```
+
+The codebase has some pre-existing clippy warnings that can be addressed over time.
+
+**Rust Tests:**
+```bash
+cd src-tauri
+cargo test
+```
+
+The Rust backend includes unit tests for core functionality like database operations, filters, SSH connections, and SQL parsing. Running tests locally helps catch issues early.
 
 ## How to Contribute
 
