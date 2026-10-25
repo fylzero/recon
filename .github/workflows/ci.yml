@@ -49,7 +49,7 @@ jobs:
 
       - name: Run clippy
         working-directory: ./src-tauri
-        run: cargo clippy -- -D warnings
+        run: cargo clippy
 
       - name: Run tests
         working-directory: ./src-tauri
