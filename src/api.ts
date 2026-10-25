@@ -9,9 +9,11 @@ import type {
   DropOptions,
   ExportRequest,
   ExportResult,
+  ImportFailure,
   ImportFileOptions,
   ImportPreview,
   ImportResult,
+  ImportResume,
   ImportRowsRequest,
   ImportRowsResult,
   NamespaceList,
@@ -349,8 +351,22 @@ export function importRows(connectionId: string, transferId: string, request: Im
   return invoke<ImportRowsResult>("import_rows", { connectionId, transferId, request });
 }
 
-export function importSql(connectionId: string, transferId: string, namespace: string, path: string) {
-  return invoke<ImportResult>("import_sql", { connectionId, transferId, namespace, path });
+export function importSql(
+  connectionId: string,
+  transferId: string,
+  namespace: string,
+  path: string,
+  resume: ImportResume | null = null,
+) {
+  return invoke<ImportResult>("import_sql", { connectionId, transferId, namespace, path, resume });
+}
+
+/** What `importSql` and `restoreDatabase` reject with, which can say where to resume. */
+export function importFailure(err: unknown): ImportFailure {
+  if (err && typeof err === "object" && "message" in err) {
+    return err as ImportFailure;
+  }
+  return { message: String(err), resume: null };
 }
 
 export function backupDatabase(connectionId: string, transferId: string, namespace: string, path: string) {
@@ -361,8 +377,14 @@ export function readBackupInfo(path: string) {
   return invoke<BackupInfo>("read_backup_info", { path });
 }
 
-export function restoreDatabase(connectionId: string, transferId: string, namespace: string, path: string) {
-  return invoke<ImportResult>("restore_database", { connectionId, transferId, namespace, path });
+export function restoreDatabase(
+  connectionId: string,
+  transferId: string,
+  namespace: string,
+  path: string,
+  resume: ImportResume | null = null,
+) {
+  return invoke<ImportResult>("restore_database", { connectionId, transferId, namespace, path, resume });
 }
 
 export function cancelTransfer(transferId: string) {

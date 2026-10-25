@@ -2535,8 +2535,14 @@ function onConnectionLost(event: ConnectionEvent) {
 }
 
 function onConnectionRestored(event: ConnectionEvent) {
-  if (event.connectionId === props.sessionId) {
-    showToast(`Reconnected to ${entry.value?.name ?? "the database"}`);
+  if (event.connectionId !== props.sessionId) {
+    return;
+  }
+  showToast(`Reconnected to ${entry.value?.name ?? "the database"}`);
+  if (lost.value) {
+    lost.value = false;
+    lostError.value = "";
+    void loadTables().then(refreshVisibleTables);
   }
 }
 

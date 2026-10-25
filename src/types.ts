@@ -488,6 +488,40 @@ export interface ImportProgress {
   statements: number;
   bytes: number;
   totalBytes: number;
+  /** `skipping` past statements that already ran when resuming, or `reconnecting` after the connection dropped. */
+  phase: "running" | "skipping" | "reconnecting";
+  /** Failed reconnect attempts so far, with the last one's error. */
+  attempt: number;
+  error: string | null;
+}
+
+export interface ImportBackend {
+  id: number;
+  started: string | null;
+}
+
+/** Where an import or restore that lost its connection can pick up again. */
+export interface ImportResumePoint {
+  /** Statements to skip to run the uncertain ones again, or just to carry on when none are. */
+  from: number;
+  /** Statements to skip to go past the uncertain ones instead. Equal to `from` when none are. */
+  to: number;
+  line: number;
+  fingerprint: string;
+  backend: ImportBackend | null;
+  likelySaved: boolean;
+}
+
+export interface ImportResume {
+  skip: number;
+  line: number;
+  fingerprint: string;
+  backend: ImportBackend | null;
+}
+
+export interface ImportFailure {
+  message: string;
+  resume: ImportResumePoint | null;
 }
 
 export interface BackupInfo {

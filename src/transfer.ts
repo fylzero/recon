@@ -1,6 +1,6 @@
 import { save } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
-import type { Driver, TabularOptions } from "./types";
+import type { Driver, ImportProgress, ImportResume, ImportResumePoint, TabularOptions } from "./types";
 
 export function fileSafe(name: string) {
   return name.replace(/[/\\:*?"<>|]+/g, "-");
@@ -103,6 +103,37 @@ export function formatBytes(bytes: number) {
     unit += 1;
   }
   return `${unit ? value.toFixed(1) : value} ${units[unit]}`;
+}
+
+/** Picks a stopped import or restore up again, from `point.from` to run the uncertain statements again or `point.to` to skip them. */
+export function resumeAt(point: ImportResumePoint, skip: number): ImportResume {
+  return { skip, line: point.line, fingerprint: point.fingerprint, backend: point.backend };
+}
+
+/** Explains what resuming from `point` does, and the choice to make when some statements may or may not have run. */
+export function resumeChoice(point: ImportResumePoint) {
+  const line = point.line.toLocaleString();
+  if (point.to === point.from) {
+    return `Resume picks up at line ${line}.`;
+  }
+  const single = point.to - point.from === 1;
+  const what = single ? `The statement on line ${line}` : `The statements from line ${line} on`;
+  const it = single ? "it" : "them";
+  if (point.likelySaved) {
+    return `${what} most likely ran before the connection dropped, so skip ${it} and carry on.`;
+  }
+  return `${what} may or may not have run before the connection dropped. Skip ${it} if the rows are already there, or run ${it} again if they aren't.`;
+}
+
+/** The status line while a file runs, or null while it's simply running. */
+export function runPhase(progress: ImportProgress | null) {
+  if (progress?.phase === "reconnecting") {
+    return progress.attempt ? `Connection lost. Reconnecting (attempt ${progress.attempt + 1})…` : "Connection lost. Reconnecting…";
+  }
+  if (progress?.phase === "skipping") {
+    return "Skipping what already ran…";
+  }
+  return null;
 }
 
 /** What a backup never includes, whatever the dumper manages to write. */

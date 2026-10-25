@@ -5,6 +5,7 @@ pub mod mysql;
 pub mod postgres;
 pub mod replace;
 pub mod restore;
+pub mod resume;
 pub mod sql_split;
 pub mod sqlite;
 pub mod ssh;

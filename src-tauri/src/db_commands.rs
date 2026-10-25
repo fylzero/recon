@@ -541,6 +541,55 @@ async fn recover(
     }
 }
 
+pub(crate) enum Reconnected {
+    Ready(Arc<Session>),
+    Failed(String),
+    /// The user closed the connection.
+    Closed,
+}
+
+/**
+ * Gets a working session for a long-running transfer whose connection
+ * dropped. Unlike `recover`, it tries again once the connection is marked
+ * lost, so a transfer can wait out a network outage by calling it until it
+ * gets through.
+ */
+pub(crate) async fn reconnect_in_background(
+    app: &AppHandle,
+    connection_id: &str,
+    stale: &Arc<Session>,
+) -> Reconnected {
+    let sessions = app.state::<SessionStore>();
+    let _guard = sessions.reconnect_guard().await;
+    let Some(current) = sessions.current(connection_id).await else {
+        return Reconnected::Closed;
+    };
+    if !Arc::ptr_eq(&current, stale) && !current.is_lost() {
+        return Reconnected::Ready(current);
+    }
+    match rebuild(app, connection_id, &current, None, &Prompter::background()).await {
+        Ok((session, _)) => {
+            let event = ConnectionEvent {
+                connection_id,
+                error: None,
+            };
+            let _ = app.emit(CONNECTION_RESTORED_EVENT, event);
+            Reconnected::Ready(session)
+        }
+        Err(err) => {
+            if !current.is_lost() {
+                current.mark_lost();
+                let event = ConnectionEvent {
+                    connection_id,
+                    error: Some(&err),
+                };
+                let _ = app.emit(CONNECTION_LOST_EVENT, event);
+            }
+            Reconnected::Failed(err)
+        }
+    }
+}
+
 /**
  * Runs `op` against the open session. If the connection turns out to be
  * gone, reconnects once and runs `op` again, so only operations that are
