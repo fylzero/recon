@@ -98,17 +98,17 @@ From the repository root:
 ```
 
 This will:
-1. Generate the demo SQLite database at `/tmp/recon-demo/demo.db`
+1. Generate a demo SQLite database at `/tmp/recon-demo/demo.db` with 13 tables and rich data
 2. Create isolated app data at `/tmp/recon-demo/home/Library/Application Support/com.recon.app/`
 3. Launch Recon in isolated mode
 4. Position and resize the window to 1440×900
-5. Navigate through the five required screens and capture each:
-   - `docs/screenshots/01-connections.png` — Connection dashboard
-   - `docs/screenshots/02-table-browser.png` — Table browser with data grid
-   - `docs/screenshots/03-query-editor.png` — Query editor with results
-   - `docs/screenshots/04-schema-diagram.png` — Schema diagram with relationships
-   - `docs/screenshots/05-table-structure.png` — Table structure view
-6. Record a 10-15 second demo flow and convert it to `docs/demo.gif` (under ~8MB, 960px wide, 15fps)
+5. Navigate through the five required screens using coordinate-based clicking and capture each:
+   - `docs/screenshots/01-connections.png` — Connection dashboard (before opening)
+   - `docs/screenshots/02-table-browser.png` — Table browser (customers, Data tab)
+   - `docs/screenshots/03-query-editor.png` — Query editor (SQL tab with beautified query and results)
+   - `docs/screenshots/04-schema-diagram.png` — Schema diagram (with polymorphic edges on and Fit clicked)
+   - `docs/screenshots/05-table-structure.png` — Table structure (orders table, Structure tab)
+6. Record a 15-second demo flow and convert it to `docs/demo.gif` (960px wide, 12fps, under 8MB)
 7. Quit Recon and clean up
 
 ### Options
@@ -141,10 +141,10 @@ The main README already references these paths, so once the images are committed
 
 When Recon's UI changes:
 
-1. **Schema changes**: Edit `generate-demo-db.ts` to adjust the demo data if needed
-2. **Navigation changes**: Edit `capture.sh` to update button names, menu paths, or keyboard shortcuts
+1. **Schema changes**: Edit `generate-demo-db.ts` to adjust the demo data if needed (currently 13 tables with rich, deterministic seeded data)
+2. **Navigation changes**: If button positions change, update the reference coordinates in `capture.sh`. The coordinates are based on a 1024×640 reference window scaled to 1440×900.
 3. **New screenshots**: Update the screenshot list in `capture.sh` and add corresponding `capture_screenshot` calls
-4. **Window size**: Adjust `WINDOW_WIDTH` and `WINDOW_HEIGHT` in `capture.sh`
+4. **Window size**: Adjust `WINDOW_WIDTH`, `WINDOW_HEIGHT`, `REF_WIDTH`, and `REF_HEIGHT` in `capture.sh`
 
 Run the script again to regenerate all images:
 
@@ -152,67 +152,116 @@ Run the script again to regenerate all images:
 ./scripts/capture/capture.sh
 ```
 
+### Finding New Coordinates
+
+To find coordinates for new UI elements:
+
+1. Take a screenshot of the window at 1440×900
+2. Downscale it to 1024px wide: `sips -Z 1024 screenshot.png`
+3. Open in Preview and use the Inspector (⌘I) to measure pixel coordinates
+4. Use those reference coordinates in `click_ref x y` calls
+
 ## Troubleshooting
 
-### "Recon has no windows" or window ID not found
+### "Recon is already running" warning
 
-The app may be taking longer to launch. Increase the `sleep` durations in `capture.sh` after launching the app and after window operations.
+The script detects if Recon is already running and exits to avoid killing the wrong instance. Quit Recon before running the capture script.
 
 ### Screenshots are blank or show the wrong window
 
-Check that Screen Recording permission is granted. The script uses `screencapture -l <windowid>` which requires this permission.
+Check that Screen Recording permission is granted to your terminal app. The script checks for this and will print instructions if capture fails.
 
-### UI automation doesn't click the right elements
+Go to: **System Settings** → **Privacy & Security** → **Screen Recording** and enable your terminal.
 
-AppleScript UI automation depends on accessibility labels. If button names or UI structure change:
+### Clicks don't hit the right elements
 
-1. Open **Script Editor.app**
-2. Run this to inspect the UI hierarchy:
-   ```applescript
-   tell application "System Events"
-     tell process "Recon"
-       entire contents of window 1
-     end
-   end tell
-   ```
-3. Update `capture.sh` with the correct element names
+The coordinate mapping may need adjustment. The script uses a reference window size of 1024×640 that scales to 1440×900. If the window size differs or UI layout changes:
+
+1. Capture a screenshot at 1440×900
+2. Downscale to 1024px wide: `sips -Z 1024 screenshot.png`
+3. Measure new coordinates in Preview (⌘I shows pixel position)
+4. Update the `click_ref` calls in `capture.sh`
 
 ### Demo GIF is too large
 
-Reduce the recording length or lower the scale/fps in the ffmpeg commands in `capture.sh`:
+The script targets 960px wide at 12fps. To reduce size further, edit the ffmpeg commands in `capture.sh`:
 
 ```bash
-# Current: 960px wide, 15fps
+# Current: 960px wide, 12fps
 scale=960:-1
-fps=15
-
-# To reduce size: 800px wide, 12fps
-scale=800:-1
 fps=12
+
+# To reduce: 800px wide, 10fps
+scale=800:-1
+fps=10
 ```
+
+### GIF recording fails
+
+The GIF recording is optional. If it fails, the script continues and produces the five screenshots. You can:
+- Record manually and convert with ffmpeg
+- Skip the GIF entirely
+- Check that `screencapture -v` works on your system
 
 ### Script fails partway through
 
-The capture script uses `set -e` (exit on error). Check the output to see which step failed, then:
+- Use `--only <name>` to retry a single screenshot: `./scripts/capture/capture.sh --only 03-query-editor`
+- Add more `sleep` delays if timing issues occur (increase sleep durations after tab switches)
+- Run with `bash -x` for verbose output: `bash -x scripts/capture/capture.sh`
 
-- Use `--only <name>` to retry a single screenshot
-- Add more `sleep` delays if timing issues occur
-- Run the script with `bash -x` for verbose output: `bash -x scripts/capture/capture.sh`
+## Technical Details
 
-## Technical Notes
+### Coordinate-Based Clicking
+
+The app's UI is a webview, so accessibility-based clicking doesn't work. Instead, the script uses screen coordinate clicking via `osascript -e 'tell application "System Events" to click at {X,Y}'`.
+
+Coordinates are defined relative to a 1024×640 reference window (the 2x retina capture downscaled):
+- Reference coordinates are converted to screen coordinates: `screen_x = 100 + ref_x * 1440 / 1024`
+- The window must be frontmost before clicking: `set frontmost of process "Recon" to true`
+- AppleScript stderr contains harmless `-25208` errors that name the clicked element; these are ignored
+
+**Verified click targets on Recon 1.9.0:**
+- Connection list row 'Demo Store': (120, 181)
+- Tabs: Tables (62, 85), SQL (120, 85), Diagram (175, 85)
+- Table sidebar rows at x=45: attachments 135, comments 152, customers 169, order_items 186, orders 203, products 220
+- Data/Structure/Indexes sub-tabs: Data (219, 134), Structure (273, 134)
+- Diagram pills: '2 foreign keys' (305, 111), '2 polymorphic' (396, 111), '1 missing key' (476, 111), Fit (952, 111)
+- SQL editor: editor area (400, 200), Beautify (926, 133), Run (27, 133)
+
+### Window ID Detection
+
+The script uses inline JXA to find the CGWindowID needed for `screencapture -l`:
+
+```javascript
+ObjC.import("CoreGraphics"); 
+var l=ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly,0))); 
+l.filter(w=>w.kCGWindowOwnerName=="Recon"&&w.kCGWindowLayer==0).map(w=>w.kCGWindowNumber).join("")
+```
+
+The window ID is queried twice: once after launch, and again after resizing (the ID can change).
+
+### Safe Instance Management
+
+The script only kills the demo Recon instance it launched (by remembering its PID). If a non-demo Recon is already running when the script starts, it warns and exits rather than risking killing the wrong instance.
+
+### Permission Detection
+
+After each `screencapture -l` call, the script checks that the command exited 0 and the file exists. If not, it prints instructions to grant Screen Recording permission in System Settings → Privacy & Security.
+
+## Additional Technical Notes
 
 ### Why Not `open -a`?
 
 Using `open -a Recon --env HOME=/tmp/...` doesn't work reliably for overriding `HOME`. Launching the binary directly with `HOME=... /Applications/Recon.app/Contents/MacOS/Recon` ensures the environment variable is set before the app initializes.
 
-### Why JXA Instead of Swift?
+### Why Inline JXA?
 
-A Swift helper would require compilation, adding Xcode as a dependency. JXA (JavaScript for Automation) runs with `osascript -l JavaScript` and is included with macOS, so there's no build step.
+The original approach used a separate `.jxa` file, but `osascript file.jxa` doesn't treat it as JavaScript (the `#!` line causes syntax errors). Inline JXA with `osascript -l JavaScript -e '...'` works without a separate file.
 
-### Why palettegen/paletteuse Instead of gifski?
+### Why palettegen/paletteuse?
 
 The Mac doesn't have gifski installed, and ffmpeg's two-pass palette method produces good-quality GIFs under 8MB without requiring additional tools.
 
-### Why Bun Instead of Node?
+### Why Bun?
 
 Bun includes built-in TypeScript support and a native SQLite driver, so the data generators run without installing dependencies or separate compilation steps.
