@@ -38,8 +38,8 @@ Relates to #
 - [ ] Tested with PostgreSQL
 - [ ] Tested with SQLite
 - [ ] Added or updated unit tests
-- [ ] Frontend type checking passes (`bun run build`)
-- [ ] Rust tests pass (`cargo test`)
+- [ ] Frontend type checking passes (`bunx vue-tsc --noEmit`)
+- [ ] Rust tests pass (`cargo test --locked`)
 - [ ] Rust linting passes (`cargo clippy`)
 
 ## Screenshots

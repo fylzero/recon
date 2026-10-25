@@ -60,10 +60,10 @@ These checks must pass for CI to succeed:
 
 **Frontend Type Checking:**
 ```bash
-bun run build
+bunx vue-tsc --noEmit
 ```
 
-This runs `vue-tsc --noEmit` to check TypeScript types without building.
+Avoid `bun run build` for this: it also runs a full Vite production build.
 
 **Rust Formatting:**
 ```bash
@@ -84,9 +84,17 @@ cd src-tauri
 cargo check --locked
 ```
 
+**Rust Tests:**
+```bash
+cd src-tauri
+cargo test --locked
+```
+
+The Rust backend includes unit tests for core functionality like database operations, filters, SSH connections, and SQL parsing.
+
 ### Optional Checks
 
-These checks are recommended but not required by CI:
+This check is recommended but not required by CI:
 
 **Rust Linting:**
 ```bash
@@ -95,14 +103,6 @@ cargo clippy --locked
 ```
 
 The codebase has some pre-existing clippy warnings that can be addressed over time.
-
-**Rust Tests:**
-```bash
-cd src-tauri
-cargo test
-```
-
-The Rust backend includes unit tests for core functionality like database operations, filters, SSH connections, and SQL parsing. Running tests locally helps catch issues early.
 
 ## How to Contribute
 
@@ -166,7 +166,6 @@ Feature requests are welcome! Please [open an issue](https://github.com/fylzero/
 
 If you have questions about contributing, feel free to:
 
-- Open a [discussion](https://github.com/fylzero/recon/discussions)
 - Comment on an existing issue
 - Reach out to [@fylzero](https://github.com/fylzero)
 

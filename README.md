@@ -15,7 +15,7 @@
 
 ## About
 
-Recon is a fast, native open-source database client for macOS, built with Tauri, Vue, and Rust. It provides a modern interface for working with MySQL, PostgreSQL, and SQLite databases without needing to install separate database drivers or command-line tools.
+Recon is an open-source database client for macOS, built with Tauri, Vue, and Rust. It works with MySQL, PostgreSQL, and SQLite databases without separate database drivers or command-line tools.
 
 **Key characteristics:**
 
@@ -23,11 +23,9 @@ Recon is a fast, native open-source database client for macOS, built with Tauri,
 - **Privacy-focused**: Database credentials stored exclusively in the macOS Keychain
 - **No external dependencies**: MySQL, PostgreSQL, and SQLite drivers compiled directly into the app
 - **Local-first**: All connections and queries run locally on your machine
-- **Native performance**: Built with Rust for fast query execution and data handling
+- **Native app**: A Tauri shell with a Rust backend, not a bundled browser
 
 ## Features
-
-Recon provides comprehensive database management capabilities:
 
 **Connection Management**
 - Multiple database connections with organized grouping
@@ -80,17 +78,7 @@ Download the latest release:
 
 **[⬇️ Download Recon for macOS (Apple Silicon)](https://github.com/fylzero/recon/releases/latest/download/Recon-macos-arm64.dmg)**
 
-Current builds are **Apple Silicon (M1/M2/M3) only**.
-
-### Opening the app for the first time
-
-Since Recon is currently distributed as an unsigned app, macOS Gatekeeper will show a warning on first launch. To open it:
-
-1. Right-click (or Control-click) the **Recon** app in your Applications folder
-2. Select **Open** from the context menu
-3. Click **Open** in the dialog that appears
-
-You only need to do this once. Subsequent launches work normally.
+Current builds are **Apple Silicon only**. Releases are signed with a Developer ID certificate and notarized by Apple.
 
 <!-- SCREENSHOTS_PLACEHOLDER
 Screenshots needed:
@@ -151,6 +139,8 @@ Accept the defaults, then **open a new terminal** and confirm:
 cargo --version
 ```
 
+`bun run tauri dev` already prepends `$HOME/.cargo/bin` to `PATH`.
+
 ### Running in development
 
 ```bash
@@ -179,9 +169,9 @@ The build produces:
 | Artifact | Path |
 | --- | --- |
 | App bundle | `src-tauri/target/release/bundle/macos/Recon.app` |
-| Disk image | `src-tauri/target/release/bundle/dmg/Recon_1.8.1_aarch64.dmg` |
+| Disk image | `src-tauri/target/release/bundle/dmg/Recon_<version>_aarch64.dmg` |
 
-Local unsigned builds will trigger macOS Gatekeeper warnings. Right-click the app and choose **Open** to run it.
+Local builds are ad-hoc signed unless an Apple identity is supplied, so macOS Gatekeeper may warn that the app is unidentified. Right-click the app, choose **Open**, then confirm.
 
 ### Running tests
 
@@ -195,7 +185,7 @@ cargo test
 Type checking for the Vue frontend:
 
 ```bash
-bun run build
+bunx vue-tsc --noEmit
 ```
 
 ### Troubleshooting
@@ -215,7 +205,7 @@ See [macOS release setup](docs/macos-releases.md) for Apple Developer enrollment
 
 ## Contributing
 
-We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on how to get involved, code style, and how to submit issues and pull requests.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for code style, required checks, and how to submit issues and pull requests.
 
 ## License
 
