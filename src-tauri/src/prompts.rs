@@ -1,8 +1,11 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures_util::future::{select, Either};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::oneshot;
@@ -54,6 +57,7 @@ struct PromptRequest<'a> {
     instructions: &'a str,
     prompt: &'a str,
     secret: bool,
+    input: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -140,6 +144,39 @@ impl Prompter {
         busy
     }
 
+    /// Whether this prompter can show the sign-in window, which background ones never do.
+    pub fn can_ask(&self) -> bool {
+        !matches!(self.0.responder, Responder::Background)
+    }
+
+    fn open<'a>(
+        &self,
+        app: &'a AppHandle,
+        instructions: &str,
+        prompt: &str,
+        secret: bool,
+        input: bool,
+    ) -> Result<(Pending<'a>, oneshot::Receiver<Option<String>>), String> {
+        let pending = Pending {
+            app,
+            id: uuid::Uuid::new_v4().to_string(),
+        };
+        let receiver = app.state::<PromptStore>().register(&pending.id);
+        app.emit(
+            PROMPT_EVENT,
+            PromptRequest {
+                id: &pending.id,
+                title: &self.0.title,
+                instructions: instructions.trim(),
+                prompt: prompt.trim(),
+                secret,
+                input,
+            },
+        )
+        .map_err(|err| format!("Could not show the sign-in window: {err}"))?;
+        Ok((pending, receiver))
+    }
+
     pub async fn ask(
         &self,
         instructions: &str,
@@ -155,26 +192,37 @@ impl Prompter {
         self.0.asked.fetch_add(1, Ordering::Relaxed);
         self.0.waiting.store(true, Ordering::Relaxed);
         let _waiting = Waiting(&self.0.waiting);
-        let pending = Pending {
-            app,
-            id: uuid::Uuid::new_v4().to_string(),
-        };
-        let receiver = app.state::<PromptStore>().register(&pending.id);
-        app.emit(
-            PROMPT_EVENT,
-            PromptRequest {
-                id: &pending.id,
-                title: &self.0.title,
-                instructions: instructions.trim(),
-                prompt: prompt.trim(),
-                secret,
-            },
-        )
-        .map_err(|err| format!("Could not show the sign-in window: {err}"))?;
+        let (_pending, receiver) = self.open(app, instructions, prompt, secret, true)?;
         match tokio::time::timeout(PROMPT_TIMEOUT, receiver).await {
             Ok(Ok(Some(answer))) => Ok(answer),
             Ok(_) => Err(CANCELLED.into()),
             Err(_) => Err("The sign-in window timed out.".into()),
+        }
+    }
+
+    /**
+     * Shows `instructions` in the sign-in window, with nothing to type, while
+     * `work` runs elsewhere, like in the browser. Cancelling the window stops
+     * `work`, and the window closes when `work` finishes.
+     */
+    pub async fn wait_for<T>(
+        &self,
+        instructions: &str,
+        work: impl Future<Output = Result<T, String>>,
+    ) -> Result<T, String> {
+        let app = match &self.0.responder {
+            Responder::App(app) => app,
+            Responder::Background => return Err(NEEDS_RECONNECT.into()),
+            #[cfg(test)]
+            Responder::Fixed(_) => return work.await,
+        };
+        self.0.asked.fetch_add(1, Ordering::Relaxed);
+        self.0.waiting.store(true, Ordering::Relaxed);
+        let _waiting = Waiting(&self.0.waiting);
+        let (_pending, receiver) = self.open(app, instructions, "", false, false)?;
+        match select(pin!(work), receiver).await {
+            Either::Left((outcome, _)) => outcome,
+            Either::Right(_) => Err(CANCELLED.into()),
         }
     }
 }

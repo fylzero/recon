@@ -2,11 +2,26 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::process::Command;
+use tokio::sync::Mutex;
 
 use super::ssh_config;
 use crate::models::{ConnectionEntry, PasswordSource};
+use crate::prompts::Prompter;
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+const SSO_LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
+/// What the AWS CLI says when an SSO profile needs `aws sso login`, lowercased.
+const SSO_EXPIRED_MARKERS: [&str; 3] = [
+    "error when retrieving token from sso",
+    "error loading sso token",
+    "sso session associated with this profile",
+];
+const SSO_NEEDS_RECONNECT: &str =
+    "Your AWS SSO sign-in has expired. Click Reconnect to sign in again.";
+const SSO_INSTRUCTIONS: &str = "Your AWS SSO sign-in has expired. Finish signing in to AWS in your browser, and Recon will continue on its own.";
+
+/// One `aws sso login` at a time, so connections sharing a profile open one browser tab.
+static SSO_LOGIN: Mutex<()> = Mutex::const_new(());
 const ERROR_TAIL_LINES: usize = 3;
 /// RDS tokens last 15 minutes, so pools get a new one well before that.
 pub const REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60);
@@ -52,6 +67,14 @@ pub(super) fn aws_command(args: impl IntoIterator<Item = String>) -> Command {
  * Failures name the tool through `label` and include the end of its stderr.
  */
 pub(super) async fn run_tool(command: &mut Command, label: &str) -> Result<Vec<u8>, String> {
+    run_tool_within(command, label, FETCH_TIMEOUT).await
+}
+
+async fn run_tool_within(
+    command: &mut Command,
+    label: &str,
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
     let program = command
         .as_std()
         .get_program()
@@ -64,11 +87,11 @@ pub(super) async fn run_tool(command: &mut Command, label: &str) -> Result<Vec<u
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .output();
-    let output = match tokio::time::timeout(FETCH_TIMEOUT, run).await {
+    let output = match tokio::time::timeout(timeout, run).await {
         Err(_) => {
             return Err(format!(
                 "{label} didn't finish within {} seconds.",
-                FETCH_TIMEOUT.as_secs()
+                timeout.as_secs()
             ))
         }
         Ok(Err(err)) if err.kind() == std::io::ErrorKind::NotFound && program == "aws" => {
@@ -139,6 +162,54 @@ pub async fn fetch(entry: &ConnectionEntry) -> Result<String, String> {
     Ok(password)
 }
 
+fn needs_sso_login(entry: &ConnectionEntry, err: &str) -> bool {
+    let err = err.to_lowercase();
+    entry.password_source == PasswordSource::AwsIam
+        && SSO_EXPIRED_MARKERS
+            .iter()
+            .any(|marker| err.contains(marker))
+}
+
+async fn sso_login(profile: &str) -> Result<(), String> {
+    let mut args = vec!["sso".to_string(), "login".into()];
+    if !profile.is_empty() {
+        args.push("--profile".into());
+        args.push(profile.to_string());
+    }
+    let mut command = aws_command(args);
+    run_tool_within(&mut command, "aws sso login", SSO_LOGIN_TIMEOUT)
+        .await
+        .map(drop)
+}
+
+/**
+ * Like `fetch`, but when an AWS SSO sign-in has expired, runs `aws sso login`
+ * and tries again. The browser only opens for a prompter that can ask, so
+ * automatic reconnects never pop it up on their own.
+ */
+pub async fn fetch_signing_in(
+    entry: &ConnectionEntry,
+    prompter: &Prompter,
+) -> Result<String, String> {
+    match fetch(entry).await {
+        Err(err) if needs_sso_login(entry, &err) => {}
+        outcome => return outcome,
+    }
+    if !prompter.can_ask() {
+        return Err(SSO_NEEDS_RECONNECT.into());
+    }
+    let _turn = SSO_LOGIN.lock().await;
+    // Another connection may have signed in while this one waited its turn.
+    match fetch(entry).await {
+        Err(err) if needs_sso_login(entry, &err) => {}
+        outcome => return outcome,
+    }
+    prompter
+        .wait_for(SSO_INSTRUCTIONS, sso_login(&entry.aws_profile))
+        .await?;
+    fetch(entry).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,6 +248,27 @@ mod tests {
             vec!["ci", "default", "prod-sso"]
         );
         assert!(parse_profiles(b"").is_empty());
+    }
+
+    #[test]
+    fn spots_expired_sso_sign_ins() {
+        let iam = entry(PasswordSource::AwsIam);
+        for err in [
+            "The AWS CLI failed: Error when retrieving token from sso: Token has expired and refresh failed",
+            "The AWS CLI failed: Error loading SSO Token: Token for prod does not exist",
+            "The AWS CLI failed: The SSO session associated with this profile has expired or is otherwise invalid.",
+        ] {
+            assert!(needs_sso_login(&iam, err), "{err}");
+        }
+        assert!(!needs_sso_login(
+            &iam,
+            "The AWS CLI failed: Unable to locate credentials."
+        ));
+        let cmd = entry(PasswordSource::Command);
+        assert!(!needs_sso_login(
+            &cmd,
+            "Error loading SSO Token: Token for prod does not exist"
+        ));
     }
 
     #[tokio::test]

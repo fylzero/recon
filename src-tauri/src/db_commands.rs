@@ -69,17 +69,21 @@ pub struct StatementResult {
 
 /**
  * A typed password wins over the saved one. Connections with an IAM or
- * command password source get a fresh one every time instead.
+ * command password source get a fresh one every time instead, signing in
+ * to AWS SSO again through `prompter` if that has expired.
  */
 async fn password_for(
     entry: &ConnectionEntry,
     password: Option<String>,
+    prompter: &Prompter,
 ) -> Result<Option<String>, String> {
     if entry.driver == Driver::Sqlite {
         return Ok(None);
     }
     if entry.password_source.is_fetched() {
-        return db::credentials::fetch(entry).await.map(Some);
+        return db::credentials::fetch_signing_in(entry, prompter)
+            .await
+            .map(Some);
     }
     if let Some(password) = password.filter(|value| !value.is_empty()) {
         return Ok(Some(password));
@@ -257,9 +261,9 @@ pub async fn test_connection(
     ssh_password: Option<String>,
 ) -> Result<String, String> {
     let entry = sanitize_connection(connection)?;
-    let password = password_for(&entry, password).await?;
-    let tls = db::tls::load(&entry).await?;
     let prompter = Prompter::interactive(&app, entry.name.clone());
+    let password = password_for(&entry, password, &prompter).await?;
+    let tls = db::tls::load(&entry).await?;
     let (target, tunnel) = open_tunnel(&entry, ssh_secret, ssh_password, &prompter).await?;
     let outcome = match target.driver {
         Driver::Mysql => db::mysql::test(&target, password.as_deref(), &tls).await,
@@ -301,12 +305,12 @@ pub async fn connect(
     let key = session_id
         .filter(|id| !id.is_empty())
         .unwrap_or(connection_id);
-    let password = password_for(&entry, password).await?;
+    let prompter = Prompter::interactive(&app, entry.name.clone());
+    let password = password_for(&entry, password, &prompter).await?;
     if let Some(previous) = sessions.remove(&key).await {
         previous.close().await;
         results.remove_connection(&key);
     }
-    let prompter = Prompter::interactive(&app, entry.name.clone());
     let restore = namespace.as_deref().unwrap_or_default();
     let (session, info) = open_session(entry, password, restore, &prompter, None).await?;
     if let Some(stale) = sessions.insert(&key, session).await {
@@ -452,6 +456,7 @@ async fn open_session(
 async fn reopen_credentials(
     app: &AppHandle,
     stale: &Session,
+    prompter: &Prompter,
 ) -> Result<(ConnectionEntry, Option<String>), String> {
     let entry = {
         let state = app.state::<AppState>();
@@ -460,7 +465,7 @@ async fn reopen_credentials(
             .cloned()
             .unwrap_or_else(|| stale.entry.clone())
     };
-    let saved = password_for(&entry, None).await?;
+    let saved = password_for(&entry, None, prompter).await?;
     if entry.password_source.is_fetched() {
         return Ok((entry, saved));
     }
@@ -474,7 +479,7 @@ async fn rebuild(
     password: Option<String>,
     prompter: &Prompter,
 ) -> Result<(Arc<Session>, SessionInfo), String> {
-    let (entry, saved) = reopen_credentials(app, stale).await?;
+    let (entry, saved) = reopen_credentials(app, stale, prompter).await?;
     let password = if entry.password_source.is_fetched() {
         saved
     } else {

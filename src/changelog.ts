@@ -14,6 +14,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       "While you're searching, groups with matches open on their own, and groups without matches are hidden. Your groups go back to how you left them when you clear the search.",
       "Dragging to reorder is turned off while you're searching.",
       "When there isn't room for the whole toolbar, the Expand, Collapse, and Sort A–Z buttons move to a second line.",
+      "When an AWS IAM connection's SSO sign-in has expired, Recon runs aws sso login for its profile when you connect, test the connection, or click Reconnect, so you no longer have to run it in Terminal. Your browser opens to sign in, and a sign-in window waits until you finish, or until you click Cancel. Connections that share a profile wait for the same sign-in instead of each opening a browser tab. If the sign-in expires while Recon is reconnecting on its own, the Connection lost banner asks you to click Reconnect instead of opening your browser unexpectedly.",
     ],
   },
   {

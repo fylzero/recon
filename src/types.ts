@@ -43,6 +43,8 @@ export interface AuthPrompt {
   instructions: string;
   prompt: string;
   secret: boolean;
+  /** False while Recon waits on something outside the app, like a browser sign-in. */
+  input: boolean;
 }
 
 export const DEFAULT_SSH_PORT = 22;

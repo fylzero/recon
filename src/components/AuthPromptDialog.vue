@@ -75,9 +75,13 @@ onUnmounted(() => {
 
 <template>
   <Modal v-if="current" :key="current.id" :title="heading" @close="finish(null)">
-    <form class="auth-prompt" @submit.prevent="finish(answer)">
+    <form class="auth-prompt" @submit.prevent="current.input && finish(answer)">
       <p v-if="current.instructions" class="auth-prompt-instructions">{{ current.instructions }}</p>
-      <label class="modal-label">
+      <p v-if="!current.input" class="auth-prompt-waiting muted">
+        <span class="spinner" aria-hidden="true" />
+        Waiting for you to finish signing in…
+      </p>
+      <label v-else class="modal-label">
         <span class="muted tiny">{{ current.prompt || "Response" }}</span>
         <input
           ref="input"
@@ -91,7 +95,7 @@ onUnmounted(() => {
     </form>
     <template #actions>
       <button class="ghost" type="button" @click="finish(null)">Cancel</button>
-      <button class="primary" type="button" @click="finish(answer)">Continue</button>
+      <button v-if="current.input" class="primary" type="button" @click="finish(answer)">Continue</button>
     </template>
   </Modal>
 </template>
