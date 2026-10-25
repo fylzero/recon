@@ -102,6 +102,31 @@ log "Setting up isolated app data..."
 bun run "$SCRIPT_DIR/setup-demo-connection.ts"
 success "Isolated app data configured"
 
+# The app's webview stores tab/query state in the REAL user's WebKit
+# localStorage (HOME does not redirect it). Everything demo-related is keyed by
+# the id "demo-connection", so remove those keys (only those) before each run
+# so earlier runs cannot leak open tabs or editor text into the screenshots.
+if pgrep -f "Recon.app/Contents/MacOS/Recon" >/dev/null 2>&1; then
+  die "Recon is already running. Quit it first so the capture does not interfere with your session."
+fi
+LS_HELPER="$SCRIPT_DIR/localstorage.py"
+python3 "$LS_HELPER" purge-demo || warn "Could not clean demo keys from the webview storage"
+
+# The diagram's edge toggles are also stored in that shared storage. Remember
+# the user's own value, show all edge types for the screenshot, and restore the
+# original on exit (even on failure).
+ORIG_DIAGRAM_LINKS="$(python3 "$LS_HELPER" get recon.diagramLinks || true)"
+restore_prefs() {
+  python3 "$LS_HELPER" purge-demo || true
+  if [[ -n "$ORIG_DIAGRAM_LINKS" ]]; then
+    python3 "$LS_HELPER" set recon.diagramLinks "$ORIG_DIAGRAM_LINKS" || true
+  else
+    python3 "$LS_HELPER" delete recon.diagramLinks || true
+  fi
+}
+trap restore_prefs EXIT
+python3 "$LS_HELPER" set recon.diagramLinks '{"foreign":true,"morph":true,"missing":true}'
+
 # Launch Recon with isolated HOME
 log "Launching Recon with isolated environment..."
 HOME="$ISOLATED_HOME" "$APP_BINARY" >/dev/null 2>&1 &
@@ -153,8 +178,15 @@ click_ref() {
   local screen_x=$(( WINDOW_X + ref_x * WINDOW_WIDTH / REF_WIDTH ))
   local screen_y=$(( WINDOW_Y + ref_y * WINDOW_HEIGHT / REF_HEIGHT ))
   
-  # Bring Recon to front
-  osascript -e 'tell application "System Events" to set frontmost of process "Recon" to true' 2>/dev/null
+  # Bring Recon to front and wait until it really is frontmost. Without this,
+  # the first click can be swallowed while the window is still activating.
+  for _try in 1 2 3 4 5 6 7 8 9 10; do
+    osascript -e 'tell application "System Events" to set frontmost of process "Recon" to true' 2>/dev/null
+    if [[ "$(osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null)" == "Recon" ]]; then
+      break
+    fi
+    sleep 0.3
+  done
   
   # Click at coordinates (ignore stderr which contains harmless -25208 and element name)
   osascript -e "tell application \"System Events\" to click at {$screen_x, $screen_y}" 2>/dev/null || true
@@ -191,6 +223,12 @@ capture_screenshot() {
   fi
 }
 
+# Warm-up: the first click after launch only activates the window and is
+# swallowed, so click an empty area once before any real navigation.
+click_ref 500 500
+click_ref 500 500
+sleep 0.5
+
 # Screenshot 1: Connection dashboard
 log ""
 log "=== Screenshot 1: Connection Dashboard ==="
@@ -202,6 +240,22 @@ log "Opening Demo Store connection..."
 click_ref 120 181
 sleep 2.5
 
+# Open a table by typing its name in the sidebar filter and clicking the first
+# match. This does not depend on the table order in the sidebar.
+open_table() {
+  click_ref 92 111
+  osascript -e 'tell application "System Events" to keystroke "a" using {command down}' 2>/dev/null || true
+  osascript -e "tell application \"System Events\" to keystroke \"$1\"" 2>/dev/null || true
+  sleep 0.7
+  click_ref 45 135
+  sleep 1.5
+  # clear the filter so the whole table list shows, with the table highlighted
+  click_ref 167 111
+  # click empty sidebar space so the filter box loses its focus ring
+  click_ref 100 520
+  sleep 0.5
+}
+
 # Screenshot 2: Table browser with data grid (customers table)
 log ""
 log "=== Screenshot 2: Table Browser ==="
@@ -211,8 +265,7 @@ click_ref 62 85
 sleep 0.5
 
 # Click on customers table in the sidebar
-click_ref 45 169
-sleep 1.5
+open_table customers
 
 capture_screenshot "02-table-browser" "Table browser with data grid"
 
@@ -228,10 +281,13 @@ sleep 1
 click_ref 400 200
 sleep 0.3
 
+# Replace anything already in the editor, then type the query on one line
+osascript -e 'tell application "System Events" to keystroke "a" using {command down}' 2>/dev/null || true
+sleep 0.2
 # Type query on one line (will be beautified)
 osascript <<'EOF'
 tell application "System Events"
-  keystroke "SELECT o.order_number, c.full_name AS customer, o.status, o.total_cents / 100.0 AS total, COUNT(oi.id) AS items FROM orders o JOIN customers c ON c.id = o.customer_id JOIN order_items oi ON oi.order_id = o.id GROUP BY o.id ORDER BY o.created_at DESC LIMIT 20;"
+  keystroke "SELECT o.order_number, c.full_name AS customer, o.status, ROUND(o.total_cents / 100.0, 2) AS total, COUNT(oi.id) AS items FROM orders o JOIN customers c ON c.id = o.customer_id JOIN order_items oi ON oi.order_id = o.id GROUP BY o.id ORDER BY o.created_at DESC LIMIT 20;"
 end tell
 EOF
 sleep 0.5
@@ -243,6 +299,8 @@ sleep 0.8
 # Click Run button
 click_ref 27 133
 sleep 2
+click_ref 600 36
+sleep 0.3
 
 capture_screenshot "03-query-editor" "Query editor with results"
 
@@ -254,9 +312,7 @@ log "=== Screenshot 4: Schema Diagram ==="
 click_ref 175 85
 sleep 2
 
-# Click "2 polymorphic" pill to enable polymorphic edges
-click_ref 396 111
-sleep 0.5
+# (All edge types are switched on through the stored preference set above.)
 
 # Click on empty canvas to remove focus ring from pill
 click_ref 100 400
@@ -277,8 +333,7 @@ click_ref 62 85
 sleep 0.8
 
 # Click on orders table
-click_ref 45 203
-sleep 1.5
+open_table orders
 
 # Click Structure sub-tab
 click_ref 273 134
@@ -299,18 +354,18 @@ if [[ -z "$ONLY_SHOT" ]]; then
   else
     log "Recording demo flow (15 seconds)..."
     
+    # Start the recording from the Connections page so the GIF opens cleanly
+    click_ref 62 36
+    sleep 1.5
+
     # Try to record with screencapture
     if command -v screencapture >/dev/null 2>&1; then
       # Start recording in background
-      screencapture -v "$TEMP_VIDEO" 2>/dev/null &
+      screencapture -v -R"$WINDOW_X,$WINDOW_Y,$WINDOW_WIDTH,$WINDOW_HEIGHT" "$TEMP_VIDEO" 2>/dev/null &
       RECORD_PID=$!
       
       # Perform demo flow
       sleep 1
-      
-      # Go back to connections
-      osascript -e 'tell application "System Events" to keystroke "w" using {command down}' 2>/dev/null || true
-      sleep 1.5
       
       # Open connection again
       click_ref 120 181
@@ -319,19 +374,17 @@ if [[ -z "$ONLY_SHOT" ]]; then
       # Show customers table
       click_ref 62 85
       sleep 0.5
-      click_ref 45 169
+      open_table customers
       sleep 2
       
       # Switch to products
-      click_ref 45 220
+      open_table products
       sleep 2
       
       # Open Diagram
       click_ref 175 85
       sleep 2
       
-      # Toggle polymorphic
-      click_ref 396 111
       sleep 1
       
       # Switch to SQL

@@ -276,6 +276,14 @@ db.run(`
 
 console.log("Schema created. Inserting demo data...");
 
+// Helper to generate realistic timestamps spread across the past 6 months
+const now = Date.now();
+const sixMonthsAgo = now - (180 * 24 * 60 * 60 * 1000);
+const randomTimestamp = () => {
+  const timestamp = sixMonthsAgo + rng.next() * (now - sixMonthsAgo);
+  return new Date(timestamp).toISOString().replace('T', ' ').substring(0, 19);
+};
+
 // Seed data with deterministic random generation
 const firstNames = ["Alice", "Bob", "Carol", "David", "Emma", "Frank", "Grace", "Henry", "Iris", "Jack", 
                     "Kate", "Leo", "Maya", "Noah", "Olivia", "Paul", "Quinn", "Riley", "Sam", "Tara",
@@ -298,8 +306,8 @@ for (let i = 0; i < 50; i++) {
   const phone = `555-${String(rng.nextInt(100, 999)).padStart(3, '0')}-${String(rng.nextInt(1000, 9999)).padStart(4, '0')}`;
   
   const result = db.run(
-    "INSERT INTO customers (email, full_name, phone) VALUES (?, ?, ?)",
-    [email, `${firstName} ${lastName}`, phone]
+    "INSERT INTO customers (email, full_name, phone, created_at) VALUES (?, ?, ?, ?)",
+    [email, `${firstName} ${lastName}`, phone, randomTimestamp()]
   );
   customerIds.push(result.lastInsertRowid);
 }
@@ -369,8 +377,8 @@ for (let i = 0; i < 80; i++) {
   const stock = rng.nextInt(0, 250);
   
   const result = db.run(
-    "INSERT INTO products (sku, name, description, price_cents, stock_quantity, active) VALUES (?, ?, ?, ?, ?, ?)",
-    [sku, name, `High-quality ${name.toLowerCase()} for everyday use`, price, stock, 1]
+    "INSERT INTO products (sku, name, description, price_cents, stock_quantity, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    [sku, name, `High-quality ${name.toLowerCase()} for everyday use`, price, stock, 1, randomTimestamp()]
   );
   productIds.push(result.lastInsertRowid);
 }
@@ -413,6 +421,7 @@ for (let i = 0; i < 150; i++) {
   const orderNum = `ORD-2026-${String(i + 1).padStart(5, '0')}`;
   const status = rng.pick(statuses);
   const numItems = rng.nextInt(1, 5);
+  const orderCreatedAt = randomTimestamp();
   
   // Pick shipping address
   const customerAddresses = addressIds.filter(a => {
@@ -432,8 +441,8 @@ for (let i = 0; i < 150; i++) {
   }
   
   const result = db.run(
-    "INSERT INTO orders (customer_id, order_number, status, total_cents, shipping_address_id) VALUES (?, ?, ?, ?, ?)",
-    [customerId, orderNum, status, total, shippingAddressId]
+    "INSERT INTO orders (customer_id, order_number, status, total_cents, shipping_address_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    [customerId, orderNum, status, total, shippingAddressId, orderCreatedAt]
   );
   const orderId = result.lastInsertRowid;
   orderIds.push(orderId);
@@ -450,17 +459,21 @@ for (let i = 0; i < 150; i++) {
   if (["completed", "shipped", "delivered"].includes(status)) {
     const methods = ["credit_card", "debit_card", "paypal", "apple_pay"];
     db.run(
-      "INSERT INTO payments (order_id, payment_method, amount_cents, status, transaction_id) VALUES (?, ?, ?, ?, ?)",
-      [orderId, rng.pick(methods), total, "completed", `TXN-${rng.nextInt(100000, 999999)}`]
+      "INSERT INTO payments (order_id, payment_method, amount_cents, status, transaction_id, processed_at) VALUES (?, ?, ?, ?, ?, ?)",
+      [orderId, rng.pick(methods), total, "completed", `TXN-${rng.nextInt(100000, 999999)}`, randomTimestamp()]
     );
   }
   
   // Insert shipment for shipped orders
   if (["shipped", "delivered"].includes(status)) {
     const carriers = ["FedEx", "UPS", "USPS", "DHL"];
+    const shipmentCreatedAt = randomTimestamp();
+    const shippedAt = status === "delivered" || status === "shipped" ? randomTimestamp() : null;
+    const deliveredAt = status === "delivered" ? randomTimestamp() : null;
+    
     db.run(
-      "INSERT INTO shipments (order_id, tracking_number, carrier, status) VALUES (?, ?, ?, ?)",
-      [orderId, `TRK${rng.nextInt(1000000000, 9999999999)}`, rng.pick(carriers), status === "delivered" ? "delivered" : "in_transit"]
+      "INSERT INTO shipments (order_id, tracking_number, carrier, status, created_at, shipped_at, delivered_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      [orderId, `TRK${rng.nextInt(1000000000, 9999999999)}`, rng.pick(carriers), status === "delivered" ? "delivered" : "in_transit", shipmentCreatedAt, shippedAt, deliveredAt]
     );
   }
 }
@@ -480,8 +493,8 @@ for (let i = 0; i < 60; i++) {
   const body = rating >= 4 ? "Really happy with this purchase. Quality is excellent." : "It's okay but not what I expected.";
   
   db.run(
-    "INSERT INTO reviews (product_id, customer_id, rating, title, body, verified_purchase) VALUES (?, ?, ?, ?, ?, ?)",
-    [productId, customerId, rating, title, body, rng.nextInt(0, 1)]
+    "INSERT INTO reviews (product_id, customer_id, rating, title, body, verified_purchase, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    [productId, customerId, rating, title, body, rng.nextInt(0, 1), randomTimestamp()]
   );
 }
 
@@ -513,8 +526,8 @@ for (let i = 0; i < 40; i++) {
   ];
   
   db.run(
-    "INSERT INTO comments (commentable_type, commentable_id, author_name, body) VALUES (?, ?, ?, ?)",
-    [type, id, rng.pick(commentAuthors), rng.pick(bodies)]
+    "INSERT INTO comments (commentable_type, commentable_id, author_name, body, created_at) VALUES (?, ?, ?, ?, ?)",
+    [type, id, rng.pick(commentAuthors), rng.pick(bodies), randomTimestamp()]
   );
 }
 
@@ -538,8 +551,8 @@ for (let i = 0; i < 30; i++) {
   }
   
   db.run(
-    "INSERT INTO attachments (attachable_type, attachable_id, filename, file_size, mime_type) VALUES (?, ?, ?, ?, ?)",
-    [type, id, rng.pick(filenames), rng.nextInt(50000, 2000000), rng.pick(mimeTypes)]
+    "INSERT INTO attachments (attachable_type, attachable_id, filename, file_size, mime_type, uploaded_at) VALUES (?, ?, ?, ?, ?, ?)",
+    [type, id, rng.pick(filenames), rng.nextInt(50000, 2000000), rng.pick(mimeTypes), randomTimestamp()]
   );
 }
 

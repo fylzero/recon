@@ -211,22 +211,49 @@ The GIF recording is optional. If it fails, the script continues and produces th
 
 ## Technical Details
 
+### WebView localStorage Isolation
+
+**Important discovery:** The app's webview stores UI state (open tabs, query editor content, diagram preferences) in the **real user's WebKit localStorage** at `~/Library/WebKit/com.recon.app/`, **not** under the redirected `HOME`. This means the isolated `HOME` environment doesn't fully isolate the webview state.
+
+**Solution:** The script includes `localstorage.py`, which:
+1. **Purges demo-only keys** before and after each run (anything containing "demo-connection")
+2. **Saves the user's diagram preference** (`recon.diagramLinks`) before the capture
+3. **Sets all edge types on** (`{"foreign":true,"morph":true,"missing":true}`) for the diagram screenshot
+4. **Restores the original preference** on exit (even if the script fails)
+
+This ensures:
+- Earlier capture runs don't leak open tabs or editor text into screenshots
+- The user's real diagram preferences are never permanently changed
+- Demo data never pollutes the user's real WebKit storage
+
 ### Coordinate-Based Clicking
 
 The app's UI is a webview, so accessibility-based clicking doesn't work. Instead, the script uses screen coordinate clicking via `osascript -e 'tell application "System Events" to click at {X,Y}'`.
 
 Coordinates are defined relative to a 1024×640 reference window (the 2x retina capture downscaled):
 - Reference coordinates are converted to screen coordinates: `screen_x = 100 + ref_x * 1440 / 1024`
-- The window must be frontmost before clicking: `set frontmost of process "Recon" to true`
+- **The window must be frontmost before clicking**, and `click_ref` waits until Recon is actually frontmost (up to 10 retries)
+- **Warm-up clicks:** The first click after launch only activates the window and is swallowed, so the script clicks an empty area twice before real navigation
 - AppleScript stderr contains harmless `-25208` errors that name the clicked element; these are ignored
 
 **Verified click targets on Recon 1.9.0:**
 - Connection list row 'Demo Store': (120, 181)
 - Tabs: Tables (62, 85), SQL (120, 85), Diagram (175, 85)
-- Table sidebar rows at x=45: attachments 135, comments 152, customers 169, order_items 186, orders 203, products 220
+- Table sidebar filter box: (92, 111), clear button: (167, 111), first table row: (45, 135)
 - Data/Structure/Indexes sub-tabs: Data (219, 134), Structure (273, 134)
 - Diagram pills: '2 foreign keys' (305, 111), '2 polymorphic' (396, 111), '1 missing key' (476, 111), Fit (952, 111)
 - SQL editor: editor area (400, 200), Beautify (926, 133), Run (27, 133)
+
+### Table Navigation with Sidebar Filter
+
+The `open_table` helper uses the sidebar filter to navigate to tables by name (instead of relying on fixed table positions):
+1. Click the filter box
+2. Type the table name
+3. Click the first match
+4. Clear the filter so the full table list shows with the selected table highlighted
+5. Click empty sidebar space to remove the filter box focus ring
+
+This approach is more robust than clicking fixed sidebar coordinates if table order changes.
 
 ### Window ID Detection
 
@@ -240,13 +267,21 @@ l.filter(w=>w.kCGWindowOwnerName=="Recon"&&w.kCGWindowLayer==0).map(w=>w.kCGWind
 
 The window ID is queried twice: once after launch, and again after resizing (the ID can change).
 
+### Video Recording
+
+The demo GIF is recorded with `screencapture -v -R<x,y,width,height>`, which records **only the window rectangle** (not the entire screen). This ensures the recording never captures unrelated windows or desktop content.
+
 ### Safe Instance Management
 
-The script only kills the demo Recon instance it launched (by remembering its PID). If a non-demo Recon is already running when the script starts, it warns and exits rather than risking killing the wrong instance.
+**The script refuses to run if Recon is already open.** It checks for running `Recon.app` instances at startup and exits with a warning rather than risking killing the user's real instance. It only tracks and kills the demo instance it launches (by PID).
 
-### Permission Detection
+### Required Permissions
 
-After each `screencapture -l` call, the script checks that the command exited 0 and the file exists. If not, it prints instructions to grant Screen Recording permission in System Settings → Privacy & Security.
+The script requires **two permissions** for the terminal app running it:
+1. **Screen Recording** — for `screencapture -l` (screenshots) and `screencapture -v` (video)
+2. **Accessibility** — for `osascript` coordinate clicking and window control
+
+After each `screencapture -l` call, the script checks that the command exited 0 and the file exists. If not, it prints instructions to grant permissions in System Settings → Privacy & Security.
 
 ## Additional Technical Notes
 
