@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useApp } from "../composables/useApp";
 import { useConnectionForm } from "../composables/useConnectionForm";
 import { useDashboardDrag } from "../composables/useDashboardDrag";
@@ -56,14 +56,51 @@ const drag = useDashboardDrag({
   onError: (err) => showToast(String(err), "error"),
 });
 
+const SEARCH_MIN_CONNECTIONS = 6;
+
+const query = ref("");
+const searchInput = ref<HTMLInputElement | null>(null);
+const showSearch = computed(() => connectionById.value.size >= SEARCH_MIN_CONNECTIONS);
+const searchTerms = computed(() =>
+  showSearch.value ? query.value.trim().toLowerCase().split(/\s+/).filter(Boolean) : [],
+);
+
+watch(showSearch, (shown) => {
+  if (!shown) {
+    query.value = "";
+  }
+});
+const filtering = computed(() => searchTerms.value.length > 0);
+
+function matchesSearch(...fields: (string | undefined)[]) {
+  const haystack = fields.filter(Boolean).join(" ").toLowerCase();
+  return searchTerms.value.every((term) => haystack.includes(term));
+}
+
+function connectionMatches(connection: ConnectionEntry, groupName?: string) {
+  return matchesSearch(
+    groupName,
+    connection.name,
+    connection.host,
+    connection.database,
+    connection.filePath,
+  );
+}
+
 const entries = computed(() =>
   drag.rootIds(dashboardIds.value).flatMap((id): DashboardEntry[] => {
     const group = groupById.value.get(id);
     if (group) {
+      if (filtering.value && !matchesSearch(group.name) && !groupConnections(group).length) {
+        return [];
+      }
       return [{ kind: "group", id, group }];
     }
     const connection = connectionById.value.get(id);
-    return connection ? [{ kind: "connection", id, connection }] : [];
+    if (!connection || (filtering.value && !connectionMatches(connection))) {
+      return [];
+    }
+    return [{ kind: "connection", id, connection }];
   }),
 );
 const topLevelConnectionIds = computed(() =>
@@ -72,14 +109,70 @@ const topLevelConnectionIds = computed(() =>
 
 function groupConnections(group: ConnectionGroup) {
   const ids = drag.groupItemIds(group.id);
-  if (!ids) {
-    return group.connections;
-  }
-  return ids.flatMap((id) => {
-    const entry = connectionById.value.get(id);
-    return entry ? [entry] : [];
-  });
+  const connections = ids
+    ? ids.flatMap((id) => {
+        const entry = connectionById.value.get(id);
+        return entry ? [entry] : [];
+      })
+    : group.connections;
+  return filtering.value
+    ? connections.filter((connection) => connectionMatches(connection, group.name))
+    : connections;
 }
+
+const totalConnectionCount = computed(() => connectionById.value.size);
+const visibleConnectionCount = computed(() =>
+  entries.value.reduce(
+    (count, entry) =>
+      count + (entry.kind === "connection" ? 1 : groupConnections(entry.group).length),
+    0,
+  ),
+);
+
+function clearSearch() {
+  query.value = "";
+  searchInput.value?.focus();
+}
+
+function onSearchKeydown(event: KeyboardEvent) {
+  if (event.key !== "Escape") {
+    return;
+  }
+  event.stopPropagation();
+  if (query.value) {
+    query.value = "";
+    return;
+  }
+  searchInput.value?.blur();
+}
+
+function typingElsewhere(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement) || target === searchInput.value) {
+    return false;
+  }
+  return target.isContentEditable || target.closest("input, textarea, select") !== null;
+}
+
+function onKeydown(event: KeyboardEvent) {
+  if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "f") {
+    return;
+  }
+  // The dashboard stays mounted behind connection tabs; only respond while it's visible.
+  if (!searchInput.value?.offsetParent || typingElsewhere(event.target)) {
+    return;
+  }
+  event.preventDefault();
+  searchInput.value?.focus();
+  searchInput.value?.select();
+}
+
+onMounted(() => {
+  window.addEventListener("keydown", onKeydown);
+});
+
+onUnmounted(() => {
+  window.removeEventListener("keydown", onKeydown);
+});
 
 const isEmpty = computed(() => !dashboardIds.value.length);
 const hasGroups = computed(() => groups.value.length > 0);
@@ -128,6 +221,39 @@ async function sortAlphabetically() {
             </button>
           </div>
           <div class="toolbar-end">
+            <span v-if="filtering" class="muted tiny groups-search-count">
+              {{ visibleConnectionCount }} of {{ totalConnectionCount }}
+            </span>
+            <label v-if="showSearch" class="groups-search-field">
+              <span class="sr-only">Filter connections</span>
+              <svg class="database-menu-search-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"
+                />
+              </svg>
+              <input
+                ref="searchInput"
+                v-model="query"
+                type="text"
+                placeholder="Filter connections"
+                autocapitalize="off"
+                autocorrect="off"
+                autocomplete="off"
+                spellcheck="false"
+                @keydown="onSearchKeydown"
+              />
+              <button
+                v-if="query"
+                class="database-menu-search-clear"
+                type="button"
+                title="Clear search"
+                @click="clearSearch"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M6 18 18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </label>
             <button
               v-if="hasGroups"
               class="ghost"
@@ -161,6 +287,9 @@ async function sortAlphabetically() {
         <p v-if="isEmpty && !creating" class="muted">
           Add a MySQL, PostgreSQL, or SQLite connection. Groups keep related connections together.
         </p>
+        <p v-else-if="filtering && !entries.length" class="muted tiny">
+          No connections match that search.
+        </p>
 
         <div
           class="groups-list"
@@ -179,10 +308,11 @@ async function sortAlphabetically() {
               v-if="entry.kind === 'group'"
               :data-dashboard-id="entry.id"
               :group="entry.group"
-              :sortable="canSortEntries"
+              :sortable="canSortEntries && !filtering"
               :dragging="drag.draggingGroupId.value === entry.id"
               :connections="groupConnections(entry.group)"
-              :connections-sortable="canDragConnections"
+              :connections-sortable="canDragConnections && !filtering"
+              :force-expanded="filtering"
               :dragging-connection-id="drag.draggingItemId.value"
               :drop-target="drag.dropGroupId.value === entry.id"
               @reorder-start="(event, id) => drag.start(event, 'group', id)"
@@ -195,7 +325,7 @@ async function sortAlphabetically() {
               :group-id="null"
               :sibling-ids="topLevelConnectionIds"
               flush
-              :sortable="canDragConnections"
+              :sortable="canDragConnections && !filtering"
               :dragging="drag.draggingItemId.value === entry.id"
               @reorder-start="(event, id) => drag.start(event, 'item', id)"
             />

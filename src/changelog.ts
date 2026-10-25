@@ -6,6 +6,17 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.9.0",
+    date: "October 25, 2026",
+    notes: [
+      "The Connections screen has a search field next to Expand, Collapse, and Sort A–Z once you have six or more connections. Type part of a connection name, host, database, SQLite file path, or group name to filter the list, or press Command-F to jump to it.",
+      "Each word you type has to match, so typing a group name and a connection name finds that connection inside that group. Typing just a group name shows the whole group.",
+      "While you're searching, groups with matches open on their own, and groups without matches are hidden. Your groups go back to how you left them when you clear the search.",
+      "Dragging to reorder is turned off while you're searching.",
+      "When there isn't room for the whole toolbar, the Expand, Collapse, and Sort A–Z buttons move to a second line.",
+    ],
+  },
+  {
     version: "1.8.1",
     date: "October 13, 2026",
     notes: [
