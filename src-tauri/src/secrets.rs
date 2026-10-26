@@ -13,9 +13,10 @@ fn entry(connection_id: &str) -> Result<Entry, String> {
 }
 
 /**
- * A Linux desktop without a Secret Service has nothing saved, so reads and
- * deletes succeed there and only saving a password reports the error. A locked
- * or dismissed keyring is NoStorageAccess and still surfaces.
+ * A Linux desktop without a Secret Service, or whose Secret Service has no
+ * default keyring, has nothing saved, so reads and deletes succeed there and
+ * only saving a password reports the error. A locked or dismissed keyring is
+ * NoStorageAccess and still surfaces.
  */
 #[cfg(target_os = "macos")]
 fn store_missing(_err: &keyring::Error) -> bool {
@@ -24,7 +25,23 @@ fn store_missing(_err: &keyring::Error) -> bool {
 
 #[cfg(not(target_os = "macos"))]
 fn store_missing(err: &keyring::Error) -> bool {
-    matches!(err, keyring::Error::PlatformFailure(_))
+    matches!(err, keyring::Error::PlatformFailure(_)) || no_default_keyring(err)
+}
+
+#[cfg(target_os = "linux")]
+fn no_default_keyring(err: &keyring::Error) -> bool {
+    match err {
+        keyring::Error::NoStorageAccess(inner) => matches!(
+            inner.downcast_ref::<dbus_secret_service::Error>(),
+            Some(dbus_secret_service::Error::NoResult)
+        ),
+        _ => false,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn no_default_keyring(_err: &keyring::Error) -> bool {
+    false
 }
 
 pub fn get(connection_id: &str) -> Result<Option<String>, String> {
@@ -39,9 +56,14 @@ pub fn get(connection_id: &str) -> Result<Option<String>, String> {
 }
 
 pub fn set(connection_id: &str, password: &str) -> Result<(), String> {
-    entry(connection_id)?
-        .set_password(password)
-        .map_err(|err| format!("Could not save the password to the {STORE}: {err}"))
+    entry(connection_id)?.set_password(password).map_err(|err| {
+        if no_default_keyring(&err) {
+            return format!(
+                "Could not save the password because the {STORE} has no default keyring. Set one as the default in Passwords and Keys, then try again."
+            );
+        }
+        format!("Could not save the password to the {STORE}: {err}")
+    })
 }
 
 pub fn delete(connection_id: &str) -> Result<(), String> {

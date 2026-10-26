@@ -1,6 +1,6 @@
 [package]
 name = "Recon"
-version = "1.10.0"
+version = "1.10.1"
 description = "A local-first database client"
 authors = ["RazorKode LLC"]
 license = "MIT"
@@ -41,6 +41,7 @@ keyring = { version = "3", features = ["apple-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+dbus-secret-service = "4"
 
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }

@@ -6,6 +6,14 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.10.1",
+    date: "October 26, 2026",
+    notes: [
+      "On Linux, connecting to a SQLite database, or any connection without a saved password, no longer fails with Could not remove the password from the system keyring when your keyring has no default keyring set.",
+      "Saving a password in that case now explains what's wrong: set a keyring as the default in Passwords and Keys, then try again.",
+    ],
+  },
+  {
     version: "1.10.0",
     date: "October 26, 2026",
     notes: [
