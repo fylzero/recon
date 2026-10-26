@@ -3,6 +3,7 @@ import type { SQLNamespace } from "@codemirror/lang-sql";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { computed, nextTick, onUnmounted, ref, watch } from "vue";
 import { useApp } from "../composables/useApp";
+import { shortcut } from "../platform";
 import { exportSqlFile } from "../transfer";
 import type { Driver, SavedQuery } from "../types";
 import SqlCode from "./SqlCode.vue";
@@ -363,7 +364,7 @@ defineExpose({ isEditing, saveEdits });
     <section v-if="selected && isEditing && editing" class="saved-query-detail">
       <form class="saved-query-edit" @submit.prevent="saveEdits" @keydown.esc="onEditEscape">
         <div class="pane-toolbar">
-          <button class="primary tiny" type="submit" :disabled="saving" title="Save changes (⌘S)">
+          <button class="primary tiny" type="submit" :disabled="saving" :title="`Save changes (${shortcut('⌘S')})`">
             {{ saving ? "Saving…" : "Save" }}
           </button>
           <button class="ghost tiny" type="button" :disabled="saving" @click="cancelEditing">Cancel</button>

@@ -10,6 +10,10 @@ use tokio::sync::OnceCell;
 /// The system OpenSSH, since apps opened from Finder don't get the shell's PATH.
 pub const SSH: &str = "/usr/bin/ssh";
 const FALLBACK_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+#[cfg(target_os = "macos")]
+const FALLBACK_SHELL: &str = "/bin/zsh";
+#[cfg(not(target_os = "macos"))]
+const FALLBACK_SHELL: &str = "/bin/sh";
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_INCLUDE_DEPTH: usize = 8;
 /// What `ssh -G` lists when a host sets no IdentityFile of its own.
@@ -151,11 +155,14 @@ static LOGIN_PATH: OnceCell<String> = OnceCell::const_new();
  * and kept apart from the proxy's own output, where a profile that prints
  * something would corrupt the SSH stream.
  */
+pub fn user_shell() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| FALLBACK_SHELL.into())
+}
+
 pub async fn login_path() -> &'static str {
     LOGIN_PATH
         .get_or_init(|| async {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-            let run = Command::new(shell)
+            let run = Command::new(user_shell())
                 .args(["-lc", "printf '\\n%s' \"$PATH\""])
                 .stdin(Stdio::null())
                 .stderr(Stdio::null())

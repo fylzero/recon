@@ -5,6 +5,7 @@ export type DiagramScope = "schema" | "selection";
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import * as api from "../api";
+import { shortcut } from "../platform";
 import type { SchemaDiagram } from "../types";
 import Modal from "./Modal.vue";
 import {
@@ -310,7 +311,7 @@ const emptyMessage = computed(() => {
     return "This schema has no tables.";
   }
   if (props.scope === "selection" && !props.selected.length) {
-    return "No tables selected. Pick tables in the table list (⌘B shows or hides it). ⌘-click adds more and ⇧-click selects a range.";
+    return `No tables selected. Pick tables in the table list (${shortcut("⌘B")} shows or hides it). ${shortcut("⌘")}-click adds more and ${shortcut("⇧")}-click selects a range.`;
   }
   if (!layout.value?.nodes.length) {
     return "The selected tables aren't in this schema.";
@@ -693,7 +694,7 @@ function centerOn(node: DiagramNode | undefined) {
             :class="{ on: shown[chip.kind] }"
             type="button"
             :aria-pressed="shown[chip.kind]"
-            :title="`${chip.title}. Click to show or hide, ⌥-click to show only these.`"
+            :title="`${chip.title}. Click to show or hide, ${shortcut('⌥')}-click to show only these.`"
             @click="toggleLinks(chip.kind, $event)"
           >
             <svg class="diagram-link-swatch" width="18" height="6" aria-hidden="true">

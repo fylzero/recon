@@ -20,6 +20,7 @@ import {
   sanitizeFilter,
   type TableViewState,
 } from "../filters/model";
+import { shortcut } from "../platform";
 import { isTabularFile } from "../transfer";
 import {
   driverLabel,
@@ -2811,7 +2812,7 @@ onUnmounted(() => {
             <button
               class="primary tiny"
               type="button"
-              title="Save changes in every table (⌘S)"
+              :title="`Save changes in every table (${shortcut('⌘S')})`"
               :disabled="saving"
               @click="saveAll"
             >

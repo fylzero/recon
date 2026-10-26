@@ -42,6 +42,7 @@ import {
   type TableViewState,
 } from "../filters/model";
 import { convertValue, DEFAULT_OPERATOR } from "../filters/operators";
+import { ariaModifier, shortcut } from "../platform";
 import type {
   BrowseRequest,
   BrowseResult,
@@ -1740,8 +1741,8 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         type="button"
         :aria-pressed="view.panelOpen && mode === 'data'"
         :aria-label="filterActive ? `Filter: ${filterSummaryText || 'rows'}` : 'Filter rows'"
-        aria-keyshortcuts="Meta+Shift+F"
-        :title="summaryVisible ? undefined : view.panelOpen && mode === 'data' ? 'Hide filters (⇧⌘F)' : 'Filter rows (⇧⌘F)'"
+        :aria-keyshortcuts="`${ariaModifier}+Shift+F`"
+        :title="summaryVisible ? undefined : `${view.panelOpen && mode === 'data' ? 'Hide filters' : 'Filter rows'} (${shortcut('⇧⌘F')})`"
         @click="togglePanel"
         @mouseenter="showSummaryPopover"
         @mouseleave="hideSummaryPopover"
@@ -1796,9 +1797,9 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
           <button
             class="ghost tiny refresh-main"
             type="button"
-            :title="refreshing ? 'Loading…' : 'Refresh (⌘R)'"
+            :title="refreshing ? 'Loading…' : `Refresh (${shortcut('⌘R')})`"
             :aria-label="refreshing ? 'Loading' : 'Refresh'"
-            aria-keyshortcuts="Meta+R"
+            :aria-keyshortcuts="`${ariaModifier}+R`"
             :disabled="refreshing"
             @click="refresh"
           >
@@ -2031,7 +2032,7 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         @contextmenu.prevent
       >
         <template v-if="cellMenu || rowMenu">
-          <button class="overflow-menu-item" type="button" role="menuitem" aria-keyshortcuts="Meta+C" @click="copyFromMenu('tsv')">
+          <button class="overflow-menu-item" type="button" role="menuitem" :aria-keyshortcuts="`${ariaModifier}+C`" @click="copyFromMenu('tsv')">
             Copy
           </button>
           <button class="overflow-menu-item" type="button" role="menuitem" @click="copyFromMenu('csv')">
@@ -2138,7 +2139,7 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
       :preview="filterPreview"
       :count="filterCount"
       :anchor="summaryAnchor"
-      :hint="filterError || 'Click to edit filters (⇧⌘F)'"
+      :hint="filterError || `Click to edit filters (${shortcut('⇧⌘F')})`"
     />
     <Modal v-if="customRefresh" title="Auto refresh" @close="customRefresh = false">
       <form @submit.prevent="applyCustomRefresh" @keydown.enter.prevent="applyCustomRefresh">

@@ -23,6 +23,7 @@ import {
   previewPanelFraction,
   savePanelFraction,
 } from "../filters/panelSize";
+import { shortcut } from "../platform";
 import FilterGroupEditor from "./FilterGroupEditor.vue";
 
 const props = defineProps<{
@@ -296,7 +297,7 @@ defineExpose({ focus, add, reveal });
           class="primary tiny"
           type="button"
           :disabled="!unapplied"
-          title="Apply filters (⌘↵)"
+          :title="`Apply filters (${shortcut('⌘↵')})`"
           @click="emit('apply')"
         >
           Apply

@@ -60,9 +60,9 @@ body:
   - type: input
     id: macos
     attributes:
-      label: macOS Version
-      description: Which version of macOS are you running?
-      placeholder: "macOS 14.2 (Sonoma)"
+      label: Operating System
+      description: Your macOS version, or your Linux distro, version, and desktop
+      placeholder: "macOS 14.2 (Sonoma) or Ubuntu 24.04 (GNOME)"
     validations:
       required: true
 
@@ -93,7 +93,7 @@ body:
       label: Error Messages or Logs
       description: |
         Any error messages, stack traces, or relevant console output.
-        You can run Recon from Terminal to see console logs: `/Applications/Recon.app/Contents/MacOS/Recon`
+        You can run Recon from Terminal to see console logs: `/Applications/Recon.app/Contents/MacOS/Recon` on macOS, or by running the AppImage or the installed `Recon` command from a terminal on Linux
       render: shell
 
   - type: textarea

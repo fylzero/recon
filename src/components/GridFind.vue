@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 import type { GridFind } from "../composables/useGridFind";
+import { ariaModifier, shortcut } from "../platform";
 
 const props = defineProps<{
   find: GridFind;
@@ -73,9 +74,9 @@ function onKeydown(event: KeyboardEvent) {
     <button
       class="ghost tiny grid-find-button"
       type="button"
-      title="Previous match (⇧⌘G)"
+      :title="`Previous match (${shortcut('⇧⌘G')})`"
       aria-label="Previous match"
-      aria-keyshortcuts="Meta+Shift+G"
+      :aria-keyshortcuts="`${ariaModifier}+Shift+G`"
       :disabled="!count"
       @click="find.step(-1)"
     >
@@ -86,9 +87,9 @@ function onKeydown(event: KeyboardEvent) {
     <button
       class="ghost tiny grid-find-button"
       type="button"
-      title="Next match (⌘G)"
+      :title="`Next match (${shortcut('⌘G')})`"
       aria-label="Next match"
-      aria-keyshortcuts="Meta+G"
+      :aria-keyshortcuts="`${ariaModifier}+G`"
       :disabled="!count"
       @click="find.step(1)"
     >

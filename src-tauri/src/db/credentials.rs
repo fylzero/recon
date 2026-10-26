@@ -144,8 +144,7 @@ pub async fn fetch(entry: &ConnectionEntry) -> Result<String, String> {
         }
         PasswordSource::AwsIam => (aws_command(aws_args(entry)), "The AWS CLI"),
         PasswordSource::Command => {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-            let mut command = Command::new(shell);
+            let mut command = Command::new(ssh_config::user_shell());
             command
                 .args(["-c", &entry.password_command])
                 .env("RECON_DB_HOST", &entry.host)

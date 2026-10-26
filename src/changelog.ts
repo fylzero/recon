@@ -6,6 +6,15 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.10.0",
+    date: "October 26, 2026",
+    notes: [
+      "Recon now runs on Linux. Download the AppImage, .deb, or .rpm for x64 or ARM64 from the README or the release page. Help → Check for Updates… keeps each one current, and the .deb and .rpm ask for your password to install an update.",
+      "On Linux, saved passwords go to the system keyring (GNOME Keyring or KDE Wallet) and Show in File Manager opens your desktop's file manager. Without a keyring, turn off Save password and Recon asks for it each time you connect.",
+      "Shortcut hints on Linux read Ctrl, Shift, and Alt, such as Ctrl+Enter to run a statement, instead of ⌘, ⇧, and ⌥.",
+    ],
+  },
+  {
     version: "1.9.0",
     date: "October 25, 2026",
     notes: [

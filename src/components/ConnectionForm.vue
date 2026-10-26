@@ -7,6 +7,7 @@ import { DEFAULT_HEADER_COLOR } from "../color";
 import { useApp } from "../composables/useApp";
 import { useConnectionForm } from "../composables/useConnectionForm";
 import { useTabs } from "../composables/useTabs";
+import { secretStoreFullName, secretStoreName } from "../platform";
 import {
   DEFAULT_SSH_PORT,
   DRIVER_OPTIONS,
@@ -214,7 +215,7 @@ const sshSecretLabel = computed(() => (sshAuth.value === "key" ? "Key passphrase
 
 const sshSecretPlaceholder = computed(() => {
   if (hasSavedSshSecret.value) {
-    return "Saved in Keychain";
+    return `Saved in ${secretStoreName}`;
   }
   return sshAuth.value === "key" ? "Leave empty if the key has none" : "Password";
 });
@@ -223,7 +224,7 @@ const passwordPlaceholder = computed(() => {
   if (!savePassword.value) {
     return "Asked for each time you connect";
   }
-  return hasSavedPassword.value ? "Saved in Keychain" : "Password";
+  return hasSavedPassword.value ? `Saved in ${secretStoreName}` : "Password";
 });
 
 watch(driver, (next, previous) => {
@@ -666,7 +667,7 @@ async function submit(connectAfter: boolean) {
             </label>
             <label class="checkbox-row span-2">
               <input v-model="savePassword" type="checkbox" />
-              <span>Save password in the macOS Keychain</span>
+              <span>Save password in the {{ secretStoreFullName }}</span>
             </label>
           </template>
           <template v-else-if="passwordSource === 'aws-iam'">
@@ -888,7 +889,7 @@ async function submit(connectAfter: boolean) {
                   v-model="sshPassword"
                   type="password"
                   autocomplete="new-password"
-                  :placeholder="hasSavedSshPassword ? 'Saved in Keychain' : 'Password'"
+                  :placeholder="hasSavedSshPassword ? `Saved in ${secretStoreName}` : 'Password'"
                 />
               </label>
             </template>

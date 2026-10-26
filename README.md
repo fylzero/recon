@@ -5,22 +5,32 @@
 <h1 align="center">Recon</h1>
 
 <p align="center">
-  A local-first database client for macOS. Connect to MySQL, PostgreSQL, and SQLite with built-in drivers—no additional software required. Your credentials stay secure in the macOS Keychain.
+  A local-first database client for macOS and Linux. Connect to MySQL, PostgreSQL, and SQLite with built-in drivers—no additional software required. Your credentials stay secure in the macOS Keychain or the Linux system keyring.
 </p>
 
 <p align="center">
   <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-macos-arm64.dmg"><img src="docs/download-macos.svg" alt="Download Recon for macOS" height="56"></a>
+  <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-linux-x64.AppImage"><img src="docs/download-linux.svg" alt="Download Recon for Linux" height="56"></a>
   <a href="https://buymeacoffee.com/fylzero1"><img src="docs/buy-me-a-coffee.svg" alt="Buy me a coffee" height="56"></a>
+</p>
+
+<p align="center">
+  Other Linux downloads:
+  <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-linux-x64.deb">.deb</a> ·
+  <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-linux-x64.rpm">.rpm</a> ·
+  ARM64 <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-linux-arm64.AppImage">AppImage</a>,
+  <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-linux-arm64.deb">.deb</a>,
+  <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-linux-arm64.rpm">.rpm</a>
 </p>
 
 ## About
 
-Recon is an open-source database client for macOS, built with Tauri, Vue, and Rust. It works with MySQL, PostgreSQL, and SQLite databases without separate database drivers or command-line tools.
+Recon is an open-source database client for macOS and Linux, built with Tauri, Vue, and Rust. It works with MySQL, PostgreSQL, and SQLite databases without separate database drivers or command-line tools.
 
 **Key characteristics:**
 
 - **Open source**: Free to use and modify under the MIT license
-- **Privacy-focused**: Database credentials stored exclusively in the macOS Keychain
+- **Privacy-focused**: Database credentials stored exclusively in the macOS Keychain or the Linux system keyring
 - **No external dependencies**: MySQL, PostgreSQL, and SQLite drivers compiled directly into the app
 - **Local-first**: All connections and queries run locally on your machine
 - **Native app**: A Tauri shell with a Rust backend, not a bundled browser
@@ -29,7 +39,7 @@ Recon is an open-source database client for macOS, built with Tauri, Vue, and Ru
 
 **Connection Management**
 - Multiple database connections with organized grouping
-- Secure password storage in macOS Keychain
+- Secure password storage in the macOS Keychain or the Linux system keyring
 - SSH tunnel support for remote databases
 - SSL/TLS encryption for MySQL and PostgreSQL
 - AWS IAM authentication support
@@ -78,7 +88,25 @@ Download the latest release:
 
 **[⬇️ Download Recon for macOS (Apple Silicon)](https://github.com/fylzero/recon/releases/latest/download/Recon-macos-arm64.dmg)**
 
-Current builds are **Apple Silicon only**. Releases are signed with a Developer ID certificate and notarized by Apple.
+Current macOS builds are **Apple Silicon only**. Releases are signed with a Developer ID certificate and notarized by Apple.
+
+### Linux (x64 and ARM64)
+
+**[⬇️ Download Recon for Linux (AppImage, x64)](https://github.com/fylzero/recon/releases/latest/download/Recon-linux-x64.AppImage)**
+
+Pick one package. Each one updates itself from **Help → Check for Updates…**; the `.deb` and `.rpm` ask for your password to install the update.
+
+| Package | Install |
+| --- | --- |
+| [AppImage](https://github.com/fylzero/recon/releases/latest/download/Recon-linux-x64.AppImage) (any distro) | `chmod +x Recon-linux-x64.AppImage`, then run it |
+| [.deb](https://github.com/fylzero/recon/releases/latest/download/Recon-linux-x64.deb) (Debian, Ubuntu, Mint) | `sudo apt install ./Recon-linux-x64.deb` |
+| [.rpm](https://github.com/fylzero/recon/releases/latest/download/Recon-linux-x64.rpm) (Fedora, RHEL, openSUSE) | `sudo dnf install ./Recon-linux-x64.rpm` |
+
+Use the `arm64` files on ARM machines. Recon needs WebKitGTK 4.1, which the `.deb` and `.rpm` install for you and Ubuntu 22.04, Debian 12, Fedora 36, and newer include.
+
+Saved passwords go to the Secret Service keyring, which GNOME Keyring and KDE Wallet both provide. On a desktop without one, turn off **Save password** and Recon asks for the password each time you connect.
+
+SSH tunnels use `/usr/bin/ssh` and HTTPS certificate downloads use `/usr/bin/curl`, so install `openssh-client` and `curl` if your distro leaves them out.
 
 ## Screenshots
 
@@ -88,7 +116,7 @@ Current builds are **Apple Silicon only**. Releases are signed with a Developer 
   <img src="docs/screenshots/01-connections.png" alt="Connection dashboard with grouped connections" width="100%">
 </p>
 
-Organize database connections into groups with custom colors. All credentials are stored securely in the macOS Keychain.
+Organize database connections into groups with custom colors. All credentials are stored securely in the macOS Keychain or the Linux system keyring.
 
 ### Table Browser
 
@@ -130,7 +158,7 @@ Inspect and modify table structure including columns, data types, indexes, and f
 
 ## Development
 
-Recon is built with [Tauri](https://v2.tauri.app/)—a Vue.js frontend with a Rust native backend. To build and run from source, you'll need **Bun**, **Rust**, and **Xcode Command Line Tools**.
+Recon is built with [Tauri](https://v2.tauri.app/)—a Vue.js frontend with a Rust native backend. To build and run from source, you'll need **Bun**, **Rust**, and a C toolchain: **Xcode Command Line Tools** on macOS, or the **WebKitGTK** development packages on Linux.
 
 ### Prerequisites
 
@@ -141,9 +169,9 @@ git clone https://github.com/fylzero/recon.git
 cd recon
 ```
 
-#### 2. Xcode Command Line Tools
+#### 2. Native build tools
 
-These provide the C/C++ compiler that Rust uses on macOS.
+**macOS:** Xcode Command Line Tools provide the C/C++ compiler that Rust uses.
 
 ```bash
 xcode-select --install
@@ -154,6 +182,14 @@ If they're already installed, confirm with:
 ```bash
 xcode-select -p
 ```
+
+**Linux:** install a compiler, WebKitGTK, and the D-Bus headers the keyring uses. On Debian or Ubuntu:
+
+```bash
+sudo apt install build-essential curl libwebkit2gtk-4.1-dev libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev libdbus-1-dev pkg-config
+```
+
+For Fedora, Arch, and other distros, see [Tauri's Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux) and add the D-Bus development package (`dbus-devel` on Fedora, `dbus` on Arch).
 
 #### 3. Bun
 
@@ -203,7 +239,7 @@ Build a production app bundle:
 bun run tauri build
 ```
 
-The build produces:
+On macOS, the build produces:
 
 | Artifact | Path |
 | --- | --- |
@@ -211,6 +247,14 @@ The build produces:
 | Disk image | `src-tauri/target/release/bundle/dmg/Recon_<version>_aarch64.dmg` |
 
 Local builds are ad-hoc signed unless an Apple identity is supplied, so macOS Gatekeeper may warn that the app is unidentified. Right-click the app, choose **Open**, then confirm.
+
+On Linux, the build produces:
+
+| Artifact | Path |
+| --- | --- |
+| AppImage | `src-tauri/target/release/bundle/appimage/Recon_<version>_amd64.AppImage` |
+| Debian package | `src-tauri/target/release/bundle/deb/Recon_<version>_amd64.deb` |
+| RPM package | `src-tauri/target/release/bundle/rpm/Recon-<version>-1.x86_64.rpm` |
 
 ### Running tests
 
@@ -235,12 +279,20 @@ Rust is not installed. Run step 4, open a new terminal, and confirm `command -v 
 **`xcrun: error: invalid active developer path`**  
 Xcode Command Line Tools are missing or stale. Run `xcode-select --install`.
 
+**`The system library 'webkit2gtk-4.1' required by crate 'webkit2gtk-sys' was not found`** (Linux)  
+The WebKitGTK development package is missing. Install the Linux packages from step 2.
+
+**`Could not save the password to the system keyring`** (Linux)  
+No Secret Service is running. Install and unlock GNOME Keyring or KDE Wallet, or turn off **Save password** so Recon asks each time.
+
 **Frontend only (browser, no native APIs)**  
 `bun run dev` serves the Vue app at `http://localhost:1420`. Database connections, dialogs, and other Tauri APIs require `bun run tauri dev`.
 
 ## Publishing signed releases
 
-See [macOS release setup](docs/macos-releases.md) for Apple Developer enrollment, repository secrets, and the code signing and notarization process required by the Release workflow.
+Pushing a `v*` tag runs the Release workflow. It builds and notarizes the macOS app first, then builds the Linux x64 and ARM64 packages and adds them to the same GitHub release.
+
+See [macOS release setup](docs/macos-releases.md) for Apple Developer enrollment, repository secrets, and the code signing and notarization process, and [Linux releases](docs/linux-releases.md) for the Linux packages and how they update.
 
 ## Contributing
 

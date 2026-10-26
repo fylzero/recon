@@ -8,6 +8,7 @@ import { useApp } from "../composables/useApp";
 import { useConnectionForm } from "../composables/useConnectionForm";
 import { useOverflowMenu } from "../composables/useOverflowMenu";
 import { useTabs } from "../composables/useTabs";
+import { fileManagerName, secretStoreName } from "../platform";
 import { driverLabel, type ConnectionEntry } from "../types";
 import DriverIcon from "./DriverIcon.vue";
 
@@ -92,7 +93,7 @@ async function onReveal() {
 async function onRemove() {
   closeMenu();
   const ok = await confirm(
-    `Remove “${props.connection.name}”? Its saved password is removed from the Keychain. The database itself is not touched.`,
+    `Remove “${props.connection.name}”? Its saved password is removed from the ${secretStoreName}. The database itself is not touched.`,
     { title: "Remove connection", kind: "warning", okLabel: "Remove", cancelLabel: "Cancel" },
   );
   if (!ok) {
@@ -178,7 +179,7 @@ async function onRemove() {
           role="menuitem"
           @click.stop="onReveal"
         >
-          Show in Finder
+          Show in {{ fileManagerName }}
         </button>
         <button
           class="overflow-menu-item danger"

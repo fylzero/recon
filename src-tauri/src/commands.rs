@@ -804,6 +804,7 @@ pub fn reveal_path(path: String) -> Result<(), String> {
     reveal_in_finder(Path::new(&path), "file")
 }
 
+#[cfg(target_os = "macos")]
 fn reveal_in_finder(path: &Path, label: &str) -> Result<(), String> {
     let status = std::process::Command::new("open")
         .arg("-R")
@@ -815,6 +816,12 @@ fn reveal_in_finder(path: &Path, label: &str) -> Result<(), String> {
     } else {
         Err(format!("Could not reveal the {label}."))
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn reveal_in_finder(path: &Path, label: &str) -> Result<(), String> {
+    tauri_plugin_opener::reveal_item_in_dir(path)
+        .map_err(|err| format!("Could not reveal the {label}: {err}"))
 }
 
 fn connection_name(state: &AppState, connection_id: &str) -> Result<Option<String>, String> {

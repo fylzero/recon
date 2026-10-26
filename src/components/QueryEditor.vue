@@ -9,6 +9,7 @@ import * as api from "../api";
 import { useApp } from "../composables/useApp";
 import { splitStatements, statementAt } from "../sql";
 import { sqlDialect, sqlEditorTheme, sqlHighlighting } from "../sqlEditor";
+import { ariaModifier, shortcut } from "../platform";
 import { exportSqlFile } from "../transfer";
 import type { Driver, RowValues, StatementResult } from "../types";
 import type { CopyFormat } from "../cells";
@@ -436,7 +437,7 @@ onMounted(() => {
         language.of(languageExtension()),
         sqlEditorTheme,
         sqlHighlighting,
-        placeholder("Write SQL here. ⌘↵ runs the statement under the cursor."),
+        placeholder(`Write SQL here. ${shortcut("⌘↵")} runs the statement under the cursor.`),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
             const text = update.state.doc.toString();
@@ -479,7 +480,7 @@ defineExpose({ insertText, getText, focus, run });
         class="primary tiny"
         type="button"
         :disabled="running"
-        title="Run the statement under the cursor, or the selection (⌘↵)"
+        :title="`Run the statement under the cursor, or the selection (${shortcut('⌘↵')})`"
         @click="run(false)"
       >
         <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -491,7 +492,7 @@ defineExpose({ insertText, getText, focus, run });
         class="ghost tiny"
         type="button"
         :disabled="running"
-        title="Run every statement in the editor (⇧⌘↵)"
+        :title="`Run every statement in the editor (${shortcut('⇧⌘↵')})`"
         @click="run(true)"
       >
         Run all
@@ -517,7 +518,7 @@ defineExpose({ insertText, getText, focus, run });
         <button
           class="ghost tiny"
           type="button"
-          title="Format the SQL with line breaks and indentation, or just the selection (⇧⌥F)"
+          :title="`Format the SQL with line breaks and indentation, or just the selection (${shortcut('⇧⌥F')})`"
           @click="beautify"
         >
           <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -610,7 +611,7 @@ defineExpose({ insertText, getText, focus, run });
         :style="{ left: `${gridMenu.left}px`, top: `${gridMenu.top}px` }"
         @contextmenu.prevent
       >
-        <button class="overflow-menu-item" type="button" role="menuitem" aria-keyshortcuts="Meta+C" @click="copyFromMenu('tsv')">
+        <button class="overflow-menu-item" type="button" role="menuitem" :aria-keyshortcuts="`${ariaModifier}+C`" @click="copyFromMenu('tsv')">
           Copy
         </button>
         <button class="overflow-menu-item" type="button" role="menuitem" @click="copyFromMenu('csv')">

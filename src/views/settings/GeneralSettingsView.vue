@@ -20,6 +20,7 @@ import {
 } from "../../fonts";
 import type { NotificationMode, PreferencesPatch } from "../../types";
 import { NOTIFICATION_MODES } from "../../notifications";
+import { shortcut, systemNotificationsTarget } from "../../platform";
 
 const PAGE_SIZE_OPTIONS = [50, 100, 200, 300, 500];
 const ROW_LIMIT_OPTIONS = [1000, 5000, 10_000, 50_000, 100_000];
@@ -185,7 +186,7 @@ function selectValue(event: Event) {
             <h3>Apply filters automatically</h3>
             <p class="muted tiny">
               Reload the rows as you edit table filters. Turn this off for very large tables to apply
-              filters only when you press Apply or ⌘↵.
+              filters only when you press Apply or {{ shortcut("⌘↵") }}.
             </p>
           </div>
           <label class="settings-control checkbox-row">
@@ -201,7 +202,7 @@ function selectValue(event: Event) {
           <div class="settings-row-copy">
             <h3>System notifications</h3>
             <p class="muted tiny">
-              When to also send results to macOS Notification Center. In background only
+              When to also send results {{ systemNotificationsTarget }}. In background only
               notifies while Recon isn't the active app.
             </p>
           </div>

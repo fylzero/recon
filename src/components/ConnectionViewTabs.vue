@@ -3,6 +3,8 @@ export type ConnectionViewTab = "tables" | "sql" | "diagram" | "history";
 </script>
 
 <script setup lang="ts">
+import { shortcut } from "../platform";
+
 defineProps<{
   active: ConnectionViewTab;
   tableCount: number;
@@ -27,8 +29,8 @@ const emit = defineEmits<{
         listOpen === null
           ? 'No table list in this view'
           : listOpen
-            ? 'Hide the table list (⌘B)'
-            : 'Show the table list (⌘B)'
+            ? `Hide the table list (${shortcut('⌘B')})`
+            : `Show the table list (${shortcut('⌘B')})`
       "
       @click="emit('toggleList')"
     >

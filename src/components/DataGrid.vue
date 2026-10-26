@@ -37,6 +37,7 @@ import {
   type CopyFormat,
 } from "../cells";
 import { useApp } from "../composables/useApp";
+import { altKeyName } from "../platform";
 import type { Cell, ColumnMeta, RowValues, SortDirection } from "../types";
 
 const props = defineProps<{
@@ -1047,7 +1048,7 @@ defineExpose({ scrollToTop, commitEdit, editCell, focusedCell, selectedRows, cop
                 class="grid-link"
                 type="button"
                 tabindex="-1"
-                :title="`Open ${linkTarget(value, col)} = ${cellDisplay(value)} · Option-click to open beside`"
+                :title="`Open ${linkTarget(value, col)} = ${cellDisplay(value)} · ${altKeyName}-click to open beside`"
                 :aria-label="`Open ${linkTarget(value, col)} = ${cellDisplay(value)}`"
                 @mousedown.stop.prevent
                 @dblclick.stop

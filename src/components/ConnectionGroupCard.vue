@@ -7,6 +7,7 @@ import { alphabeticalIds } from "../dashboard";
 import { useOverflowMenu } from "../composables/useOverflowMenu";
 import { useTabs } from "../composables/useTabs";
 import { contrastingText, DEFAULT_HEADER_COLOR } from "../color";
+import { secretStoreName } from "../platform";
 import type { ConnectionEntry, ConnectionGroup } from "../types";
 import ConnectionRow from "./ConnectionRow.vue";
 
@@ -138,7 +139,7 @@ async function confirmDelete() {
   const count = props.group.connections.length;
   const ok = await confirm(
     count
-      ? `Delete group “${props.group.name}” and its ${count === 1 ? "connection" : `${count} connections`}? Saved passwords are removed from the Keychain. Databases are not touched.`
+      ? `Delete group “${props.group.name}” and its ${count === 1 ? "connection" : `${count} connections`}? Saved passwords are removed from the ${secretStoreName}. Databases are not touched.`
       : `Delete group “${props.group.name}”?`,
     { title: "Delete group", kind: "warning", okLabel: "Delete", cancelLabel: "Cancel" },
   );

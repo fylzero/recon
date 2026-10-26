@@ -11,6 +11,7 @@ import {
   operatorLabel,
   operatorsFor,
 } from "../filters/operators";
+import { ariaModifier, shortcut } from "../platform";
 import ColumnPicker from "./ColumnPicker.vue";
 import FilterValueInput from "./FilterValueInput.vue";
 
@@ -217,9 +218,9 @@ defineExpose({
       class="filter-icon-button filter-row-duplicate"
       type="button"
       data-tip="Duplicate filter"
-      data-shortcut="⌘D"
+      :data-shortcut="shortcut('⌘D')"
       aria-label="Duplicate filter"
-      aria-keyshortcuts="Meta+D"
+      :aria-keyshortcuts="`${ariaModifier}+D`"
       @click="emit('duplicate')"
     >
       <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -231,9 +232,9 @@ defineExpose({
       class="filter-icon-button filter-row-remove"
       type="button"
       data-tip="Remove filter"
-      data-shortcut="⌘⌫"
+      :data-shortcut="shortcut('⌘⌫')"
       aria-label="Remove filter"
-      aria-keyshortcuts="Meta+Backspace"
+      :aria-keyshortcuts="`${ariaModifier}+Backspace`"
       @click="emit('remove')"
     >
       ×
