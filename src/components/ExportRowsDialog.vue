@@ -4,6 +4,7 @@ import { computed, onUnmounted, ref, watch } from "vue";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
 import { useTransferJob } from "../composables/useTransfers";
+import { baseName } from "../platform";
 import { chooseTabularPath, formatBytes, loadTabularOptions, saveTabularOptions, tabularExtension } from "../transfer";
 import type { BrowseRequest, ExportProgress, TabularFormat, TabularOptions as TabularChoices } from "../types";
 import Modal from "./Modal.vue";
@@ -112,7 +113,7 @@ async function start() {
       source.kind === "browse"
         ? await api.exportBrowse(props.connectionId, transferId, source.request, pageOnly.value, options.value, path)
         : await api.exportResult(source.resultId, source.columns, options.value, path);
-    const file = result.path.split("/").pop() ?? result.path;
+    const file = baseName(result.path);
     showToast(`Exported ${rowsLabel(result.rows)} (${formatBytes(result.bytes)}) to ${file}`);
     emit("close");
   } catch (err) {

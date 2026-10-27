@@ -1,10 +1,9 @@
 use std::future::Future;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use russh::client::{self, AuthResult, Handle, KeyboardInteractiveAuthResponse};
-use russh::keys::agent::client::AgentClient;
+use russh::keys::agent::client::{AgentClient, AgentStream};
 use russh::keys::agent::AgentIdentity;
 use russh::keys::{known_hosts, load_secret_key, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::{Disconnect, MethodKind, MethodSet};
@@ -378,10 +377,10 @@ pub fn private_keys_in(dir: &std::path::Path) -> Vec<String> {
 }
 
 pub fn find_private_keys() -> Vec<String> {
-    let Some(home) = std::env::var_os("HOME") else {
+    let Some(home) = ssh_config::home() else {
         return Vec::new();
     };
-    private_keys_in(&PathBuf::from(home).join(".ssh"))
+    private_keys_in(&home.join(".ssh"))
         .into_iter()
         .map(|name| format!("~/.ssh/{name}"))
         .collect()
@@ -576,21 +575,49 @@ async fn rsa_hash(handle: &Handle<HostKeyCheck>) -> Result<Option<russh::keys::H
         .map_err(|err| format!("SSH negotiation failed: {err}"))
 }
 
+type Agent = AgentClient<Box<dyn AgentStream + Send + Unpin>>;
+
+#[cfg(unix)]
+async fn connect_agent(identity_agent: &str) -> Result<Agent, String> {
+    if identity_agent.is_empty() {
+        AgentClient::connect_env()
+            .await
+            .map(AgentClient::dynamic)
+            .map_err(|err| format!("Could not reach the SSH agent ({err}). Is SSH_AUTH_SOCK set?"))
+    } else {
+        AgentClient::connect_uds(expand_home(identity_agent))
+            .await
+            .map(AgentClient::dynamic)
+            .map_err(|err| format!("Could not reach the SSH agent at {identity_agent}: {err}"))
+    }
+}
+
+/// Windows agents, OpenSSH's own and 1Password's, listen on a named pipe.
+#[cfg(windows)]
+async fn connect_agent(identity_agent: &str) -> Result<Agent, String> {
+    const DEFAULT_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
+    let pipe = match identity_agent {
+        "" => std::env::var("SSH_AUTH_SOCK")
+            .ok()
+            .filter(|sock| sock.starts_with(r"\\"))
+            .unwrap_or_else(|| DEFAULT_PIPE.into()),
+        other => other.to_string(),
+    };
+    AgentClient::connect_named_pipe(&pipe)
+        .await
+        .map(AgentClient::dynamic)
+        .map_err(|err| {
+            format!("Could not reach the SSH agent at {pipe} ({err}). Is the OpenSSH Authentication Agent service running?")
+        })
+}
+
 /// `identity_agent` is the IdentityAgent socket from ~/.ssh/config, like 1Password's.
 async fn agent_login(
     handle: &mut Handle<HostKeyCheck>,
     user: &str,
     identity_agent: &str,
 ) -> Result<Step, String> {
-    let mut agent = if identity_agent.is_empty() {
-        AgentClient::connect_env().await.map_err(|err| {
-            format!("Could not reach the SSH agent ({err}). Is SSH_AUTH_SOCK set?")
-        })?
-    } else {
-        AgentClient::connect_uds(expand_home(identity_agent))
-            .await
-            .map_err(|err| format!("Could not reach the SSH agent at {identity_agent}: {err}"))?
-    };
+    let mut agent = connect_agent(identity_agent).await?;
     let identities = agent
         .request_identities()
         .await
@@ -680,13 +707,14 @@ async fn pipe(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn expands_home_in_key_paths() {
-        let home = std::env::var("HOME").unwrap();
+        let home = ssh_config::home().unwrap();
         assert_eq!(
             expand_home("~/.ssh/id_ed25519"),
-            PathBuf::from(home).join(".ssh/id_ed25519")
+            home.join(".ssh/id_ed25519")
         );
         assert_eq!(expand_home("/keys/id_rsa"), PathBuf::from("/keys/id_rsa"));
     }

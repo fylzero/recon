@@ -113,7 +113,7 @@ If you find a bug, please [open an issue](https://github.com/fylzero/recon/issue
 - A clear, descriptive title
 - Steps to reproduce the issue
 - Expected vs. actual behavior
-- Your operating system (macOS version, or Linux distro and desktop) and Recon version
+- Your operating system (macOS version, Windows version, or Linux distro and desktop) and Recon version
 - Relevant screenshots or error messages
 
 ### Suggesting Features

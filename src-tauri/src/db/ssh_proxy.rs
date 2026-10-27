@@ -6,8 +6,9 @@ use tokio::io::{AsyncReadExt, Join};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::task::JoinHandle;
 
-use super::ssh_config::{self, ResolvedHost, SSH};
+use super::ssh_config::{self, ResolvedHost};
 use crate::askpass::Bridge;
+use crate::console::hide_window;
 use crate::prompts::Prompter;
 
 const ERROR_TAIL_BYTES: usize = 4096;
@@ -174,13 +175,26 @@ async fn collect_tail(mut stderr: ChildStderr, tail: Arc<Mutex<Vec<u8>>>) {
     }
 }
 
+/// OpenSSH runs ProxyCommand with `exec` in /bin/sh; Windows has only cmd.
+#[cfg(unix)]
+fn proxy_command(command: &str) -> Command {
+    let mut shell = Command::new("/bin/sh");
+    shell.arg("-c").arg(format!("exec {command}"));
+    shell
+}
+
+#[cfg(windows)]
+fn proxy_command(command: &str) -> Command {
+    ssh_config::shell_command(command)
+}
+
 pub async fn spawn(
     resolved: &ResolvedHost,
     target: &Target<'_>,
     prompter: &Prompter,
 ) -> Result<(ProxyProcess, ProxyStream), String> {
     let (mut command, label) = if resolved.proxy_command.is_empty() {
-        let mut command = Command::new(SSH);
+        let mut command = Command::new(ssh_config::ssh());
         command.args(jump_args(
             &resolved.proxy_jump,
             target.address,
@@ -188,15 +202,13 @@ pub async fn spawn(
         )?);
         (command, resolved.proxy_jump.clone())
     } else {
-        let mut command = Command::new("/bin/sh");
-        command.arg("-c").arg(format!(
-            "exec {}",
-            expand_tokens(&resolved.proxy_command, target)
-        ));
-        (command, resolved.proxy_command.clone())
+        (
+            proxy_command(&expand_tokens(&resolved.proxy_command, target)),
+            resolved.proxy_command.clone(),
+        )
     };
     let bridge = Bridge::start(prompter.clone())?;
-    command
+    hide_window(&mut command)
         .env("PATH", ssh_config::login_path().await)
         .envs(bridge.env()?)
         .stdin(Stdio::piped())
@@ -226,6 +238,7 @@ pub async fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn target() -> Target<'static> {
@@ -276,6 +289,7 @@ mod tests {
         assert_eq!(last_lines(b""), "");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn runs_a_proxy_command_as_the_ssh_stream() {
         let resolved = ResolvedHost {
@@ -302,8 +316,12 @@ mod tests {
 
     #[tokio::test]
     async fn explains_a_failed_proxy_with_its_output() {
+        #[cfg(unix)]
+        let failing = "echo 'channel 0: open failed: connect failed' >&2; exit 1";
+        #[cfg(windows)]
+        let failing = "echo channel 0: open failed: connect failed 1>&2 & exit /b 1";
         let resolved = ResolvedHost {
-            proxy_command: "echo 'channel 0: open failed: connect failed' >&2; exit 1".into(),
+            proxy_command: failing.into(),
             ..Default::default()
         };
         let (process, _stream) = spawn(&resolved, &target(), &Prompter::answering(None))

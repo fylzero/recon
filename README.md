@@ -5,16 +5,20 @@
 <h1 align="center">Recon</h1>
 
 <p align="center">
-  A local-first database client for macOS and Linux. Connect to MySQL, PostgreSQL, and SQLite with built-in drivers—no additional software required. Your credentials stay secure in the macOS Keychain or the Linux system keyring.
+  A local-first database client for macOS, Windows, and Linux. Connect to MySQL, PostgreSQL, and SQLite with built-in drivers—no additional software required. Your credentials stay secure in the macOS Keychain, Windows Credential Manager, or the Linux system keyring.
 </p>
 
 <p align="center">
   <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-macos-arm64.dmg"><img src="docs/download-macos.svg" alt="Download Recon for macOS" height="56"></a>
+  <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-windows-x64.exe"><img src="docs/download-windows.svg" alt="Download Recon for Windows" height="56"></a>
   <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-linux-x64.AppImage"><img src="docs/download-linux.svg" alt="Download Recon for Linux" height="56"></a>
   <a href="https://buymeacoffee.com/fylzero1"><img src="docs/buy-me-a-coffee.svg" alt="Buy me a coffee" height="56"></a>
 </p>
 
 <p align="center">
+  Windows on ARM:
+  <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-windows-arm64.exe">installer</a>
+  <br>
   Other Linux downloads:
   <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-linux-x64.deb">.deb</a> ·
   <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-linux-x64.rpm">.rpm</a> ·
@@ -25,12 +29,12 @@
 
 ## About
 
-Recon is an open-source database client for macOS and Linux, built with Tauri, Vue, and Rust. It works with MySQL, PostgreSQL, and SQLite databases without separate database drivers or command-line tools.
+Recon is an open-source database client for macOS, Windows, and Linux, built with Tauri, Vue, and Rust. It works with MySQL, PostgreSQL, and SQLite databases without separate database drivers or command-line tools.
 
 **Key characteristics:**
 
 - **Open source**: Free to use and modify under the MIT license
-- **Privacy-focused**: Database credentials stored exclusively in the macOS Keychain or the Linux system keyring
+- **Privacy-focused**: Database credentials stored exclusively in the macOS Keychain, Windows Credential Manager, or the Linux system keyring
 - **No external dependencies**: MySQL, PostgreSQL, and SQLite drivers compiled directly into the app
 - **Local-first**: All connections and queries run locally on your machine
 - **Native app**: A Tauri shell with a Rust backend, not a bundled browser
@@ -39,7 +43,7 @@ Recon is an open-source database client for macOS and Linux, built with Tauri, V
 
 **Connection Management**
 - Multiple database connections with organized grouping
-- Secure password storage in the macOS Keychain or the Linux system keyring
+- Secure password storage in the macOS Keychain, Windows Credential Manager, or the Linux system keyring
 - SSH tunnel support for remote databases
 - SSL/TLS encryption for MySQL and PostgreSQL
 - AWS IAM authentication support
@@ -90,6 +94,16 @@ Download the latest release:
 
 Current macOS builds are **Apple Silicon only**. Releases are signed with a Developer ID certificate and notarized by Apple.
 
+### Windows (x64 and ARM64)
+
+**[⬇️ Download Recon for Windows (x64)](https://github.com/fylzero/recon/releases/latest/download/Recon-windows-x64.exe)**
+
+Run the installer. It installs Recon for your user account without asking for administrator rights, and **Help → Check for Updates…** keeps it current. On ARM PCs, like Snapdragon laptops, use [Recon-windows-arm64.exe](https://github.com/fylzero/recon/releases/latest/download/Recon-windows-arm64.exe) instead.
+
+The installer isn't code-signed yet, so Windows SmartScreen may say **Windows protected your PC**. Click **More info**, then **Run anyway**.
+
+Saved passwords go to Windows Credential Manager. SSH tunnels through a ProxyJump or ProxyCommand host use Windows' built-in OpenSSH client, which Windows 10 and 11 install by default, and password commands run in `cmd`.
+
 ### Linux (x64 and ARM64)
 
 **[⬇️ Download Recon for Linux (AppImage, x64)](https://github.com/fylzero/recon/releases/latest/download/Recon-linux-x64.AppImage)**
@@ -116,7 +130,7 @@ SSH tunnels use `/usr/bin/ssh` and HTTPS certificate downloads use `/usr/bin/cur
   <img src="docs/screenshots/01-connections.png" alt="Connection dashboard with grouped connections" width="100%">
 </p>
 
-Organize database connections into groups with custom colors. All credentials are stored securely in the macOS Keychain or the Linux system keyring.
+Organize database connections into groups with custom colors. All credentials are stored securely in the macOS Keychain, Windows Credential Manager, or the Linux system keyring.
 
 ### Table Browser
 
@@ -158,7 +172,7 @@ Inspect and modify table structure including columns, data types, indexes, and f
 
 ## Development
 
-Recon is built with [Tauri](https://v2.tauri.app/)—a Vue.js frontend with a Rust native backend. To build and run from source, you'll need **Bun**, **Rust**, and a C toolchain: **Xcode Command Line Tools** on macOS, or the **WebKitGTK** development packages on Linux.
+Recon is built with [Tauri](https://v2.tauri.app/)—a Vue.js frontend with a Rust native backend. To build and run from source, you'll need **Bun**, **Rust**, and a C toolchain: **Xcode Command Line Tools** on macOS, the **Visual Studio Build Tools** on Windows, or the **WebKitGTK** development packages on Linux.
 
 ### Prerequisites
 
@@ -191,6 +205,8 @@ sudo apt install build-essential curl libwebkit2gtk-4.1-dev libxdo-dev libssl-de
 
 For Fedora, Arch, and other distros, see [Tauri's Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux) and add the D-Bus development package (`dbus-devel` on Fedora, `dbus` on Arch).
 
+**Windows:** install the [Build Tools for Visual Studio](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the **Desktop development with C++** workload. See [Tauri's Windows prerequisites](https://v2.tauri.app/start/prerequisites/#windows) for details. WebView2 already comes with Windows 10 and 11.
+
 #### 3. Bun
 
 Install using the official script from [bun.sh](https://bun.sh/):
@@ -200,6 +216,8 @@ curl -fsSL https://bun.sh/install | bash
 bun --version
 ```
 
+On Windows, run `powershell -c "irm bun.sh/install.ps1 | iex"` instead.
+
 #### 4. Rust
 
 Tauri compiles the native app with `cargo`. Install the official toolchain with [rustup](https://www.rust-lang.org/tools/install):
@@ -207,6 +225,8 @@ Tauri compiles the native app with `cargo`. Install the official toolchain with 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
+
+On Windows, download and run `rustup-init.exe` from the same page and keep the default MSVC toolchain.
 
 Accept the defaults, then **open a new terminal** and confirm:
 
@@ -222,6 +242,8 @@ cargo --version
 bun install
 bun run tauri dev
 ```
+
+On Windows, run `bunx tauri dev` instead. The `tauri` script sets `PATH` the Unix way, which doesn't work there.
 
 This command:
 
@@ -255,6 +277,13 @@ On Linux, the build produces:
 | AppImage | `src-tauri/target/release/bundle/appimage/Recon_<version>_amd64.AppImage` |
 | Debian package | `src-tauri/target/release/bundle/deb/Recon_<version>_amd64.deb` |
 | RPM package | `src-tauri/target/release/bundle/rpm/Recon-<version>-1.x86_64.rpm` |
+
+On Windows, `bunx tauri build` produces:
+
+| Artifact | Path |
+| --- | --- |
+| Installer | `src-tauri/target/release/bundle/nsis/Recon_<version>_x64-setup.exe` |
+| MSI package | `src-tauri/target/release/bundle/msi/Recon_<version>_x64_en-US.msi` |
 
 ### Running tests
 
@@ -290,9 +319,9 @@ No Secret Service is running. Install and unlock GNOME Keyring or KDE Wallet, or
 
 ## Publishing signed releases
 
-Pushing a `v*` tag runs the Release workflow. It builds and notarizes the macOS app first, then builds the Linux x64 and ARM64 packages and adds them to the same GitHub release.
+Pushing a `v*` tag runs the Release workflow. It builds and notarizes the macOS app first, then builds the Linux x64 and ARM64 packages, then the Windows x64 and ARM64 installers, and adds them all to the same GitHub release.
 
-See [macOS release setup](docs/macos-releases.md) for Apple Developer enrollment, repository secrets, and the code signing and notarization process, and [Linux releases](docs/linux-releases.md) for the Linux packages and how they update.
+See [macOS release setup](docs/macos-releases.md) for Apple Developer enrollment, repository secrets, and the code signing and notarization process, [Linux releases](docs/linux-releases.md) for the Linux packages and how they update, and [Windows releases](docs/windows-releases.md) for the Windows installers and code signing.
 
 ## Contributing
 

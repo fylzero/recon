@@ -82,6 +82,30 @@ jobs:
         working-directory: ./src-tauri
         run: cargo test --locked
 
+  backend-windows:
+    name: Backend Check (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          cache-on-failure: true
+
+      - name: Check compilation
+        working-directory: ./src-tauri
+        run: cargo check --locked
+
+      - name: Run tests
+        working-directory: ./src-tauri
+        run: cargo test --locked
+
   clippy:
     name: Clippy (Optional)
     runs-on: ubuntu-latest

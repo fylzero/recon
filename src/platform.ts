@@ -1,13 +1,29 @@
 export const isMac =
   typeof navigator === "undefined" || /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 
+export const isWindows = typeof navigator !== "undefined" && /Win/.test(navigator.platform || navigator.userAgent);
+
 export const altKeyName = isMac ? "Option" : "Alt";
 
-export const fileManagerName = isMac ? "Finder" : "File Manager";
+export const fileManagerName = isMac ? "Finder" : isWindows ? "File Explorer" : "File Manager";
 
-export const secretStoreName = isMac ? "Keychain" : "keyring";
+export const secretStoreName = isMac ? "Keychain" : isWindows ? "Credential Manager" : "keyring";
 
-export const secretStoreFullName = isMac ? "macOS Keychain" : "system keyring";
+export const secretStoreFullName = isMac
+  ? "macOS Keychain"
+  : isWindows
+    ? "Windows Credential Manager"
+    : "system keyring";
+
+/** How a password command reads the RECON_DB_* variables it's given. */
+export const passwordCommandShell = isWindows
+  ? "Runs in cmd each time Recon connects, and what it prints is the password. %RECON_DB_HOST%, %RECON_DB_PORT%, and %RECON_DB_USER% are set for it."
+  : "Runs in your shell each time Recon connects, and what it prints is the password. RECON_DB_HOST, RECON_DB_PORT, and RECON_DB_USER are set for it.";
+
+/** The last part of a file path, which on Windows may use backslashes. */
+export function baseName(path: string) {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
 
 export const systemNotificationsTarget = isMac
   ? "to macOS Notification Center"

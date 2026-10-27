@@ -1,5 +1,6 @@
 pub mod askpass;
 mod commands;
+mod console;
 mod db;
 mod db_commands;
 mod menu;

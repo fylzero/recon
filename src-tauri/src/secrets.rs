@@ -4,7 +4,9 @@ const SERVICE: &str = "com.recon.app";
 
 #[cfg(target_os = "macos")]
 const STORE: &str = "Keychain";
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+const STORE: &str = "Windows Credential Manager";
+#[cfg(not(any(target_os = "macos", windows)))]
 const STORE: &str = "system keyring";
 
 fn entry(connection_id: &str) -> Result<Entry, String> {
@@ -18,12 +20,12 @@ fn entry(connection_id: &str) -> Result<Entry, String> {
  * only saving a password reports the error. A locked or dismissed keyring is
  * NoStorageAccess and still surfaces.
  */
-#[cfg(target_os = "macos")]
+#[cfg(not(target_os = "linux"))]
 fn store_missing(_err: &keyring::Error) -> bool {
     false
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn store_missing(err: &keyring::Error) -> bool {
     matches!(err, keyring::Error::PlatformFailure(_)) || no_default_keyring(err)
 }

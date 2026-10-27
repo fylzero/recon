@@ -4,6 +4,7 @@ import { computed, onUnmounted, ref } from "vue";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
 import { useTransferJob } from "../composables/useTransfers";
+import { baseName } from "../platform";
 import { resumeAt, resumeChoice, runPhase } from "../transfer";
 import type { ImportProgress, ImportResume, ImportResumePoint } from "../types";
 import Modal from "./Modal.vue";
@@ -31,7 +32,7 @@ const progress = ref<ImportProgress | null>(null);
 let transferId = "";
 let stopProgress: UnlistenFn | null = null;
 
-const fileName = computed(() => props.path.split("/").pop() ?? props.path);
+const fileName = computed(() => baseName(props.path));
 const percent = computed(() => {
   const current = progress.value;
   return current?.totalBytes ? Math.min(100, Math.round((current.bytes / current.totalBytes) * 100)) : 0;

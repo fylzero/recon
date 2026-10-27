@@ -5,6 +5,7 @@ import { computed, onUnmounted, ref } from "vue";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
 import { useTransferJob } from "../composables/useTransfers";
+import { baseName } from "../platform";
 import { backupLimits, fileSafe, formatBytes } from "../transfer";
 import type { Driver, ExportProgress, ExportResult } from "../types";
 import Modal from "./Modal.vue";
@@ -62,7 +63,7 @@ function close() {
 }
 
 function describe(result: ExportResult) {
-  const file = result.path.split("/").pop() ?? result.path;
+  const file = baseName(result.path);
   const tables = `${result.tables.toLocaleString()} ${result.tables === 1 ? "table" : "tables"}`;
   const rows = `${result.rows.toLocaleString()} ${result.rows === 1 ? "row" : "rows"}`;
   return `Backed up ${tables} (${rows}, ${formatBytes(result.bytes)}) to ${file}`;

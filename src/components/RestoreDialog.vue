@@ -4,6 +4,7 @@ import { computed, onUnmounted, ref } from "vue";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
 import { useTransferJob } from "../composables/useTransfers";
+import { baseName } from "../platform";
 import { resumeAt, resumeChoice, runPhase } from "../transfer";
 import type { BackupInfo, Driver, ImportProgress, ImportResume, ImportResumePoint } from "../types";
 import Modal from "./Modal.vue";
@@ -38,7 +39,7 @@ let stopProgress: UnlistenFn | null = null;
 
 const label = computed(() => props.namespaceLabel.toLowerCase());
 const atomic = computed(() => props.driver === "postgres");
-const fileName = computed(() => props.path.split("/").pop() ?? props.path);
+const fileName = computed(() => baseName(props.path));
 const created = computed(() => {
   const date = new Date(props.info.createdAt);
   return Number.isNaN(date.getTime()) ? props.info.createdAt : date.toLocaleString();

@@ -1,11 +1,9 @@
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::task::JoinHandle;
 
 use crate::prompts::Prompter;
@@ -13,19 +11,108 @@ use crate::prompts::Prompter;
 const SOCKET_ENV: &str = "RECON_ASKPASS_SOCKET";
 const TOKEN_ENV: &str = "RECON_ASKPASS_TOKEN";
 const MAX_REQUEST_BYTES: u64 = 16 * 1024;
-/// macOS refuses Unix socket paths longer than 104 bytes.
-const MAX_SOCKET_PATH: usize = 100;
 
-/// A private, short socket path: the per-user temp folder, or /tmp if that's too long.
-fn socket_path() -> PathBuf {
-    let id = uuid::Uuid::new_v4().simple().to_string();
-    let name = format!("recon-{}.sock", &id[..12]);
-    let path = std::env::temp_dir().join(&name);
-    if path.as_os_str().len() <= MAX_SOCKET_PATH {
-        path
-    } else {
-        Path::new("/tmp").join(name)
+#[cfg(unix)]
+mod transport {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    use tokio::net::UnixListener;
+
+    /// macOS refuses Unix socket paths longer than 104 bytes.
+    const MAX_SOCKET_PATH: usize = 100;
+
+    pub type Listener = UnixListener;
+
+    /// A private, short socket path: the per-user temp folder, or /tmp if that's too long.
+    fn socket_path() -> PathBuf {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let name = format!("recon-{}.sock", &id[..12]);
+        let path = std::env::temp_dir().join(&name);
+        if path.as_os_str().len() <= MAX_SOCKET_PATH {
+            path
+        } else {
+            Path::new("/tmp").join(name)
+        }
     }
+
+    pub fn listen() -> std::io::Result<(PathBuf, Listener)> {
+        let path = socket_path();
+        let listener = UnixListener::bind(&path)?;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        Ok((path, listener))
+    }
+
+    pub async fn accept(listener: &mut Listener, _path: &Path) -> Option<tokio::net::UnixStream> {
+        listener.accept().await.ok().map(|(stream, _)| stream)
+    }
+
+    pub fn connect(path: &Path) -> std::io::Result<std::os::unix::net::UnixStream> {
+        std::os::unix::net::UnixStream::connect(path)
+    }
+
+    pub fn remove(path: &Path) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/**
+ * Windows has no Unix sockets here, so the bridge is a named pipe that only
+ * local processes can open. Each answered connection uses up one pipe
+ * instance, and the next is created before the current one is handed off.
+ */
+#[cfg(windows)]
+mod transport {
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+
+    const ERROR_PIPE_BUSY: i32 = 231;
+    const BUSY_RETRIES: usize = 40;
+
+    pub type Listener = NamedPipeServer;
+
+    fn instance(path: &Path, first: bool) -> std::io::Result<NamedPipeServer> {
+        ServerOptions::new()
+            .first_pipe_instance(first)
+            .reject_remote_clients(true)
+            .create(path)
+    }
+
+    pub fn listen() -> std::io::Result<(PathBuf, Listener)> {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let path = PathBuf::from(format!(r"\\.\pipe\recon-askpass-{id}"));
+        let server = instance(&path, true)?;
+        Ok((path, server))
+    }
+
+    pub async fn accept(listener: &mut Listener, path: &Path) -> Option<NamedPipeServer> {
+        listener.connect().await.ok()?;
+        let next = instance(path, false).ok()?;
+        Some(std::mem::replace(listener, next))
+    }
+
+    pub fn connect(path: &Path) -> std::io::Result<std::fs::File> {
+        let mut attempt = 0;
+        loop {
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+            {
+                Err(err)
+                    if err.raw_os_error() == Some(ERROR_PIPE_BUSY) && attempt < BUSY_RETRIES =>
+                {
+                    attempt += 1;
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                other => return other,
+            }
+        }
+    }
+
+    pub fn remove(_path: &Path) {}
 }
 
 #[derive(Serialize, Deserialize)]
@@ -55,13 +142,17 @@ pub struct Bridge {
 
 impl Bridge {
     pub fn start(prompter: Prompter) -> Result<Self, String> {
-        let path = socket_path();
-        let listener = UnixListener::bind(&path)
+        let (path, listener) = transport::listen()
             .map_err(|err| format!("Could not set up SSH sign-in prompts: {err}"))?;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
         let token = uuid::Uuid::new_v4().simple().to_string();
         let last_error = Arc::new(Mutex::new(None));
-        let server = tokio::spawn(serve(listener, token.clone(), prompter, last_error.clone()));
+        let server = tokio::spawn(serve(
+            listener,
+            path.clone(),
+            token.clone(),
+            prompter,
+            last_error.clone(),
+        ));
         Ok(Self {
             path,
             token,
@@ -91,28 +182,29 @@ impl Bridge {
 impl Drop for Bridge {
     fn drop(&mut self) {
         self.server.abort();
-        let _ = std::fs::remove_file(&self.path);
+        transport::remove(&self.path);
     }
 }
 
 async fn serve(
-    listener: UnixListener,
+    mut listener: transport::Listener,
+    path: PathBuf,
     token: String,
     prompter: Prompter,
     last_error: Arc<Mutex<Option<String>>>,
 ) {
-    while let Ok((stream, _)) = listener.accept().await {
+    while let Some(stream) = transport::accept(&mut listener, &path).await {
         let _ = answer(stream, &token, &prompter, &last_error).await;
     }
 }
 
 async fn answer(
-    stream: UnixStream,
+    stream: impl AsyncRead + AsyncWrite,
     token: &str,
     prompter: &Prompter,
     last_error: &Mutex<Option<String>>,
 ) -> std::io::Result<()> {
-    let (read, mut write) = stream.into_split();
+    let (read, mut write) = tokio::io::split(stream);
     let mut line = String::new();
     tokio::io::BufReader::new(read.take(MAX_REQUEST_BYTES))
         .read_line(&mut line)
@@ -138,7 +230,7 @@ async fn answer(
 }
 
 fn request_answer(socket: &Path, request: &Request) -> Option<String> {
-    let mut stream = std::os::unix::net::UnixStream::connect(socket).ok()?;
+    let mut stream = transport::connect(socket).ok()?;
     let mut line = serde_json::to_string(request).ok()?;
     line.push('\n');
     stream.write_all(line.as_bytes()).ok()?;
@@ -206,6 +298,7 @@ mod tests {
         assert_eq!(answer, None);
 
         drop(bridge);
+        #[cfg(unix)]
         assert!(!socket.exists());
     }
 

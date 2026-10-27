@@ -7,7 +7,7 @@ import { DEFAULT_HEADER_COLOR } from "../color";
 import { useApp } from "../composables/useApp";
 import { useConnectionForm } from "../composables/useConnectionForm";
 import { useTabs } from "../composables/useTabs";
-import { secretStoreFullName, secretStoreName } from "../platform";
+import { baseName, passwordCommandShell, secretStoreFullName, secretStoreName } from "../platform";
 import {
   DEFAULT_SSH_PORT,
   DRIVER_OPTIONS,
@@ -411,10 +411,6 @@ onMounted(async () => {
   }
 });
 
-function fileName(path: string) {
-  return path.split("/").filter(Boolean).pop() ?? path;
-}
-
 function buildEntry(): ConnectionEntry {
   return {
     id: initial?.id ?? "",
@@ -507,7 +503,7 @@ async function browseFile() {
   if (typeof selected === "string") {
     filePath.value = selected;
     if (!name.value.trim()) {
-      name.value = fileName(selected);
+      name.value = baseName(selected);
     }
   }
 }
@@ -525,9 +521,9 @@ async function createFile() {
     await api.createSqliteDatabase(selected);
     filePath.value = selected;
     if (!name.value.trim()) {
-      name.value = fileName(selected);
+      name.value = baseName(selected);
     }
-    showToast(`Created ${fileName(selected)}`);
+    showToast(`Created ${baseName(selected)}`);
   } catch (err) {
     formError.value = String(err);
   }
@@ -693,10 +689,7 @@ async function submit(connectAfter: boolean) {
                 placeholder="op read op://Private/Database/password"
               />
             </label>
-            <p class="muted tiny span-2 ssh-hint">
-              Runs in your shell each time Recon connects, and what it prints is the password. RECON_DB_HOST,
-              RECON_DB_PORT, and RECON_DB_USER are set for it.
-            </p>
+            <p class="muted tiny span-2 ssh-hint">{{ passwordCommandShell }}</p>
           </template>
           <label class="modal-label">
             <span class="muted tiny">Database</span>

@@ -4,7 +4,10 @@ use super::credentials::{aws_command, run_tool};
 use super::ssh_config::expand_home;
 use crate::models::ConnectionEntry;
 
+#[cfg(unix)]
 const CURL: &str = "/usr/bin/curl";
+#[cfg(windows)]
+const CURL: &str = r"C:\Windows\System32\curl.exe";
 pub const HTTP_NOT_ALLOWED: &str =
     "Certificates can't be downloaded over http://, since anyone on the network could swap them. Use https://.";
 

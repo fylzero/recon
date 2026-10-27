@@ -9,7 +9,7 @@ import * as api from "../api";
 import { useApp } from "../composables/useApp";
 import { splitStatements, statementAt } from "../sql";
 import { sqlDialect, sqlEditorTheme, sqlHighlighting } from "../sqlEditor";
-import { ariaModifier, shortcut } from "../platform";
+import { ariaModifier, baseName, shortcut } from "../platform";
 import { exportSqlFile } from "../transfer";
 import type { Driver, RowValues, StatementResult } from "../types";
 import type { CopyFormat } from "../cells";
@@ -378,7 +378,7 @@ async function exportSql() {
   try {
     const path = await exportSqlFile(props.title, getText());
     if (path) {
-      showToast(`Exported to ${path.split("/").pop()}`);
+      showToast(`Exported to ${baseName(path)}`);
     }
   } catch (err) {
     showToast(String(err), "error");

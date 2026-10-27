@@ -20,7 +20,7 @@ import {
   sanitizeFilter,
   type TableViewState,
 } from "../filters/model";
-import { shortcut } from "../platform";
+import { baseName, shortcut } from "../platform";
 import { isTabularFile } from "../transfer";
 import {
   driverLabel,
@@ -266,7 +266,7 @@ const databaseTitle = computed(() => {
     return "";
   }
   if (connection.driver === "sqlite") {
-    return connection.filePath.split("/").pop() || connection.name;
+    return baseName(connection.filePath) || connection.name;
   }
   if (connection.driver === "postgres") {
     return connection.database || connection.name;
@@ -445,7 +445,7 @@ const subtitle = computed(() => {
     return "";
   }
   if (connection.driver === "sqlite") {
-    return connection.filePath.split("/").pop() ?? connection.filePath;
+    return baseName(connection.filePath);
   }
   const address = `${connection.user}@${connection.host}:${connection.port}`;
   return connection.ssh?.enabled ? `${address} via ${connection.ssh.host}` : address;

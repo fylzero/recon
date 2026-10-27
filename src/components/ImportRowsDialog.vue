@@ -4,6 +4,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
 import { useTransferJob } from "../composables/useTransfers";
+import { baseName } from "../platform";
 import { formatBytes } from "../transfer";
 import type {
   ColumnDetail,
@@ -67,7 +68,7 @@ interface NewColumn {
   dataType: string;
 }
 
-const fileName = computed(() => props.path.split("/").pop() ?? props.path);
+const fileName = computed(() => baseName(props.path));
 const header = ref(true);
 const delimiter = ref<string | null>(null);
 const nullChoice = ref(NULL_CHOICES[0].id);

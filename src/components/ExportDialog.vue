@@ -5,6 +5,7 @@ import { computed, onUnmounted, ref, watch } from "vue";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
 import { useTransferJob } from "../composables/useTransfers";
+import { baseName } from "../platform";
 import { fileSafe, formatBytes, loadTabularOptions, saveTabularOptions, tabularExtension, tabularFilter } from "../transfer";
 import type { ExportProgress, TabularOptions as TabularChoices } from "../types";
 import Modal from "./Modal.vue";
@@ -171,7 +172,7 @@ async function start() {
       ...options.value,
       tabular: isTabular.value ? tabularRequest.value : null,
     });
-    const file = result.path.split("/").pop() ?? result.path;
+    const file = baseName(result.path);
     const tables = `${result.tables.toLocaleString()} ${result.tables === 1 ? "table" : "tables"}`;
     const rows = `${result.rows.toLocaleString()} ${result.rows === 1 ? "row" : "rows"}`;
     const skipped = result.skipped.length ? `. Skipped ${result.skipped.join(", ")}` : "";

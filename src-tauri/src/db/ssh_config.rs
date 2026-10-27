@@ -7,12 +7,18 @@ use serde::Serialize;
 use tokio::process::Command;
 use tokio::sync::OnceCell;
 
+use crate::console::hide_window;
+
 /// The system OpenSSH, since apps opened from Finder don't get the shell's PATH.
-pub const SSH: &str = "/usr/bin/ssh";
+#[cfg(unix)]
+const SYSTEM_SSH: &str = "/usr/bin/ssh";
+#[cfg(windows)]
+const SYSTEM_SSH: &str = r"C:\Windows\System32\OpenSSH\ssh.exe";
+#[cfg(unix)]
 const FALLBACK_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 #[cfg(target_os = "macos")]
 const FALLBACK_SHELL: &str = "/bin/zsh";
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 const FALLBACK_SHELL: &str = "/bin/sh";
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_INCLUDE_DEPTH: usize = 8;
@@ -49,12 +55,43 @@ impl ResolvedHost {
     }
 }
 
-fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+/**
+ * The OpenSSH Recon runs. On Windows that's the built-in one when the
+ * optional OpenSSH Client feature is installed, or else the first `ssh`
+ * on PATH, like the one Git for Windows ships.
+ */
+pub fn ssh() -> PathBuf {
+    let system = PathBuf::from(SYSTEM_SSH);
+    #[cfg(windows)]
+    if !system.is_file() {
+        if let Some(found) = find_on_path("ssh.exe") {
+            return found;
+        }
+    }
+    system
+}
+
+#[cfg(windows)]
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+/// The user's home folder: HOME, or on Windows the profile folder when HOME isn't set.
+pub fn home() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").filter(|home| !home.is_empty());
+    #[cfg(windows)]
+    let home = home.or_else(|| std::env::var_os("USERPROFILE"));
+    home.map(PathBuf::from)
 }
 
 pub fn expand_home(path: &str) -> PathBuf {
-    match (path.strip_prefix("~/"), home()) {
+    let rest = path.strip_prefix("~/");
+    #[cfg(windows)]
+    let rest = rest.or_else(|| path.strip_prefix("~\\"));
+    match (rest, home()) {
         (Some(rest), Some(home)) => home.join(rest),
         _ => PathBuf::from(path),
     }
@@ -63,13 +100,14 @@ pub fn expand_home(path: &str) -> PathBuf {
 fn abbreviate_home(path: &str, home: &Path) -> String {
     let home = home.to_string_lossy();
     match path.strip_prefix(home.as_ref()) {
-        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+        Some(rest) if rest.starts_with(['/', '\\']) => format!("~{}", rest.replace('\\', "/")),
         _ => path.to_string(),
     }
 }
 
 fn is_default_identity(path: &str) -> bool {
-    let name = path.rsplit('/').next().unwrap_or(path);
+    let path = path.replace('\\', "/");
+    let name = path.rsplit('/').next().unwrap_or(&path);
     path.contains("/.ssh/") && DEFAULT_IDENTITIES.contains(&name)
 }
 
@@ -125,7 +163,7 @@ pub async fn resolve(host: &str) -> Option<ResolvedHost> {
     if host.is_empty() || host.starts_with('-') || host.chars().any(char::is_whitespace) {
         return None;
     }
-    let run = Command::new(SSH)
+    let run = hide_window(&mut Command::new(ssh()))
         .args(["-G", host])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -138,7 +176,9 @@ pub async fn resolve(host: &str) -> Option<ResolvedHost> {
     if !output.status.success() {
         return None;
     }
-    let local_user = std::env::var("USER").unwrap_or_default();
+    let local_user = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_default();
     let home = home().unwrap_or_default();
     Some(parse_resolved(
         &String::from_utf8_lossy(&output.stdout),
@@ -155,10 +195,39 @@ static LOGIN_PATH: OnceCell<String> = OnceCell::const_new();
  * and kept apart from the proxy's own output, where a profile that prints
  * something would corrupt the SSH stream.
  */
+#[cfg(unix)]
 pub fn user_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| FALLBACK_SHELL.into())
 }
 
+/**
+ * Runs `script` the way the user's shell would: `$SHELL -c` on macOS and
+ * Linux, `cmd /C` on Windows.
+ */
+#[cfg(unix)]
+pub fn shell_command(script: &str) -> Command {
+    let mut command = Command::new(user_shell());
+    command.arg("-c").arg(script);
+    command
+}
+
+/// `raw_arg` passes the script through untouched, since cmd doesn't understand Rust's quoting.
+#[cfg(windows)]
+pub fn shell_command(script: &str) -> Command {
+    let mut command = Command::new(std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into()));
+    command.arg("/C").raw_arg(script);
+    command
+}
+
+/// Windows apps already get the user's PATH, so there's no login shell to ask.
+#[cfg(windows)]
+pub async fn login_path() -> &'static str {
+    LOGIN_PATH
+        .get_or_init(|| async { std::env::var("PATH").unwrap_or_default() })
+        .await
+}
+
+#[cfg(unix)]
 pub async fn login_path() -> &'static str {
     LOGIN_PATH
         .get_or_init(|| async {
@@ -389,7 +458,7 @@ mod tests {
         assert_eq!(resolve("-oProxyCommand=touch /tmp/recon").await, None);
         assert_eq!(resolve("two words").await, None);
         assert_eq!(resolve("").await, None);
-        if Path::new(SSH).exists() {
+        if ssh().exists() {
             let resolved = resolve("recon-test.invalid").await.unwrap();
             assert!(!resolved.hostname.is_empty());
         }

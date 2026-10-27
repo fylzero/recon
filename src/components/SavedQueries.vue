@@ -3,7 +3,7 @@ import type { SQLNamespace } from "@codemirror/lang-sql";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { computed, nextTick, onUnmounted, ref, watch } from "vue";
 import { useApp } from "../composables/useApp";
-import { shortcut } from "../platform";
+import { baseName, shortcut } from "../platform";
 import { exportSqlFile } from "../transfer";
 import type { Driver, SavedQuery } from "../types";
 import SqlCode from "./SqlCode.vue";
@@ -289,7 +289,7 @@ async function exportQuery(query: SavedQuery) {
   try {
     const path = await exportSqlFile(query.name, query.sql);
     if (path) {
-      showToast(`Exported “${query.name}” to ${path.split("/").pop()}`);
+      showToast(`Exported “${query.name}” to ${baseName(path)}`);
     }
   } catch (err) {
     showToast(String(err), "error");

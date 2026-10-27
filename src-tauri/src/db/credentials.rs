@@ -5,6 +5,7 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 
 use super::ssh_config;
+use crate::console::hide_window;
 use crate::models::{ConnectionEntry, PasswordSource};
 use crate::prompts::Prompter;
 
@@ -80,7 +81,7 @@ async fn run_tool_within(
         .get_program()
         .to_string_lossy()
         .into_owned();
-    let run = command
+    let run = hide_window(command)
         .env("PATH", ssh_config::login_path().await)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -144,9 +145,8 @@ pub async fn fetch(entry: &ConnectionEntry) -> Result<String, String> {
         }
         PasswordSource::AwsIam => (aws_command(aws_args(entry)), "The AWS CLI"),
         PasswordSource::Command => {
-            let mut command = Command::new(ssh_config::user_shell());
+            let mut command = ssh_config::shell_command(&entry.password_command);
             command
-                .args(["-c", &entry.password_command])
                 .env("RECON_DB_HOST", &entry.host)
                 .env("RECON_DB_PORT", entry.port.to_string())
                 .env("RECON_DB_USER", &entry.user);
@@ -270,10 +270,24 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    const PRINTS_TOKEN: &str =
+        "printf '  token-for-%s@%s:%s\\n' \"$RECON_DB_USER\" \"$RECON_DB_HOST\" \"$RECON_DB_PORT\"";
+    #[cfg(windows)]
+    const PRINTS_TOKEN: &str = "echo   token-for-%RECON_DB_USER%@%RECON_DB_HOST%:%RECON_DB_PORT%";
+    #[cfg(unix)]
+    const FAILS: &str = "echo 'run aws sso login' >&2; exit 3";
+    #[cfg(windows)]
+    const FAILS: &str = "echo run aws sso login 1>&2 & exit /b 3";
+    #[cfg(unix)]
+    const PRINTS_NOTHING: &str = "printf '  \\n'";
+    #[cfg(windows)]
+    const PRINTS_NOTHING: &str = "rem";
+
     #[tokio::test]
     async fn uses_what_the_command_prints() {
         let mut cmd = entry(PasswordSource::Command);
-        cmd.password_command = "printf '  token-for-%s@%s:%s\\n' \"$RECON_DB_USER\" \"$RECON_DB_HOST\" \"$RECON_DB_PORT\"".into();
+        cmd.password_command = PRINTS_TOKEN.into();
         assert_eq!(
             fetch(&cmd).await.unwrap(),
             format!("token-for-app@{HOST}:5432")
@@ -283,12 +297,12 @@ mod tests {
     #[tokio::test]
     async fn reports_failures_and_empty_output() {
         let mut cmd = entry(PasswordSource::Command);
-        cmd.password_command = "echo 'run aws sso login' >&2; exit 3".into();
+        cmd.password_command = FAILS.into();
         assert_eq!(
             fetch(&cmd).await.unwrap_err(),
             "The password command failed: run aws sso login"
         );
-        cmd.password_command = "printf '  \\n'".into();
+        cmd.password_command = PRINTS_NOTHING.into();
         assert!(fetch(&cmd).await.unwrap_err().contains("printed nothing"));
         assert!(fetch(&entry(PasswordSource::Password)).await.is_err());
     }
