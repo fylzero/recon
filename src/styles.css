@@ -3159,12 +3159,38 @@ button.view-tab.active:hover:not(:disabled) {
 }
 
 .db-filter {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
   padding: 0 0.75rem 0.5rem;
+  container-type: inline-size;
 }
 
 .db-filter input {
+  flex: 1;
+  min-width: 0;
   padding: 0.28rem 0.5rem;
   font-size: 12.5px;
+}
+
+.db-filter button.db-new-table {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 0.3rem;
+  white-space: nowrap;
+}
+
+.db-new-table .button-icon {
+  width: 0.9rem;
+  height: 0.9rem;
+}
+
+/* Below this the label would squeeze the filter, so only the + shows. */
+@container (max-width: 240px) {
+  .db-new-table-label {
+    display: none;
+  }
 }
 
 .db-table-list {

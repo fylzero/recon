@@ -1688,7 +1688,11 @@ onBeforeUnmount(() => {
   }
 });
 
-defineExpose({ refresh, pendingChanges, markSaved, discard });
+function showStructure() {
+  mode.value = "structure";
+}
+
+defineExpose({ refresh, pendingChanges, markSaved, discard, showStructure });
 </script>
 
 <template>

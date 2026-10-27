@@ -242,6 +242,10 @@ export function listTables(connectionId: string, namespace: string) {
   return invoke<TableInfo[]>("list_tables", { connectionId, namespace });
 }
 
+export function createTable(connectionId: string, namespace: string, table: string) {
+  return invoke<void>("create_table", { connectionId, namespace, table });
+}
+
 export function truncateTables(connectionId: string, namespace: string, tables: string[], options: TruncateOptions) {
   return invoke<void>("truncate_tables", { connectionId, namespace, tables, options });
 }

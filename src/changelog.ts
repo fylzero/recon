@@ -6,6 +6,13 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.12.0",
+    date: "October 27, 2026",
+    notes: [
+      "Create a table with the New table button next to Filter tables. Enter a name, and Recon creates the table with an auto-incrementing id primary key and opens it on the Structure tab so you can add more columns. When the sidebar is narrow, the button shows just a +.",
+    ],
+  },
+  {
     version: "1.11.0",
     date: "October 26, 2026",
     notes: [

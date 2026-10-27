@@ -188,7 +188,7 @@ const popoverFilters = computed(() =>
 const tabActivity = new Map<string, number>();
 let tableTabsSaveTimer = 0;
 const saving = ref(false);
-const nameDialog = ref<{ mode: "create" } | { mode: "rename"; from: string } | null>(null);
+const nameDialog = ref<{ mode: "create" } | { mode: "rename"; from: string } | { mode: "table" } | null>(null);
 const nameValue = ref("");
 const nameError = ref("");
 const nameBusy = ref(false);
@@ -2362,6 +2362,8 @@ async function submitNameDialog() {
   try {
     if (dialog.mode === "create") {
       await createNamespace(name);
+    } else if (dialog.mode === "table") {
+      await createTable(name);
     } else {
       await renameNamespace(dialog.from, name);
     }
@@ -2378,6 +2380,23 @@ async function createNamespace(name: string) {
   await refreshNamespaces();
   await changeNamespace(name);
   showToast(`Created ${namespaceLabel.value.toLowerCase()} “${name}”`);
+}
+
+/** Opens the new table on its Structure tab, since it only has an id column to start. */
+async function createTable(name: string) {
+  const target = namespace.value;
+  await api.createTable(props.sessionId, target, name);
+  await loadTables();
+  if (namespace.value !== target) {
+    return;
+  }
+  const table = tables.value.find((item) => item.name === name) ?? { name, kind: "table" as const };
+  filter.value = "";
+  const tab = newTableTab(target, table.name, table.kind);
+  insertTableTab(tab);
+  await nextTick();
+  tableViews.get(tab.id)?.showStructure();
+  showToast(`Created table “${name}”`);
 }
 
 function startRename(name: string) {
@@ -2904,6 +2923,19 @@ onUnmounted(() => {
               placeholder="Filter tables"
               spellcheck="false"
             />
+            <button
+              v-if="!listForDiagram"
+              class="ghost tiny db-new-table"
+              type="button"
+              title="New table"
+              :disabled="!namespace && driver !== 'sqlite'"
+              @click="openNameDialog({ mode: 'table' })"
+            >
+              <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 4.5v15m7.5-7.5h-15" />
+              </svg>
+              <span class="db-new-table-label">New table</span>
+            </button>
           </div>
           <div
             ref="tableListEl"
@@ -3214,7 +3246,9 @@ onUnmounted(() => {
         :title="
           nameDialog.mode === 'create'
             ? `New ${namespaceLabel.toLowerCase()}`
-            : `Rename ${namespaceLabel.toLowerCase()} “${nameDialog.from}”`
+            : nameDialog.mode === 'table'
+              ? 'New table'
+              : `Rename ${namespaceLabel.toLowerCase()} “${nameDialog.from}”`
         "
         @close="closeNameDialog"
       >
@@ -3234,6 +3268,10 @@ onUnmounted(() => {
             MySQL renames a database by moving its tables into a new one. Privileges granted on the old
             name are not carried over.
           </p>
+          <p v-if="nameDialog.mode === 'table'" class="muted tiny">
+            The table starts with an auto-incrementing id primary key. Add more columns in the Structure tab
+            that opens next.
+          </p>
           <p v-if="nameError" class="settings-error">{{ nameError }}</p>
         </form>
         <template #actions>
@@ -3247,7 +3285,7 @@ onUnmounted(() => {
             @click="submitNameDialog"
           >
             <span v-if="nameBusy" class="spinner" aria-hidden="true" />
-            <template v-if="nameDialog.mode === 'create'">{{ nameBusy ? "Creating…" : "Create" }}</template>
+            <template v-if="nameDialog.mode !== 'rename'">{{ nameBusy ? "Creating…" : "Create" }}</template>
             <template v-else>{{ nameBusy ? "Renaming…" : "Rename" }}</template>
           </button>
         </template>

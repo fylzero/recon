@@ -100,6 +100,7 @@ pub fn run() {
             db_commands::drop_database,
             db_commands::rename_database,
             db_commands::list_tables,
+            db_commands::create_table,
             db_commands::truncate_tables,
             db_commands::drop_tables,
             db_commands::table_structure,

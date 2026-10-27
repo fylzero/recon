@@ -860,6 +860,24 @@ pub async fn tables_in(session: Arc<Session>, namespace: &str) -> Result<Vec<Tab
 }
 
 #[tauri::command]
+pub async fn create_table(
+    app: AppHandle,
+    connection_id: String,
+    namespace: String,
+    table: String,
+) -> Result<(), String> {
+    let table = table.trim();
+    if table.is_empty() {
+        return Err("Enter a name.".into());
+    }
+    let session = app.state::<SessionStore>().get(&connection_id).await?;
+    let sql = table_ops::create_statement(session.driver, &namespace, table);
+    pool_run(&session, &sql, 0, QueryOrigin::Schema).await?;
+    session.forget_columns(Some(&namespace), Some(table));
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn truncate_tables(
     app: AppHandle,
     connection_id: String,
