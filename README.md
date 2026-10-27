@@ -5,26 +5,27 @@
 <h1 align="center">Recon</h1>
 
 <p align="center">
-  A local-first database client for macOS, Windows, and Linux. Connect to MySQL, PostgreSQL, and SQLite with built-in drivers—no additional software required. Your credentials stay secure in the macOS Keychain, Windows Credential Manager, or the Linux system keyring.
+  A database client for macOS, Windows, and Linux. Connect to MySQL, PostgreSQL, and SQLite with built-in drivers—no additional software required. No account, no cloud: your connections stay on your machine, and your credentials stay in the macOS Keychain, Windows Credential Manager, or the Linux system keyring.
 </p>
 
 <p align="center">
-  <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-macos-arm64.dmg"><img src="docs/download-macos.svg" alt="Download Recon for macOS" height="56"></a>
-  <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-windows-x64.exe"><img src="docs/download-windows.svg" alt="Download Recon for Windows" height="56"></a>
-  <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-linux-x64.AppImage"><img src="docs/download-linux.svg" alt="Download Recon for Linux" height="56"></a>
-  <a href="https://buymeacoffee.com/fylzero"><img src="docs/buy-me-a-coffee.svg" alt="Buy me a coffee" height="56"></a>
+  <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-macos-arm64.dmg"><img src="docs/download-macos.svg" alt="Download Recon for macOS" height="48"></a>
+  <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-windows-x64.exe"><img src="docs/download-windows.svg" alt="Download Recon for Windows" height="48"></a>
+  <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-linux-x64.AppImage"><img src="docs/download-linux.svg" alt="Download Recon for Linux" height="48"></a>
 </p>
 
 <p align="center">
-  Windows on ARM:
-  <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-windows-arm64.exe">installer</a>
-  <br>
-  Other Linux downloads:
-  <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-linux-x64.deb">.deb</a> ·
+  Also available:
+  <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-windows-arm64.exe">Windows ARM64</a> ·
+  Linux <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-linux-x64.deb">.deb</a>,
   <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-linux-x64.rpm">.rpm</a> ·
-  ARM64 <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-linux-arm64.AppImage">AppImage</a>,
+  Linux ARM64 <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-linux-arm64.AppImage">AppImage</a>,
   <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-linux-arm64.deb">.deb</a>,
   <a href="https://github.com/fylzero/recon/releases/latest/download/Recon-linux-arm64.rpm">.rpm</a>
+</p>
+
+<p align="center">
+  <a href="https://buymeacoffee.com/fylzero"><img src="docs/buy-me-a-coffee.svg" alt="Buy me a coffee" height="40"></a>
 </p>
 
 ## About
@@ -36,7 +37,7 @@ Recon is an open-source database client for macOS, Windows, and Linux, built wit
 - **Open source**: Free to use and modify under the MIT license
 - **Privacy-focused**: Database credentials stored exclusively in the macOS Keychain, Windows Credential Manager, or the Linux system keyring
 - **No external dependencies**: MySQL, PostgreSQL, and SQLite drivers compiled directly into the app
-- **Local-first**: All connections and queries run locally on your machine
+- **No account, no cloud**: Connections and queries go straight from your machine to your database
 - **Native app**: A Tauri shell with a Rust backend, not a bundled browser
 
 ## Features
