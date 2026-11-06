@@ -734,7 +734,13 @@ pub async fn rename_database(
     match (session.driver, dialect.rename_namespace_sql(&from, to)) {
         (Driver::Mssql, Some(sql)) => {
             session.pool.quiesce().await;
-            let blockers = pool_run(&session, &db::mssql::other_sessions_sql(&from), 1, QueryOrigin::Schema).await;
+            let blockers = pool_run(
+                &session,
+                &db::mssql::other_sessions_sql(&from),
+                1,
+                QueryOrigin::Schema,
+            )
+            .await;
             if let Ok(output) = blockers {
                 if first_text(&output).parse::<u64>().unwrap_or(0) > 0 {
                     return Err(
@@ -1292,7 +1298,10 @@ async fn browse_statement(
 ) -> Result<(Fragment, u64), String> {
     let mut statement = sorted_select(session, request).await?;
     let limit = request.limit.clamp(1, BROWSE_LIMIT_MAX);
-    let ordered = request.order_by.as_deref().is_some_and(|column| !column.is_empty());
+    let ordered = request
+        .order_by
+        .as_deref()
+        .is_some_and(|column| !column.is_empty());
     statement.push_sql(dialect(session.driver).limit_sql(limit, request.offset, ordered));
     Ok((statement, limit))
 }
@@ -1766,13 +1775,18 @@ async fn save(session: Arc<Session>, requests: &[SaveRequest]) -> Result<usize, 
         };
         let identities = if session.driver == Driver::Mssql {
             let sql = db::mssql::identity_columns_sql(&request.namespace, &request.table);
-            db::mssql::identity_columns(&pool_run(&session, &sql, usize::MAX, QueryOrigin::Schema).await?)
+            db::mssql::identity_columns(
+                &pool_run(&session, &sql, usize::MAX, QueryOrigin::Schema).await?,
+            )
         } else {
             Vec::new()
         };
-        let identity_insert = identities
-            .iter()
-            .any(|column| request.inserts.iter().any(|insert| explicit(insert, column)));
+        let identity_insert = identities.iter().any(|column| {
+            request
+                .inserts
+                .iter()
+                .any(|insert| explicit(insert, column))
+        });
         if identity_insert {
             let sql = db::mssql::identity_insert_sql(&table, true);
             statements.push(db::EditStatement {

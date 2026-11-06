@@ -172,7 +172,10 @@ impl Splitter {
                             self.push(c);
                         }
                         '[' if self.driver == Driver::Mssql => {
-                            self.state = State::Quote { quote: ']', backslash: false };
+                            self.state = State::Quote {
+                                quote: ']',
+                                backslash: false,
+                            };
                             self.push(c);
                         }
                         '-' if next == Some('-')
@@ -294,11 +297,18 @@ fn is_mssql_routine(sql: &str) -> bool {
         .map(|word| word.to_ascii_uppercase())
         .collect();
     let kind = if words.first().is_some_and(|word| word == "CREATE") {
-        if words.get(1).is_some_and(|word| word == "OR") { words.get(3) } else { words.get(1) }
+        if words.get(1).is_some_and(|word| word == "OR") {
+            words.get(3)
+        } else {
+            words.get(1)
+        }
     } else {
         None
     };
-    matches!(kind.map(String::as_str), Some("PROCEDURE" | "PROC" | "FUNCTION" | "TRIGGER"))
+    matches!(
+        kind.map(String::as_str),
+        Some("PROCEDURE" | "PROC" | "FUNCTION" | "TRIGGER")
+    )
 }
 
 fn is_ident_char(c: char) -> bool {

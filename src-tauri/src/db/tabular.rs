@@ -969,7 +969,9 @@ pub fn import_literal(driver: Driver, value: &ImportValue, target: TargetColumn)
         (Driver::Mssql, ImportValue::Text(text)) if target.binary && hex_body(text).is_some() => {
             format!("0x{}", hex_body(text).unwrap_or_default())
         }
-        (Driver::Mssql, ImportValue::Text(text) | ImportValue::Json(text)) => super::mssql::n_literal(text),
+        (Driver::Mssql, ImportValue::Text(text) | ImportValue::Json(text)) => {
+            super::mssql::n_literal(text)
+        }
         (_, ImportValue::Text(text) | ImportValue::Json(text)) => sqlite_text(text),
     }
 }

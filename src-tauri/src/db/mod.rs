@@ -785,9 +785,15 @@ pub fn alter_statements(
         }
         Driver::Mssql => {
             let current = mssql_current.ok_or_else(|| {
-                format!("Column {} no longer exists in {table}. Reload and try again.", change.column)
+                format!(
+                    "Column {} no longer exists in {table}. Reload and try again.",
+                    change.column
+                )
             })?;
-            Ok(mssql::alter_column_statements(table, change, current)?.into_iter().map(statement).collect())
+            Ok(mssql::alter_column_statements(table, change, current)?
+                .into_iter()
+                .map(statement)
+                .collect())
         }
         Driver::Sqlite => {
             if !change.only_renames() {
@@ -1264,7 +1270,7 @@ pub fn is_timeout_or_cancel(message: &str) -> bool {
         || lower.contains("canceling statement")
         || lower.contains("maximum statement execution time")
         || lower.contains("max_statement_time")
-        ||     lower.contains("query execution was interrupted")
+        || lower.contains("query execution was interrupted")
         || lower.contains("query was cancel")
         || lower.contains("kill state")
         || lower.contains("attention signal")
@@ -1955,11 +1961,18 @@ pub fn index_statements(
                         current.name
                     ));
                 }
-                return Ok(vec![statement(mssql::sp_rename(&qualified_old, new_name, "INDEX"))]);
+                return Ok(vec![statement(mssql::sp_rename(
+                    &qualified_old,
+                    new_name,
+                    "INDEX",
+                ))]);
             }
             let columns = change.columns.as_deref().unwrap_or(&current.columns).trim();
             if columns.is_empty() {
-                return Err(format!("Index {} uses expressions, so change it with SQL instead.", current.name));
+                return Err(format!(
+                    "Index {} uses expressions, so change it with SQL instead.",
+                    current.name
+                ));
             }
             let unique = if unique { "UNIQUE " } else { "" };
             let filter = if current.definition.is_empty() {
@@ -1969,7 +1982,9 @@ pub fn index_statements(
             };
             Ok(vec![
                 statement(format!("DROP INDEX {old} ON {table}")),
-                statement(format!("CREATE {unique}INDEX {new} ON {table} ({columns}){filter}")),
+                statement(format!(
+                    "CREATE {unique}INDEX {new} ON {table} ({columns}){filter}"
+                )),
             ])
         }
     }
@@ -2198,8 +2213,14 @@ mod tests {
             generated: false,
         };
         let change = column_change(serde_json::json!({ "column": "title", "nullable": false }));
-        let sql = alter_statements(Driver::Mysql, "`app`.`posts`", &change, Some(&current), None)
-            .unwrap();
+        let sql = alter_statements(
+            Driver::Mysql,
+            "`app`.`posts`",
+            &change,
+            Some(&current),
+            None,
+        )
+        .unwrap();
         assert_eq!(
             sql[0].sql,
             "ALTER TABLE `app`.`posts` CHANGE COLUMN `title` `title` varchar(191) COLLATE utf8mb4_unicode_ci \
@@ -2212,7 +2233,8 @@ mod tests {
             "dataType": "int",
             "defaultValue": null,
         }));
-        let sql = alter_statements(Driver::Mysql, "`posts`", &retype, Some(&current), None).unwrap();
+        let sql =
+            alter_statements(Driver::Mysql, "`posts`", &retype, Some(&current), None).unwrap();
         assert_eq!(
             sql[0].sql,
             "ALTER TABLE `posts` CHANGE COLUMN `title` `headline` int NULL on update CURRENT_TIMESTAMP \
@@ -2228,7 +2250,8 @@ mod tests {
         );
         let rename = column_change(serde_json::json!({ "column": "title", "name": "t" }));
         assert_eq!(
-            alter_statements(Driver::Mysql, "`posts`", &rename, Some(&generated), None).unwrap()[0].sql,
+            alter_statements(Driver::Mysql, "`posts`", &rename, Some(&generated), None).unwrap()[0]
+                .sql,
             "ALTER TABLE `posts` RENAME COLUMN `title` TO `t`"
         );
         assert!(alter_statements(Driver::Mysql, "`posts`", &rename, None, None).is_err());
@@ -2349,7 +2372,9 @@ mod tests {
         let mut current = index("", false, false);
         current.columns = "[email]".into();
         current.definition = "([active]=(1))".into();
-        let change = index_change(serde_json::json!({ "index": "users_email", "columns": "[email], [name]" }));
+        let change = index_change(
+            serde_json::json!({ "index": "users_email", "columns": "[email], [name]" }),
+        );
         assert_eq!(
             index_sql(Driver::Mssql, "[app].[dbo].[users]", &change, &current),
             vec![
@@ -2357,13 +2382,24 @@ mod tests {
                 "CREATE INDEX [users_email] ON [app].[dbo].[users] ([email], [name]) WHERE ([active]=(1))",
             ]
         );
-        let rename = index_change(serde_json::json!({ "index": "users_email", "name": "by_email" }));
+        let rename =
+            index_change(serde_json::json!({ "index": "users_email", "name": "by_email" }));
         assert_eq!(
             index_sql(Driver::Mssql, "[app].[dbo].[users]", &rename, &current),
             vec!["EXEC sp_rename N'[dbo].[users].[users_email]', N'[by_email]', N'INDEX'"]
         );
-        let constrained = IndexDefinition { constraint: true, ..current };
-        assert!(index_statements(Driver::Mssql, "app", "[app].[dbo].[users]", &change, Some(&constrained)).is_err());
+        let constrained = IndexDefinition {
+            constraint: true,
+            ..current
+        };
+        assert!(index_statements(
+            Driver::Mssql,
+            "app",
+            "[app].[dbo].[users]",
+            &change,
+            Some(&constrained)
+        )
+        .is_err());
         assert_eq!(
             index_sql(Driver::Mssql, "[app].[dbo].[users]", &rename, &constrained),
             vec!["EXEC sp_rename N'[dbo].[users].[users_email]', N'[by_email]', N'INDEX'"]
@@ -2697,7 +2733,8 @@ mod tests {
         };
         let mut statements = vec![update_statement(Driver::Sqlite, "\"users\"", &update).unwrap()];
         let rename = column_change(serde_json::json!({ "column": "name", "name": "full_name" }));
-        statements.extend(alter_statements(Driver::Sqlite, "\"users\"", &rename, None, None).unwrap());
+        statements
+            .extend(alter_statements(Driver::Sqlite, "\"users\"", &rename, None, None).unwrap());
         pool.apply(&statements).await.unwrap();
         let saved = pool
             .run("SELECT full_name FROM users WHERE id = 1", 1)

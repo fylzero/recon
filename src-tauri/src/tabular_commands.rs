@@ -19,10 +19,9 @@ use crate::db::tabular::{
     TypeGuess,
 };
 use crate::db::{
-    describe_error, dialect, mssql, mysql, postgres, sqlite, BrowseRequest, CellValue, Conn, EditValue,
-    ResultStore, Session, SessionStore,
+    describe_error, dialect, mssql, mysql, postgres, sqlite, BrowseRequest, CellValue, Conn,
+    EditValue, ResultStore, Session, SessionStore,
 };
-use tiberius::QueryItem;
 use crate::db_commands::{export_statement, table_columns, tables_in};
 use crate::models::Driver;
 use crate::query_log::{self, QueryOrigin, QueryRecord};
@@ -30,6 +29,7 @@ use crate::transfer_commands::{
     file_name, open_sql_file, sibling, ExportProgressEvent, ExportResult, Sink, SqlFile, Throttle,
     Transfer, TransferStore, EXPORT_PROGRESS_EVENT, IMPORT_CANCELLED, IMPORT_PROGRESS_EVENT,
 };
+use tiberius::QueryItem;
 
 const REPORT_EVERY: u64 = 500;
 const PREVIEW_ROWS: usize = 20;

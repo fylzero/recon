@@ -104,10 +104,16 @@ pub fn truncate_statements(
                     }
                 }
                 for table in &qualified {
-                    sql.push(format!("ALTER TABLE {table} WITH CHECK CHECK CONSTRAINT ALL"));
+                    sql.push(format!(
+                        "ALTER TABLE {table} WITH CHECK CHECK CONSTRAINT ALL"
+                    ));
                 }
             } else {
-                sql.extend(qualified.iter().map(|table| format!("TRUNCATE TABLE {table}")));
+                sql.extend(
+                    qualified
+                        .iter()
+                        .map(|table| format!("TRUNCATE TABLE {table}")),
+                );
             }
         }
     }

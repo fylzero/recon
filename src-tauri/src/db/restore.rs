@@ -5,7 +5,8 @@ use serde::Serialize;
 
 use super::dump::mysql_literal;
 use super::{
-    dialect, first_text, quote_backtick, quote_bracket, quote_double, quote_literal, text_at, CellValue, Conn,
+    dialect, first_text, quote_backtick, quote_bracket, quote_double, quote_literal, text_at,
+    CellValue, Conn,
 };
 use crate::models::Driver;
 
@@ -199,7 +200,10 @@ async fn reset_mssql(conn: &mut Conn) -> Result<(), String> {
         let mut left = Vec::new();
         let mut dropped = false;
         for (schema, name) in views {
-            match conn.execute(&format!("DROP VIEW {}", mssql_qualified(&schema, &name))).await {
+            match conn
+                .execute(&format!("DROP VIEW {}", mssql_qualified(&schema, &name)))
+                .await
+            {
                 Ok(_) => dropped = true,
                 Err(err) => {
                     last_error = err;
@@ -208,7 +212,9 @@ async fn reset_mssql(conn: &mut Conn) -> Result<(), String> {
             }
         }
         if !dropped {
-            return Err(format!("Couldn't drop a view while restoring: {last_error}"));
+            return Err(format!(
+                "Couldn't drop a view while restoring: {last_error}"
+            ));
         }
         views = left;
     }

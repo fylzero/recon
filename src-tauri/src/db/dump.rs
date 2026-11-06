@@ -11,8 +11,8 @@ use sqlx::{Database, Executor, Row};
 use tiberius::QueryItem;
 
 use super::{
-    describe_error, hex, mssql, mysql, postgres, quote_backtick, quote_bracket, quote_double, quote_literal, sqlite, text_at,
-    texts, CellValue, Conn, Dialect, RawOutput,
+    describe_error, hex, mssql, mysql, postgres, quote_backtick, quote_bracket, quote_double,
+    quote_literal, sqlite, text_at, texts, CellValue, Conn, Dialect, RawOutput,
 };
 
 pub const CANCELLED: &str = "Export cancelled.";
@@ -1572,7 +1572,9 @@ async fn dump_mssql(
 ) -> Result<(), String> {
     let db = quote_bracket(namespace);
     mssql::run(client, &format!("USE {db}"), 0, None).await?;
-    let isolated = mssql::run(client, "SET TRANSACTION ISOLATION LEVEL SNAPSHOT", 0, None).await.is_ok()
+    let isolated = mssql::run(client, "SET TRANSACTION ISOLATION LEVEL SNAPSHOT", 0, None)
+        .await
+        .is_ok()
         && mssql::run(client, "BEGIN TRAN", 0, None).await.is_ok();
     let outcome = dump_mssql_body(client, namespace, tables, options, dump).await;
     if isolated {
@@ -1612,7 +1614,11 @@ async fn dump_mssql_body(
         }
         for row in &sequences {
             let qualified = mssql_name(&mssql_text(row, 0), &mssql_text(row, 1));
-            let cycle = if mssql_flag(row, 6) { "CYCLE" } else { "NO CYCLE" };
+            let cycle = if mssql_flag(row, 6) {
+                "CYCLE"
+            } else {
+                "NO CYCLE"
+            };
             if options.drop_tables {
                 dump.write(&format!("DROP SEQUENCE IF EXISTS {qualified};\n"))?;
             }
@@ -1635,11 +1641,23 @@ async fn dump_mssql_body(
         if options.drop_tables {
             dump.write(&format!("DROP TABLE IF EXISTS {qualified};\n"))?;
         }
-        let columns = mssql::run(client, &mssql_columns_sql(namespace, schema, name), usize::MAX, None).await?.rows;
+        let columns = mssql::run(
+            client,
+            &mssql_columns_sql(namespace, schema, name),
+            usize::MAX,
+            None,
+        )
+        .await?
+        .rows;
         let indexes = if options.structure {
-            mssql::run(client, &Dialect::index_definitions_sql(&mssql::MssqlDialect, namespace, &table.name), usize::MAX, None)
-                .await?
-                .rows
+            mssql::run(
+                client,
+                &Dialect::index_definitions_sql(&mssql::MssqlDialect, namespace, &table.name),
+                usize::MAX,
+                None,
+            )
+            .await?
+            .rows
         } else {
             Vec::new()
         };
@@ -1647,36 +1665,55 @@ async fn dump_mssql_body(
             dump.write(&mssql_create_table(&qualified, &columns, &indexes))?;
         }
         if options.data {
-            let inserted: Vec<&Vec<CellValue>> = columns.iter().filter(|row| !mssql_flag(row, 4)).collect();
+            let inserted: Vec<&Vec<CellValue>> =
+                columns.iter().filter(|row| !mssql_flag(row, 4)).collect();
             if !inserted.is_empty() {
                 let names: Vec<String> = inserted.iter().map(|row| mssql_text(row, 0)).collect();
                 let list = column_list(&names, quote_bracket);
                 let identity = inserted.iter().any(|row| mssql_flag(row, 3));
                 if identity {
-                    dump.write(&format!("{};\n", mssql::identity_insert_sql(&qualified, true)))?;
+                    dump.write(&format!(
+                        "{};\n",
+                        mssql::identity_insert_sql(&qualified, true)
+                    ))?;
                 }
                 let select = format!("SELECT {list} FROM {qualified}");
                 let insert = format!("INSERT INTO {qualified} ({list})");
                 write_mssql_rows(dump, client, &table.name, &select, &insert).await?;
                 if identity {
-                    dump.write(&format!("{};\n", mssql::identity_insert_sql(&qualified, false)))?;
+                    dump.write(&format!(
+                        "{};\n",
+                        mssql::identity_insert_sql(&qualified, false)
+                    ))?;
                 }
             }
         }
         if options.structure {
-            for row in indexes.iter().filter(|row| !mssql_flag(row, 3) && !mssql_flag(row, 7)) {
+            for row in indexes
+                .iter()
+                .filter(|row| !mssql_flag(row, 3) && !mssql_flag(row, 7))
+            {
                 let unique = if mssql_flag(row, 2) { "UNIQUE " } else { "" };
                 let filter = mssql_text(row, 4);
-                let where_sql = if filter.is_empty() { String::new() } else { format!(" WHERE {filter}") };
+                let where_sql = if filter.is_empty() {
+                    String::new()
+                } else {
+                    format!(" WHERE {filter}")
+                };
                 dump.write(&format!(
                     "CREATE {unique}INDEX {} ON {qualified} ({}){where_sql};\n",
                     quote_bracket(&mssql_text(row, 0)),
                     mssql_text(row, 1)
                 ))?;
             }
-            let keys = mssql::run(client, &Dialect::foreign_keys_sql(&mssql::MssqlDialect, namespace, &table.name), usize::MAX, None)
-                .await?
-                .rows;
+            let keys = mssql::run(
+                client,
+                &Dialect::foreign_keys_sql(&mssql::MssqlDialect, namespace, &table.name),
+                usize::MAX,
+                None,
+            )
+            .await?
+            .rows;
             foreign_keys.push_str(&mssql_foreign_keys(&qualified, &keys));
         }
     }
@@ -1706,10 +1743,15 @@ async fn dump_mssql_body(
             let object = format!("{}.{}", mssql_text(row, 1), mssql_text(row, 2));
             let kind = mssql_text(row, 0);
             if kind.trim() == "V" && wanted.contains(object.as_str()) {
-                views.push((mssql_name(&mssql_text(row, 1), &mssql_text(row, 2)), mssql_text(row, 3)));
+                views.push((
+                    mssql_name(&mssql_text(row, 1), &mssql_text(row, 2)),
+                    mssql_text(row, 3),
+                ));
             }
         }
-        let views = dependency_order(views, |(_, definition), (other, _)| definition.contains(other));
+        let views = dependency_order(views, |(_, definition), (other, _)| {
+            definition.contains(other)
+        });
         for (name, definition) in &views {
             dump.start(name)?;
             if definition.is_empty() {
@@ -1742,7 +1784,11 @@ async fn dump_mssql_body(
                 write_batch(dump, &definition)?;
             }
         }
-        let chosen: HashSet<&str> = tables.iter().filter(|table| !table.view).map(|table| table.name.as_str()).collect();
+        let chosen: HashSet<&str> = tables
+            .iter()
+            .filter(|table| !table.view)
+            .map(|table| table.name.as_str())
+            .collect();
         for row in &modules {
             if mssql_text(row, 0).trim() != "TR" {
                 continue;
@@ -1758,7 +1804,10 @@ async fn dump_mssql_body(
                 continue;
             }
             if options.drop_tables {
-                dump.write(&format!("DROP TRIGGER IF EXISTS {};\n", mssql_name(&mssql_text(row, 1), &mssql_text(row, 2))))?;
+                dump.write(&format!(
+                    "DROP TRIGGER IF EXISTS {};\n",
+                    mssql_name(&mssql_text(row, 1), &mssql_text(row, 2))
+                ))?;
             }
             write_batch(dump, &definition)?;
         }
@@ -1812,17 +1861,31 @@ fn mssql_columns_sql(namespace: &str, schema: &str, name: &str) -> String {
     )
 }
 
-fn mssql_create_table(qualified: &str, columns: &[Vec<CellValue>], indexes: &[Vec<CellValue>]) -> String {
+fn mssql_create_table(
+    qualified: &str,
+    columns: &[Vec<CellValue>],
+    indexes: &[Vec<CellValue>],
+) -> String {
     let mut parts: Vec<String> = columns.iter().map(|row| mssql_column_sql(row)).collect();
-    for row in indexes.iter().filter(|row| mssql_flag(row, 3) || mssql_flag(row, 7)) {
-        let kind = if mssql_flag(row, 3) { "PRIMARY KEY" } else { "UNIQUE" };
+    for row in indexes
+        .iter()
+        .filter(|row| mssql_flag(row, 3) || mssql_flag(row, 7))
+    {
+        let kind = if mssql_flag(row, 3) {
+            "PRIMARY KEY"
+        } else {
+            "UNIQUE"
+        };
         parts.push(format!(
             "CONSTRAINT {} {kind} ({})",
             quote_bracket(&mssql_text(row, 0)),
             mssql_text(row, 1)
         ));
     }
-    format!("CREATE TABLE {qualified} (\n    {}\n);\n", parts.join(",\n    "))
+    format!(
+        "CREATE TABLE {qualified} (\n    {}\n);\n",
+        parts.join(",\n    ")
+    )
 }
 
 fn mssql_column_sql(row: &[CellValue]) -> String {
@@ -1838,10 +1901,21 @@ fn mssql_column_sql(row: &[CellValue]) -> String {
     };
     let default = {
         let expr = mssql_text(row, 7);
-        if expr.is_empty() { String::new() } else { format!(" DEFAULT {expr}") }
+        if expr.is_empty() {
+            String::new()
+        } else {
+            format!(" DEFAULT {expr}")
+        }
     };
-    let null_sql = if mssql_flag(row, 2) { "NULL" } else { "NOT NULL" };
-    format!("{name} {}{identity}{default} {null_sql}", mssql_text(row, 1))
+    let null_sql = if mssql_flag(row, 2) {
+        "NULL"
+    } else {
+        "NOT NULL"
+    };
+    format!(
+        "{name} {}{identity}{default} {null_sql}",
+        mssql_text(row, 1)
+    )
 }
 
 fn mssql_foreign_keys(table: &str, rows: &[Vec<CellValue>]) -> String {
@@ -1850,7 +1924,11 @@ fn mssql_foreign_keys(table: &str, rows: &[Vec<CellValue>]) -> String {
     let mut columns = Vec::new();
     let mut referenced = String::new();
     let mut ref_columns = Vec::new();
-    let flush = |sql: &mut String, name: &str, columns: &[String], referenced: &str, ref_columns: &[String]| {
+    let flush = |sql: &mut String,
+                 name: &str,
+                 columns: &[String],
+                 referenced: &str,
+                 ref_columns: &[String]| {
         if name.is_empty() {
             return;
         }
@@ -1882,7 +1960,9 @@ fn mssql_name(schema: &str, name: &str) -> String {
 }
 
 fn mssql_text(row: &[CellValue], index: usize) -> String {
-    row.get(index).and_then(CellValue::to_text).unwrap_or_default()
+    row.get(index)
+        .and_then(CellValue::to_text)
+        .unwrap_or_default()
 }
 
 fn mssql_flag(row: &[CellValue], index: usize) -> bool {

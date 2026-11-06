@@ -138,14 +138,19 @@ fn classify_mssql(lower: &str) -> ColumnClass {
     }
     match base {
         "bit" => ColumnClass::of(Boolean),
-        "tinyint" | "smallint" | "int" | "bigint" | "decimal" | "numeric" | "float" | "real" | "money"
-        | "smallmoney" => ColumnClass::of(Number),
-        "char" | "varchar" | "nchar" | "nvarchar" | "text" | "ntext" | "sysname" => ColumnClass::of(Text),
+        "tinyint" | "smallint" | "int" | "bigint" | "decimal" | "numeric" | "float" | "real"
+        | "money" | "smallmoney" => ColumnClass::of(Number),
+        "char" | "varchar" | "nchar" | "nvarchar" | "text" | "ntext" | "sysname" => {
+            ColumnClass::of(Text)
+        }
         "uniqueidentifier" => ColumnClass::of(Uuid),
         "date" => ColumnClass::of(Date),
         "time" => ColumnClass::of(Time),
         "datetime" | "datetime2" | "smalldatetime" => ColumnClass::of(Datetime),
-        "datetimeoffset" => ColumnClass { kind: Datetime, tz: true },
+        "datetimeoffset" => ColumnClass {
+            kind: Datetime,
+            tz: true,
+        },
         "xml" => ColumnClass::of(Other),
         "binary" | "varbinary" | "image" => ColumnClass::of(Binary),
         _ => ColumnClass::of(Other),

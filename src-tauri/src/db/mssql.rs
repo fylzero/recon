@@ -7,8 +7,9 @@ use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 use super::{
-    quote_bracket, text_at, texts, CellValue, ColumnChange, ColumnMeta, Conn, Dialect, EditStatement, Opened, Pool as SessionPool,
-    RawOutput, RowValues, CONNECT_TIMEOUT, CONNECTION_LOST,
+    quote_bracket, text_at, texts, CellValue, ColumnChange, ColumnMeta, Conn, Dialect,
+    EditStatement, Opened, Pool as SessionPool, RawOutput, RowValues, CONNECTION_LOST,
+    CONNECT_TIMEOUT,
 };
 use crate::models::ConnectionEntry;
 
@@ -33,7 +34,11 @@ impl Manager for MssqlManager {
         connect_config(&self.config).await
     }
 
-    async fn recycle(&self, _client: &mut MssqlClient, _metrics: &Metrics) -> RecycleResult<String> {
+    async fn recycle(
+        &self,
+        _client: &mut MssqlClient,
+        _metrics: &Metrics,
+    ) -> RecycleResult<String> {
         Ok(())
     }
 }
@@ -101,7 +106,9 @@ impl MssqlPool {
     }
 
     pub async fn detached(&self) -> Result<MssqlConn, String> {
-        self.checkout().await.map(|object| MssqlConn(Object::take(object)))
+        self.checkout()
+            .await
+            .map(|object| MssqlConn(Object::take(object)))
     }
 }
 
@@ -109,10 +116,7 @@ fn config_for(entry: &ConnectionEntry, password: Option<&str>) -> Config {
     let mut config = Config::new();
     config.host(&entry.host);
     config.port(entry.port);
-    config.authentication(AuthMethod::sql_server(
-        &entry.user,
-        password.unwrap_or(""),
-    ));
+    config.authentication(AuthMethod::sql_server(&entry.user, password.unwrap_or("")));
     config.application_name("Recon");
     if !entry.database.is_empty() {
         config.database(&entry.database);
@@ -153,11 +157,12 @@ async fn connect_config(config: &Config) -> Result<MssqlClient, String> {
 }
 
 async fn handshake(config: Config) -> Result<MssqlClient, String> {
-    let tcp = match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(config.get_addr())).await {
-        Ok(Ok(tcp)) => tcp,
-        Ok(Err(err)) => return Err(format!("Could not reach the database server: {err}")),
-        Err(_) => return Err("Timed out connecting to the database server.".into()),
-    };
+    let tcp =
+        match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(config.get_addr())).await {
+            Ok(Ok(tcp)) => tcp,
+            Ok(Err(err)) => return Err(format!("Could not reach the database server: {err}")),
+            Err(_) => return Err("Timed out connecting to the database server.".into()),
+        };
     tcp.set_nodelay(true).map_err(|err| err.to_string())?;
     match tokio::time::timeout(CONNECT_TIMEOUT, Client::connect(config, tcp.compat_write())).await {
         Ok(Ok(client)) => Ok(client),
@@ -167,7 +172,9 @@ async fn handshake(config: Config) -> Result<MssqlClient, String> {
 }
 
 pub async fn open(entry: &ConnectionEntry, password: Option<&str>) -> Result<Opened, String> {
-    let manager = MssqlManager { config: config_for(entry, password) };
+    let manager = MssqlManager {
+        config: config_for(entry, password),
+    };
     let pool = Pool::builder(manager)
         .max_size(MAX_POOL)
         .build()
@@ -214,7 +221,10 @@ async fn ensure_supported(client: &mut MssqlClient) -> Result<String, String> {
     )
     .await?;
     let row = output.rows.first();
-    let version = row.and_then(|row| row.get(1)).and_then(CellValue::to_text).unwrap_or_default();
+    let version = row
+        .and_then(|row| row.get(1))
+        .and_then(CellValue::to_text)
+        .unwrap_or_default();
     let major = row
         .and_then(|row| row.first())
         .and_then(CellValue::to_text)
@@ -227,14 +237,23 @@ async fn ensure_supported(client: &mut MssqlClient) -> Result<String, String> {
 
 pub(crate) fn version_gate(major: i32, version: &str) -> Result<String, String> {
     if major < 16 {
-        let shown = if version.is_empty() { "an older release".into() } else { version.to_string() };
-        return Err(format!("Recon supports SQL Server 2022 or newer. This server is {shown}."));
+        let shown = if version.is_empty() {
+            "an older release".into()
+        } else {
+            version.to_string()
+        };
+        return Err(format!(
+            "Recon supports SQL Server 2022 or newer. This server is {shown}."
+        ));
     }
     Ok(version.to_string())
 }
 
 pub fn identity_insert_sql(table: &str, enabled: bool) -> String {
-    format!("SET IDENTITY_INSERT {table} {}", if enabled { "ON" } else { "OFF" })
+    format!(
+        "SET IDENTITY_INSERT {table} {}",
+        if enabled { "ON" } else { "OFF" }
+    )
 }
 
 pub async fn run(
@@ -244,7 +263,11 @@ pub async fn run(
     cancel: Option<&AtomicBool>,
 ) -> Result<RawOutput, String> {
     let count_row = !super::returns_rows(sql);
-    let query = if count_row { format!("{sql}\nSELECT @@ROWCOUNT") } else { sql.to_string() };
+    let query = if count_row {
+        format!("{sql}\nSELECT @@ROWCOUNT")
+    } else {
+        sql.to_string()
+    };
     let mut stream = client.simple_query(query).await.map_err(describe)?;
     let mut sets: Vec<(Vec<ColumnMeta>, Vec<RowValues>)> = Vec::new();
     let mut columns: Option<Vec<ColumnMeta>> = None;
@@ -299,8 +322,16 @@ pub async fn run(
     } else {
         0
     };
-    let (columns, rows) = sets.into_iter().next().unwrap_or_else(|| (Vec::new(), Vec::new()));
-    Ok(RawOutput { columns, rows, rows_affected, truncated })
+    let (columns, rows) = sets
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| (Vec::new(), Vec::new()));
+    Ok(RawOutput {
+        columns,
+        rows,
+        rows_affected,
+        truncated,
+    })
 }
 
 fn read_row(row: &tiberius::Row) -> RowValues {
@@ -336,7 +367,9 @@ pub fn cell(row: &tiberius::Row, index: usize) -> CellValue {
         ColumnData::U8(Some(value)) => CellValue::Int(i64::from(*value)),
         ColumnData::I16(Some(value)) => CellValue::Int(i64::from(*value)),
         ColumnData::I32(Some(value)) => CellValue::Int(i64::from(*value)),
-        ColumnData::I64(Some(value)) if matches!(kind, Some(ColumnType::Money | ColumnType::Money4)) => {
+        ColumnData::I64(Some(value))
+            if matches!(kind, Some(ColumnType::Money | ColumnType::Money4)) =>
+        {
             CellValue::Text(format_scaled(*value, 4))
         }
         ColumnData::I64(Some(value)) => CellValue::Int(*value),
@@ -344,20 +377,34 @@ pub fn cell(row: &tiberius::Row, index: usize) -> CellValue {
         ColumnData::F64(Some(value)) => CellValue::from_float(*value),
         ColumnData::Numeric(Some(value)) => CellValue::Text(value.to_string()),
         ColumnData::String(Some(value)) => match kind {
-            Some(ColumnType::Daten | ColumnType::Datetimen | ColumnType::Datetime | ColumnType::Datetime4 | ColumnType::Datetime2 | ColumnType::DatetimeOffsetn | ColumnType::Timen) => {
-                CellValue::DateTime(value.to_string())
-            }
+            Some(
+                ColumnType::Daten
+                | ColumnType::Datetimen
+                | ColumnType::Datetime
+                | ColumnType::Datetime4
+                | ColumnType::Datetime2
+                | ColumnType::DatetimeOffsetn
+                | ColumnType::Timen,
+            ) => CellValue::DateTime(value.to_string()),
             _ => CellValue::Text(value.to_string()),
         },
         ColumnData::Guid(Some(value)) => CellValue::Text(value.to_string()),
         ColumnData::Binary(Some(value)) => CellValue::Bytes(value.to_vec()),
         ColumnData::Xml(Some(value)) => CellValue::Text(value.to_string()),
-        ColumnData::DateTime(Some(value)) => CellValue::DateTime(format_legacy_datetime(value.days(), value.seconds_fragments())),
-        ColumnData::SmallDateTime(Some(value)) => {
-            CellValue::DateTime(format_small_datetime(i32::from(value.days()), value.seconds_fragments()))
+        ColumnData::DateTime(Some(value)) => CellValue::DateTime(format_legacy_datetime(
+            value.days(),
+            value.seconds_fragments(),
+        )),
+        ColumnData::SmallDateTime(Some(value)) => CellValue::DateTime(format_small_datetime(
+            i32::from(value.days()),
+            value.seconds_fragments(),
+        )),
+        ColumnData::Date(Some(value)) => {
+            CellValue::DateTime(format_date(value.days() as i64 - 719_162))
         }
-        ColumnData::Date(Some(value)) => CellValue::DateTime(format_date(value.days() as i64 - 719_162)),
-        ColumnData::Time(Some(value)) => CellValue::DateTime(format_time(value.increments(), value.scale())),
+        ColumnData::Time(Some(value)) => {
+            CellValue::DateTime(format_time(value.increments(), value.scale()))
+        }
         ColumnData::DateTime2(Some(value)) => CellValue::DateTime(format!(
             "{} {}",
             format_date(value.date().days() as i64 - 719_162),
@@ -370,7 +417,10 @@ pub fn cell(row: &tiberius::Row, index: usize) -> CellValue {
             CellValue::DateTime(format!(
                 "{} {} {sign}{:02}:{:02}",
                 format_date(value.datetime2().date().days() as i64 - 719_162),
-                format_time(value.datetime2().time().increments(), value.datetime2().time().scale()),
+                format_time(
+                    value.datetime2().time().increments(),
+                    value.datetime2().time().scale()
+                ),
                 minutes / 60,
                 minutes % 60
             ))
@@ -427,14 +477,21 @@ fn format_clock(seconds: u64, frac: u64, scale: u8) -> String {
     if scale == 0 {
         format!("{hour:02}:{minute:02}:{second:02}")
     } else {
-        format!("{hour:02}:{minute:02}:{second:02}.{frac:0width$}", width = scale as usize)
+        format!(
+            "{hour:02}:{minute:02}:{second:02}.{frac:0width$}",
+            width = scale as usize
+        )
     }
 }
 
 fn format_time(increments: u64, scale: u8) -> String {
     let scale = scale.min(7);
     let divisor = 10u64.pow(u32::from(scale));
-    let (divisor, increments) = if divisor == 0 { (1, increments) } else { (divisor, increments) };
+    let (divisor, increments) = if divisor == 0 {
+        (1, increments)
+    } else {
+        (divisor, increments)
+    };
     format_clock(increments / divisor, increments % divisor, scale)
 }
 
@@ -442,19 +499,32 @@ fn format_time(increments: u64, scale: u8) -> String {
 fn format_legacy_datetime(days: i32, fragments: u32) -> String {
     let seconds = u64::from(fragments) / 300;
     let millis = (u64::from(fragments) % 300) * 10 / 3;
-    format!("{} {}", format_date(i64::from(days) - 25_567), format_clock(seconds, millis, 3))
+    format!(
+        "{} {}",
+        format_date(i64::from(days) - 25_567),
+        format_clock(seconds, millis, 3)
+    )
 }
 
 /// `smalldatetime`: days since 1900-01-01, and minutes since midnight.
 fn format_small_datetime(days: i32, minutes: u16) -> String {
-    format!("{} {}", format_date(i64::from(days) - 25_567), format_clock(u64::from(minutes) * 60, 0, 0))
+    format!(
+        "{} {}",
+        format_date(i64::from(days) - 25_567),
+        format_clock(u64::from(minutes) * 60, 0, 0)
+    )
 }
 
 fn format_scaled(value: i64, scale: u32) -> String {
     let divisor = 10u128.pow(scale);
     let sign = if value < 0 { "-" } else { "" };
     let value = u128::from(value.unsigned_abs());
-    format!("{sign}{}.{:0width$}", value / divisor, value % divisor, width = scale as usize)
+    format!(
+        "{sign}{}.{:0width$}",
+        value / divisor,
+        value % divisor,
+        width = scale as usize
+    )
 }
 
 pub fn literal(cell: &CellValue) -> String {
@@ -464,7 +534,9 @@ pub fn literal(cell: &CellValue) -> String {
         CellValue::Int(value) => value.to_string(),
         CellValue::Float(value) => value.to_string(),
         CellValue::Bytes(bytes) => format!("0x{}", super::hex(bytes)),
-        CellValue::Text(text) | CellValue::Json(text) | CellValue::DateTime(text) => n_literal(text),
+        CellValue::Text(text) | CellValue::Json(text) | CellValue::DateTime(text) => {
+            n_literal(text)
+        }
     }
 }
 
@@ -517,13 +589,18 @@ fn is_cancel(err: &tiberius::error::Error) -> bool {
         return true;
     }
     let message = err.to_string().to_ascii_lowercase();
-    message.contains("kill state") || message.contains("query was cancel") || message.contains("attention signal")
+    message.contains("kill state")
+        || message.contains("query was cancel")
+        || message.contains("attention signal")
 }
 
 fn is_lost(err: &tiberius::error::Error) -> bool {
     match err {
         tiberius::error::Error::Io { .. } => true,
-        _ => matches!(err.code(), Some(64 | 109 | 232 | 233 | 10053 | 10054 | 10060)),
+        _ => matches!(
+            err.code(),
+            Some(64 | 109 | 232 | 233 | 10053 | 10054 | 10060)
+        ),
     }
 }
 
@@ -711,7 +788,11 @@ impl Dialect for MssqlDialect {
     }
 
     fn limit_sql(&self, limit: u64, offset: u64, ordered: bool) -> String {
-        let order = if ordered { "" } else { " ORDER BY (SELECT NULL)" };
+        let order = if ordered {
+            ""
+        } else {
+            " ORDER BY (SELECT NULL)"
+        };
         format!("{order} OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY")
     }
 
@@ -819,8 +900,16 @@ pub fn column_definitions(output: &RawOutput) -> Vec<ColumnDefinition> {
                 name: text_at(&text, 0),
                 data_type: text_at(&text, 1),
                 nullable: text_at(&text, 2).eq_ignore_ascii_case("YES"),
-                default_value: text.get(3).cloned().flatten().filter(|value| !value.is_empty()),
-                default_constraint: text.get(4).cloned().flatten().filter(|value| !value.is_empty()),
+                default_value: text
+                    .get(3)
+                    .cloned()
+                    .flatten()
+                    .filter(|value| !value.is_empty()),
+                default_constraint: text
+                    .get(4)
+                    .cloned()
+                    .flatten()
+                    .filter(|value| !value.is_empty()),
                 computed: row.get(5).is_some_and(CellValue::is_truthy),
                 identity: row.get(6).is_some_and(CellValue::is_truthy),
             }
@@ -828,15 +917,28 @@ pub fn column_definitions(output: &RawOutput) -> Vec<ColumnDefinition> {
         .collect()
 }
 
-pub fn alter_column_statements(table: &str, change: &ColumnChange, current: &ColumnDefinition) -> Result<Vec<String>, String> {
+pub fn alter_column_statements(
+    table: &str,
+    change: &ColumnChange,
+    current: &ColumnDefinition,
+) -> Result<Vec<String>, String> {
     let old = quote_bracket(&current.name);
     if current.computed && !change.only_renames() {
-        return Err(format!("{} is a computed column, so Recon can only rename it.", current.name));
+        return Err(format!(
+            "{} is a computed column, so Recon can only rename it.",
+            current.name
+        ));
     }
     if current.computed {
         return Ok(change
             .renamed()
-            .map(|name| sp_rename(&format!("{}.{}", strip_database(table), old), name, "COLUMN"))
+            .map(|name| {
+                sp_rename(
+                    &format!("{}.{}", strip_database(table), old),
+                    name,
+                    "COLUMN",
+                )
+            })
             .into_iter()
             .collect());
     }
@@ -851,28 +953,49 @@ pub fn alter_column_statements(table: &str, change: &ColumnChange, current: &Col
         && (change.default_value.is_some() || (type_changes && current.default_value.is_some()));
     if drop_default {
         if let Some(constraint) = &current.default_constraint {
-            sql.push(format!("ALTER TABLE {table} DROP CONSTRAINT {}", quote_bracket(constraint)));
+            sql.push(format!(
+                "ALTER TABLE {table} DROP CONSTRAINT {}",
+                quote_bracket(constraint)
+            ));
         }
     }
     if type_changes {
-        let data_type = change.data_type.as_deref().unwrap_or(&current.data_type).trim();
+        let data_type = change
+            .data_type
+            .as_deref()
+            .unwrap_or(&current.data_type)
+            .trim();
         let nullable = change.nullable.unwrap_or(current.nullable);
         let null_sql = if nullable { "NULL" } else { "NOT NULL" };
-        sql.push(format!("ALTER TABLE {table} ALTER COLUMN {old} {data_type} {null_sql}"));
+        sql.push(format!(
+            "ALTER TABLE {table} ALTER COLUMN {old} {data_type} {null_sql}"
+        ));
     }
-    if let Some(expr) = next_default.as_deref().map(str::trim).filter(|expr| !expr.is_empty()) {
+    if let Some(expr) = next_default
+        .as_deref()
+        .map(str::trim)
+        .filter(|expr| !expr.is_empty())
+    {
         if change.default_value.is_some() || type_changes {
             sql.push(format!("ALTER TABLE {table} ADD DEFAULT {expr} FOR {old}"));
         }
     }
     if let Some(name) = change.renamed() {
-        sql.push(sp_rename(&format!("{}.{}", strip_database(table), old), name, "COLUMN"));
+        sql.push(sp_rename(
+            &format!("{}.{}", strip_database(table), old),
+            name,
+            "COLUMN",
+        ));
     }
     Ok(sql)
 }
 
 pub fn sp_rename(object: &str, new_name: &str, kind: &str) -> String {
-    format!("EXEC sp_rename {}, {}, N'{kind}'", n_literal(object), n_literal(&quote_bracket(new_name)))
+    format!(
+        "EXEC sp_rename {}, {}, N'{kind}'",
+        n_literal(object),
+        n_literal(&quote_bracket(new_name))
+    )
 }
 
 #[cfg(test)]
@@ -924,7 +1047,10 @@ mod tests {
                 "EXEC sp_rename N'[dbo].[posts].[title]', N'[headline]', N'COLUMN'",
             ]
         );
-        let computed = ColumnDefinition { computed: true, ..current };
+        let computed = ColumnDefinition {
+            computed: true,
+            ..current
+        };
         assert!(alter_column_statements("[posts]", &change, &computed).is_err());
     }
 
@@ -935,8 +1061,14 @@ mod tests {
             dialect.limit_sql(50, 100, false),
             " ORDER BY (SELECT NULL) OFFSET 100 ROWS FETCH NEXT 50 ROWS ONLY"
         );
-        assert_eq!(dialect.limit_sql(50, 0, true), " OFFSET 0 ROWS FETCH NEXT 50 ROWS ONLY");
-        assert_eq!(dialect.qualified("app", "dbo.orders"), "[app].[dbo].[orders]");
+        assert_eq!(
+            dialect.limit_sql(50, 0, true),
+            " OFFSET 0 ROWS FETCH NEXT 50 ROWS ONLY"
+        );
+        assert_eq!(
+            dialect.qualified("app", "dbo.orders"),
+            "[app].[dbo].[orders]"
+        );
     }
 
     #[test]
@@ -946,8 +1078,14 @@ mod tests {
             "Recon supports SQL Server 2022 or newer. This server is 15.0.2000.5."
         );
         assert_eq!(version_gate(16, "16.0.1000.6").unwrap(), "16.0.1000.6");
-        assert_eq!(identity_insert_sql("[dbo].[posts]", true), "SET IDENTITY_INSERT [dbo].[posts] ON");
-        assert_eq!(identity_insert_sql("[dbo].[posts]", false), "SET IDENTITY_INSERT [dbo].[posts] OFF");
+        assert_eq!(
+            identity_insert_sql("[dbo].[posts]", true),
+            "SET IDENTITY_INSERT [dbo].[posts] ON"
+        );
+        assert_eq!(
+            identity_insert_sql("[dbo].[posts]", false),
+            "SET IDENTITY_INSERT [dbo].[posts] OFF"
+        );
     }
 
     fn live_entry() -> Option<(crate::models::ConnectionEntry, Option<String>)> {
@@ -984,10 +1122,21 @@ mod tests {
         assert!(!version.is_empty());
         let mut opened = open(&entry, password.as_deref()).await.unwrap();
         assert!(opened.backend_id.is_some());
-        exec(&mut opened.conn, "DROP DATABASE IF EXISTS recon_mssql_live").await.ok();
-        exec(&mut opened.conn, "DROP DATABASE IF EXISTS recon_mssql_live_dst").await.ok();
-        exec(&mut opened.conn, "CREATE DATABASE recon_mssql_live").await.unwrap();
-        exec(&mut opened.conn, "USE [recon_mssql_live]").await.unwrap();
+        exec(&mut opened.conn, "DROP DATABASE IF EXISTS recon_mssql_live")
+            .await
+            .ok();
+        exec(
+            &mut opened.conn,
+            "DROP DATABASE IF EXISTS recon_mssql_live_dst",
+        )
+        .await
+        .ok();
+        exec(&mut opened.conn, "CREATE DATABASE recon_mssql_live")
+            .await
+            .unwrap();
+        exec(&mut opened.conn, "USE [recon_mssql_live]")
+            .await
+            .unwrap();
         exec(
             &mut opened.conn,
             "CREATE TABLE dbo.posts (\
@@ -1000,16 +1149,34 @@ mod tests {
         )
         .await
         .unwrap();
-        exec(&mut opened.conn, "INSERT INTO dbo.posts (title, active) VALUES (N'o''brien', 1)")
+        exec(
+            &mut opened.conn,
+            "INSERT INTO dbo.posts (title, active) VALUES (N'o''brien', 1)",
+        )
+        .await
+        .unwrap();
+        let rows = exec(&mut opened.conn, "SELECT title, active, rev FROM dbo.posts")
             .await
             .unwrap();
-        let rows = exec(&mut opened.conn, "SELECT title, active, rev FROM dbo.posts").await.unwrap();
         assert_eq!(rows.rows[0][0], CellValue::Text("o'brien".into()));
         assert_eq!(rows.rows[0][1], CellValue::Bool(true));
         assert!(matches!(rows.rows[0][2], CellValue::Bytes(_)));
-        exec(&mut opened.conn, "UPDATE dbo.posts SET title = N'next' WHERE id = 1").await.unwrap();
-        let tables = exec(&mut opened.conn, &MssqlDialect.tables_sql("recon_mssql_live")).await.unwrap();
-        assert!(tables.text_rows().iter().any(|row| super::text_at(row, 0) == "dbo.posts"));
+        exec(
+            &mut opened.conn,
+            "UPDATE dbo.posts SET title = N'next' WHERE id = 1",
+        )
+        .await
+        .unwrap();
+        let tables = exec(
+            &mut opened.conn,
+            &MssqlDialect.tables_sql("recon_mssql_live"),
+        )
+        .await
+        .unwrap();
+        assert!(tables
+            .text_rows()
+            .iter()
+            .any(|row| super::text_at(row, 0) == "dbo.posts"));
 
         let mut out = Vec::new();
         let cancel = std::sync::atomic::AtomicBool::new(false);
@@ -1019,8 +1186,16 @@ mod tests {
             &mut opened.conn,
             "SQL Server",
             "recon_mssql_live",
-            &[crate::db::dump::DumpTable { name: "dbo.posts".into(), view: false }],
-            crate::db::dump::DumpOptions { structure: true, data: true, drop_tables: true, routines: true },
+            &[crate::db::dump::DumpTable {
+                name: "dbo.posts".into(),
+                view: false,
+            }],
+            crate::db::dump::DumpOptions {
+                structure: true,
+                data: true,
+                drop_tables: true,
+                routines: true,
+            },
             &mut dump,
         )
         .await
@@ -1029,8 +1204,12 @@ mod tests {
         assert!(sql.contains("IDENTITY_INSERT"), "{sql}");
         assert!(sql.contains("N'next'"), "{sql}");
 
-        exec(&mut opened.conn, "CREATE DATABASE recon_mssql_live_dst").await.unwrap();
-        exec(&mut opened.conn, "USE [recon_mssql_live_dst]").await.unwrap();
+        exec(&mut opened.conn, "CREATE DATABASE recon_mssql_live_dst")
+            .await
+            .unwrap();
+        exec(&mut opened.conn, "USE [recon_mssql_live_dst]")
+            .await
+            .unwrap();
         let mut splitter = crate::db::sql_split::Splitter::new(crate::models::Driver::Mssql);
         let mut statements = Vec::new();
         for line in sql.split_inclusive('\n') {
@@ -1044,12 +1223,18 @@ mod tests {
                 .await
                 .unwrap_or_else(|err| panic!("{err}: {}", statement.sql));
         }
-        let copied = exec(&mut opened.conn, "SELECT title, active FROM dbo.posts").await.unwrap();
+        let copied = exec(&mut opened.conn, "SELECT title, active FROM dbo.posts")
+            .await
+            .unwrap();
         assert_eq!(copied.rows[0][0], CellValue::Text("next".into()));
         assert_eq!(copied.rows[0][1], CellValue::Bool(true));
         exec(&mut opened.conn, "USE [master]").await.ok();
-        exec(&mut opened.conn, "DROP DATABASE recon_mssql_live").await.ok();
-        exec(&mut opened.conn, "DROP DATABASE recon_mssql_live_dst").await.ok();
+        exec(&mut opened.conn, "DROP DATABASE recon_mssql_live")
+            .await
+            .ok();
+        exec(&mut opened.conn, "DROP DATABASE recon_mssql_live_dst")
+            .await
+            .ok();
         opened.conn.close().await;
         opened.pool.close().await;
     }
