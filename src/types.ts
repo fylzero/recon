@@ -513,10 +513,13 @@ export interface ImportProgress {
 
 /** Per-logical-core load and, when the machine exposes one, a Celsius temperature. */
 export interface MachineStats {
-  /** One number per logical core, 0–100, or null when that reading is unavailable. */
-  load: number[] | null;
+  /** One number per logical core, 0–100, or empty when that reading is unavailable. */
+  cores: number[];
   /** Degrees Celsius, or null when unavailable. */
-  temperatureC: number | null;
+  temperatureCelsius: number | null;
+  /** Optional legacy aliases if present. */
+  load?: number[] | null;
+  temperatureC?: number | null;
 }
 
 export interface ImportBackend {

@@ -239,7 +239,7 @@ void fileLabel;
 void statementLabel;
 
 const temperatureValue = computed(() => {
-  const value = stats.value?.temperatureC;
+  const value = stats.value?.temperatureCelsius ?? stats.value?.temperatureC;
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 });
 
@@ -264,7 +264,10 @@ const temperatureLevel = computed<"good" | "warn" | "bad" | "muted">(() => {
   return "bad";
 });
 
-const cores = computed(() => (Array.isArray(stats.value?.load) ? stats.value.load : null));
+const cores = computed(() => {
+  const list = stats.value?.cores ?? stats.value?.load;
+  return Array.isArray(list) && list.length ? list : null;
+});
 const EQ_SEGMENTS = 14;
 
 function eqSegmentActive(load: number, segmentFromBottom: number) {

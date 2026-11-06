@@ -1,32 +1,66 @@
 use serde::Serialize;
-
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::sync::Mutex;
 
-/// Per-logical-core load and, when the machine exposes one, a Celsius temperature.
-/// `load` and `temperatureC` are null when that reading is unavailable.
+/// Per-logical-core CPU load percentages (`0.0..=100.0`) and optional temperature in °C.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MachineStats {
-    pub load: Option<Vec<f64>>,
-    pub temperature_c: Option<f64>,
+    pub cores: Vec<f32>,
+    pub temperature_celsius: Option<f32>,
 }
 
 #[tauri::command]
 pub fn machine_stats() -> MachineStats {
     MachineStats {
-        load: per_core_load(),
-        temperature_c: temperature_c(),
+        cores: per_core_load(),
+        temperature_celsius: temperature_celsius(),
     }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
-fn plausible_celsius(celsius: f64) -> Option<f64> {
-    if !celsius.is_finite() || celsius <= 0.0 || celsius > 125.0 {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CoreTicks {
+    idle: u64,
+    total: u64,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+fn utilization(idle_delta: u64, total_delta: u64) -> f32 {
+    if total_delta == 0 {
+        return 0.0;
+    }
+    let busy = total_delta.saturating_sub(idle_delta.min(total_delta));
+    let percent = (busy as f64) * 100.0 / (total_delta as f64);
+    (((percent.clamp(0.0, 100.0) * 10.0).round() / 10.0) as f32).clamp(0.0, 100.0)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+fn loads_between(previous: &[CoreTicks], current: &[CoreTicks]) -> Option<Vec<f32>> {
+    if previous.len() != current.len() || current.is_empty() {
+        return None;
+    }
+    Some(
+        previous
+            .iter()
+            .zip(current)
+            .map(|(before, after)| {
+                utilization(
+                    after.idle.wrapping_sub(before.idle),
+                    after.total.wrapping_sub(before.total),
+                )
+            })
+            .collect(),
+    )
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+fn plausible_celsius(celsius: f32) -> Option<f32> {
+    if !celsius.is_finite() || !(10.0..=130.0).contains(&celsius) {
         return None;
     }
     let rounded = (celsius * 10.0).round() / 10.0;
-    if rounded > 0.0 && rounded <= 125.0 {
+    if (10.0..=130.0).contains(&rounded) {
         Some(rounded)
     } else {
         None
@@ -38,66 +72,61 @@ fn is_cpu_temperature_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     [
         "cpu", "pacc", "eacc", "peci", "tdie", "tdev", "core", "package", "pkg", "k10temp",
-        "zenpower", "tctl",
+        "zenpower", "tctl", "soc",
     ]
     .iter()
     .any(|needle| name.contains(needle))
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn consider(best: &mut Option<f64>, sample: Option<f64>) {
+fn consider(best: &mut Option<f32>, sample: Option<f32>) {
     if let Some(sample) = sample {
         *best = Some(best.map_or(sample, |current| current.max(sample)));
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows", test))]
-fn utilization(idle_delta: u64, total_delta: u64) -> f64 {
-    if total_delta == 0 {
-        return 0.0;
-    }
-    let busy = total_delta.saturating_sub(idle_delta.min(total_delta));
-    let percent = (busy as f64) * 100.0 / (total_delta as f64);
-    (percent.clamp(0.0, 100.0) * 10.0).round() / 10.0
-}
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+static PREVIOUS: Mutex<Option<Vec<CoreTicks>>> = Mutex::new(None);
 
-#[cfg(target_os = "macos")]
-type TickSample = Vec<[u32; 4]>;
-
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-type TickSample = Vec<CoreTicks>;
-
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-static PREVIOUS: Mutex<Option<TickSample>> = Mutex::new(None);
-
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-fn per_core_load() -> Option<Vec<f64>> {
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn per_core_load() -> Vec<f32> {
     let mut previous = PREVIOUS.lock().unwrap_or_else(|err| err.into_inner());
-    let current = read_ticks()?;
-    let loads = previous
-        .as_ref()
-        .and_then(|prior| loads_between(prior, &current));
-    *previous = Some(current);
+    let Some(first) = read_ticks() else {
+        return Vec::new();
+    };
+    if let Some(prior) = previous.as_ref() {
+        if let Some(loads) = loads_between(prior, &first) {
+            *previous = Some(first);
+            return loads;
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    let Some(second) = read_ticks() else {
+        *previous = Some(first);
+        return Vec::new();
+    };
+    let loads = loads_between(&first, &second).unwrap_or_default();
+    *previous = Some(second);
     loads
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-fn per_core_load() -> Option<Vec<f64>> {
-    None
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn per_core_load() -> Vec<f32> {
+    Vec::new()
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn temperature_c() -> Option<f64> {
+fn temperature_celsius() -> Option<f32> {
     None
 }
 
 #[cfg(target_os = "macos")]
-fn temperature_c() -> Option<f64> {
+fn temperature_celsius() -> Option<f32> {
     hid_temperature().or_else(smc_temperature)
 }
 
 #[cfg(target_os = "linux")]
-fn temperature_c() -> Option<f64> {
+fn temperature_celsius() -> Option<f32> {
     let zones = thermal_zone_temperature();
     let hwmon = hwmon_temperature();
     match (zones, hwmon) {
@@ -108,80 +137,60 @@ fn temperature_c() -> Option<f64> {
     }
 }
 
-// mach/machine.h: CPU_STATE_USER, CPU_STATE_SYSTEM, CPU_STATE_IDLE, CPU_STATE_NICE.
-#[cfg(target_os = "macos")]
-const USER: usize = 0;
-#[cfg(target_os = "macos")]
-const SYSTEM: usize = 1;
-#[cfg(target_os = "macos")]
-const IDLE: usize = 2;
-#[cfg(target_os = "macos")]
-const NICE: usize = 3;
+// mach/machine.h constants
 #[cfg(target_os = "macos")]
 const PROCESSOR_CPU_LOAD_INFO: i32 = 2;
+#[cfg(target_os = "macos")]
+const CPU_STATE_USER: usize = 0;
+#[cfg(target_os = "macos")]
+const CPU_STATE_SYSTEM: usize = 1;
+#[cfg(target_os = "macos")]
+const CPU_STATE_IDLE: usize = 2;
+#[cfg(target_os = "macos")]
+const CPU_STATE_NICE: usize = 3;
+#[cfg(target_os = "macos")]
+const CPU_STATE_MAX: usize = 4;
 
 #[cfg(target_os = "macos")]
-fn loads_between(previous: &[[u32; 4]], current: &[[u32; 4]]) -> Option<Vec<f64>> {
-    if previous.len() != current.len() || current.is_empty() {
-        return None;
-    }
-    Some(
-        previous
-            .iter()
-            .zip(current)
-            .map(|(before, after)| {
-                let user = after[USER].wrapping_sub(before[USER]) as u64;
-                let system = after[SYSTEM].wrapping_sub(before[SYSTEM]) as u64;
-                let idle = after[IDLE].wrapping_sub(before[IDLE]) as u64;
-                let nice = after[NICE].wrapping_sub(before[NICE]) as u64;
-                let total = user
-                    .wrapping_add(system)
-                    .wrapping_add(idle)
-                    .wrapping_add(nice);
-                utilization(idle, total)
-            })
-            .collect(),
-    )
-}
-
-#[cfg(target_os = "macos")]
-fn read_ticks() -> Option<TickSample> {
+fn read_ticks() -> Option<Vec<CoreTicks>> {
     unsafe {
         let host = mach_host_self();
         if host == 0 {
             return None;
         }
-        let mut cpu_count: u32 = 0;
-        let mut info: *mut i32 = std::ptr::null_mut();
+        let mut processor_count: u32 = 0;
+        let mut info_array: *mut i32 = std::ptr::null_mut();
         let mut info_count: u32 = 0;
         let status = host_processor_info(
             host,
             PROCESSOR_CPU_LOAD_INFO,
-            &mut cpu_count,
-            &mut info,
+            &mut processor_count,
+            &mut info_array,
             &mut info_count,
         );
         let guard = HostCpuInfo {
             host,
-            info,
+            info: info_array,
             info_count,
         };
-        if status != 0 || guard.info.is_null() || cpu_count == 0 || cpu_count > 4096 {
+        if status != 0 || guard.info.is_null() || processor_count == 0 || processor_count > 4096 {
             return None;
         }
-        let states = 4usize;
-        if (guard.info_count as usize) < cpu_count as usize * states {
+        if (guard.info_count as usize) < (processor_count as usize) * CPU_STATE_MAX {
             return None;
         }
-        let mut cores = Vec::with_capacity(cpu_count as usize);
-        for cpu in 0..cpu_count as usize {
-            let base = cpu * states;
-            cores.push([
-                *guard.info.add(base + USER) as u32,
-                *guard.info.add(base + SYSTEM) as u32,
-                *guard.info.add(base + IDLE) as u32,
-                *guard.info.add(base + NICE) as u32,
-            ]);
+        let mut cores = Vec::with_capacity(processor_count as usize);
+        for cpu in 0..processor_count as usize {
+            let base = cpu * CPU_STATE_MAX;
+            let user = (*guard.info.add(base + CPU_STATE_USER) as u32) as u64;
+            let system = (*guard.info.add(base + CPU_STATE_SYSTEM) as u32) as u64;
+            let idle = (*guard.info.add(base + CPU_STATE_IDLE) as u32) as u64;
+            let nice = (*guard.info.add(base + CPU_STATE_NICE) as u32) as u64;
+            let total = user
+                .wrapping_add(system)
+                .wrapping_add(idle)
+                .wrapping_add(nice);
+            cores.push(CoreTicks { idle, total });
         }
         Some(cores)
     }
@@ -202,7 +211,7 @@ impl Drop for HostCpuInfo {
                 vm_deallocate(
                     mach_task_self_,
                     self.info as usize,
-                    self.info_count as usize * std::mem::size_of::<i32>(),
+                    (self.info_count as usize) * std::mem::size_of::<i32>(),
                 );
             }
             if self.host != 0 {
@@ -222,7 +231,7 @@ const CF_STRING_UTF8: u32 = 0x0800_0100;
 const CF_NUMBER_SINT32: isize = 3;
 
 #[cfg(target_os = "macos")]
-fn hid_temperature() -> Option<f64> {
+fn hid_temperature() -> Option<f32> {
     let api = hid_api()?;
     let client = CfObject::new(unsafe { (api.create)(std::ptr::null()) })?;
     let matching = temperature_matching()?;
@@ -252,7 +261,7 @@ fn hid_temperature() -> Option<f64> {
         }) else {
             continue;
         };
-        let celsius = unsafe { (api.get_float)(event.as_ptr(), TEMPERATURE_FIELD) };
+        let celsius = unsafe { (api.get_float)(event.as_ptr(), TEMPERATURE_FIELD) } as f32;
         consider(&mut best, plausible_celsius(celsius));
     }
     best
@@ -305,7 +314,6 @@ fn load_hid_api() -> Option<HidApi> {
         if api.is_none() {
             dlclose(handle);
         }
-        // Leave IOKit mapped; these pointers are used for the process lifetime.
         api
     }
 }
@@ -414,7 +422,7 @@ fn temperature_matching() -> Option<CfObject> {
 }
 
 #[cfg(target_os = "macos")]
-fn smc_temperature() -> Option<f64> {
+fn smc_temperature() -> Option<f32> {
     unsafe {
         let matching = IOServiceMatching(c"AppleSMC".as_ptr());
         if matching.is_null() {
@@ -441,7 +449,7 @@ fn smc_temperature() -> Option<f64> {
 }
 
 #[cfg(target_os = "macos")]
-fn read_smc_celsius(connection: u32, key: &[u8; 4]) -> Option<f64> {
+fn read_smc_celsius(connection: u32, key: &[u8; 4]) -> Option<f32> {
     let mut input = SmcKeyData::zero();
     let mut output = SmcKeyData::zero();
     input.key = u32::from_be_bytes(*key);
@@ -524,27 +532,20 @@ impl SmcKeyData {
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn decode_smc_temperature(data_type: u32, bytes: &[u8]) -> Option<f64> {
+fn decode_smc_temperature(data_type: u32, bytes: &[u8]) -> Option<f32> {
     let sp78 = u32::from_be_bytes(*b"sp78");
     let sp87 = u32::from_be_bytes(*b"sp87");
     let float_type = u32::from_be_bytes(*b"flt ");
     let celsius = if data_type == sp78 && bytes.len() >= 2 {
-        i16::from_be_bytes([bytes[0], bytes[1]]) as f64 / 256.0
+        i16::from_be_bytes([bytes[0], bytes[1]]) as f32 / 256.0
     } else if data_type == sp87 && bytes.len() >= 2 {
-        i16::from_be_bytes([bytes[0], bytes[1]]) as f64 / 128.0
+        i16::from_be_bytes([bytes[0], bytes[1]]) as f32 / 128.0
     } else if data_type == float_type && bytes.len() >= 4 {
-        f32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64
+        f32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
     } else {
         return None;
     };
     plausible_celsius(celsius)
-}
-
-#[cfg(any(target_os = "linux", target_os = "windows", test))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct CoreTicks {
-    idle: u64,
-    total: u64,
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -592,123 +593,9 @@ fn parse_proc_stat(text: &str) -> Option<Vec<CoreTicks>> {
 }
 
 #[cfg(target_os = "linux")]
-fn read_ticks() -> Option<TickSample> {
+fn read_ticks() -> Option<Vec<CoreTicks>> {
     let text = std::fs::read_to_string("/proc/stat").ok()?;
     parse_proc_stat(&text)
-}
-
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-fn loads_between(previous: &[CoreTicks], current: &[CoreTicks]) -> Option<Vec<f64>> {
-    if previous.len() != current.len() || current.is_empty() {
-        return None;
-    }
-    Some(
-        previous
-            .iter()
-            .zip(current)
-            .map(|(before, after)| {
-                utilization(
-                    after.idle.wrapping_sub(before.idle),
-                    after.total.wrapping_sub(before.total),
-                )
-            })
-            .collect(),
-    )
-}
-
-#[cfg(any(target_os = "windows", test))]
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct SystemProcessorPerformanceInformation {
-    idle_time: i64,
-    kernel_time: i64,
-    user_time: i64,
-    _dpc_time: i64,
-    _interrupt_time: i64,
-    _interrupt_count: u32,
-}
-
-#[cfg(any(target_os = "windows", test))]
-const _: () = assert!(std::mem::size_of::<SystemProcessorPerformanceInformation>() == 48);
-
-#[cfg(any(target_os = "windows", test))]
-fn windows_ticks_from_perf_info(
-    entries: &[SystemProcessorPerformanceInformation],
-) -> Option<Vec<CoreTicks>> {
-    if entries.is_empty() {
-        return None;
-    }
-    Some(
-        entries
-            .iter()
-            .map(|entry| {
-                let idle = entry.idle_time.max(0) as u64;
-                let kernel = entry.kernel_time.max(0) as u64;
-                let user = entry.user_time.max(0) as u64;
-                // SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION.KernelTime includes IdleTime.
-                let kernel_busy = kernel.saturating_sub(idle);
-                let total = idle.wrapping_add(kernel_busy).wrapping_add(user);
-                CoreTicks { idle, total }
-            })
-            .collect(),
-    )
-}
-
-#[cfg(target_os = "windows")]
-fn read_ticks() -> Option<TickSample> {
-    const SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION: u32 = 8;
-    const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004u32 as i32;
-
-    let elem_size = std::mem::size_of::<SystemProcessorPerformanceInformation>();
-    let initial = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(64)
-        .clamp(1, 4096);
-    let mut buffer = vec![SystemProcessorPerformanceInformation::default(); initial];
-    let mut return_length: u32 = 0;
-    let mut status = unsafe {
-        NtQuerySystemInformation(
-            SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION,
-            buffer.as_mut_ptr().cast(),
-            (buffer.len() * elem_size) as u32,
-            &mut return_length,
-        )
-    };
-    if status == STATUS_INFO_LENGTH_MISMATCH {
-        let needed = (return_length as usize) / elem_size;
-        if needed == 0 || needed > 4096 {
-            return None;
-        }
-        buffer.resize(needed, SystemProcessorPerformanceInformation::default());
-        return_length = 0;
-        status = unsafe {
-            NtQuerySystemInformation(
-                SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION,
-                buffer.as_mut_ptr().cast(),
-                (buffer.len() * elem_size) as u32,
-                &mut return_length,
-            )
-        };
-    }
-    if status != 0 {
-        return None;
-    }
-    let count = (return_length as usize) / elem_size;
-    if count == 0 || count > buffer.len() {
-        return None;
-    }
-    windows_ticks_from_perf_info(&buffer[..count])
-}
-
-#[cfg(target_os = "windows")]
-#[link(name = "ntdll")]
-extern "system" {
-    fn NtQuerySystemInformation(
-        system_information_class: u32,
-        system_information: *mut std::ffi::c_void,
-        system_information_length: u32,
-        return_length: *mut u32,
-    ) -> i32;
 }
 
 #[cfg(target_os = "linux")]
@@ -719,8 +606,8 @@ fn read_trimmed(path: &std::path::Path) -> Option<String> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn celsius_from_millidegrees(text: &str) -> Option<f64> {
-    let milli: f64 = text.trim().parse().ok()?;
+fn celsius_from_millidegrees(text: &str) -> Option<f32> {
+    let milli: f32 = text.trim().parse().ok()?;
     plausible_celsius(milli / 1000.0)
 }
 
@@ -735,9 +622,10 @@ fn temp_input_index(name: &str) -> Option<u32> {
 }
 
 #[cfg(target_os = "linux")]
-fn thermal_zone_temperature() -> Option<f64> {
+fn thermal_zone_temperature() -> Option<f32> {
     let entries = std::fs::read_dir("/sys/class/thermal").ok()?;
-    let mut best = None;
+    let mut cpu_best = None;
+    let mut fallback_best = None;
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
@@ -747,22 +635,23 @@ fn thermal_zone_temperature() -> Option<f64> {
             continue;
         }
         let path = entry.path();
-        let Some(kind) = read_trimmed(&path.join("type")) else {
-            continue;
-        };
-        if !is_cpu_temperature_name(&kind) {
-            continue;
-        }
         let Some(raw) = read_trimmed(&path.join("temp")) else {
             continue;
         };
-        consider(&mut best, celsius_from_millidegrees(&raw));
+        let reading = celsius_from_millidegrees(&raw);
+        if let Some(kind) = read_trimmed(&path.join("type")) {
+            if is_cpu_temperature_name(&kind) {
+                consider(&mut cpu_best, reading);
+                continue;
+            }
+        }
+        consider(&mut fallback_best, reading);
     }
-    best
+    cpu_best.or(fallback_best)
 }
 
 #[cfg(target_os = "linux")]
-fn hwmon_temperature() -> Option<f64> {
+fn hwmon_temperature() -> Option<f32> {
     let entries = std::fs::read_dir("/sys/class/hwmon").ok()?;
     let mut best = None;
     for entry in entries.flatten() {
@@ -878,24 +767,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn json_uses_null_when_unavailable() {
+    fn json_serializes_camel_case_fields() {
         let stats = MachineStats {
-            load: None,
-            temperature_c: None,
+            cores: Vec::new(),
+            temperature_celsius: None,
         };
         let json = serde_json::to_value(&stats).unwrap();
-        assert!(json.get("load").unwrap().is_null());
-        assert!(json.get("temperatureC").unwrap().is_null());
-        assert!(json.get("temperature_c").is_none());
+        assert_eq!(json["cores"], serde_json::json!([]));
+        assert!(json.get("temperatureCelsius").unwrap().is_null());
+        assert!(json.get("temperature_celsius").is_none());
 
         let stats = MachineStats {
-            load: Some(vec![0.0, 12.5]),
-            temperature_c: Some(42.0),
+            cores: vec![0.0, 12.5],
+            temperature_celsius: Some(42.0),
         };
         let json = serde_json::to_value(&stats).unwrap();
-        assert_eq!(json["load"][0], 0.0);
-        assert_eq!(json["load"][1], 12.5);
-        assert_eq!(json["temperatureC"], 42.0);
+        assert_eq!(json["cores"][0], 0.0);
+        assert_eq!(json["cores"][1], 12.5);
+        assert_eq!(json["temperatureCelsius"], 42.0);
     }
 
     #[test]
@@ -979,66 +868,17 @@ mod tests {
         assert_eq!(temp_input_index("temp_input"), None);
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
-    fn windows_perf_info_subtracts_idle_from_kernel_time() {
-        let entries = [
-            SystemProcessorPerformanceInformation {
-                idle_time: 700,
-                kernel_time: 800,
-                user_time: 200,
-                ..Default::default()
-            },
-            SystemProcessorPerformanceInformation {
-                idle_time: 900,
-                kernel_time: 900,
-                user_time: 100,
-                ..Default::default()
-            },
-        ];
-        let ticks = windows_ticks_from_perf_info(&entries).unwrap();
-        assert_eq!(
-            ticks,
-            vec![
-                CoreTicks {
-                    idle: 700,
-                    total: 1000
-                },
-                CoreTicks {
-                    idle: 900,
-                    total: 1000
-                },
-            ]
-        );
-        assert!(windows_ticks_from_perf_info(&[]).is_none());
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-    #[test]
-    fn second_sample_is_per_core_load() {
-        let first = per_core_load();
-        let second = per_core_load();
-        assert!(first.is_none(), "first sample has no delta yet");
-        let loads = second.expect("second sample");
-        assert!(!loads.is_empty());
-        assert!(loads.iter().all(|load| (0.0..=100.0).contains(load)));
-    }
-
-    #[test]
-    fn temperature_reading_is_celsius_or_absent() {
-        if let Some(celsius) = temperature_c() {
+    fn machine_stats_returns_valid_bounded_core_loads() {
+        let stats = machine_stats();
+        assert!(!stats.cores.is_empty());
+        assert!(stats.cores.iter().all(|load| (0.0..=100.0).contains(load)));
+        if let Some(celsius) = stats.temperature_celsius {
             assert!(
-                (0.0..=125.0).contains(&celsius),
-                "temperature {celsius} is outside Celsius"
+                (10.0..=130.0).contains(&celsius),
+                "temperature {celsius} is outside Celsius range"
             );
         }
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn mac_tick_delta_skips_idle() {
-        let previous = vec![[100, 50, 800, 50]];
-        let current = vec![[150, 70, 850, 50]];
-        assert_eq!(loads_between(&previous, &current).unwrap(), vec![58.3]);
-        assert!(loads_between(&previous, &[]).is_none());
     }
 }

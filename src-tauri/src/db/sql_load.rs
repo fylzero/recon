@@ -818,6 +818,71 @@ fn dec_in_flight(in_flight: &AtomicU64, total_in_flight: &AtomicU64) {
     }
 }
 
+const DEADLOCK_RETRY_DELAYS_MS: [u64; 8] = [10, 25, 50, 100, 200, 400, 800, 1500];
+
+fn is_retryable_deadlock(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("deadlock found when trying to get lock")
+        || lower.contains("lock wait timeout exceeded; try restarting transaction")
+        || lower.contains("deadlock detected")
+}
+
+async fn execute_sql_retry(
+    conn: &mut Conn,
+    sql: &str,
+    cancel: &AtomicBool,
+) -> Result<u64, String> {
+    let mut attempt = 0usize;
+    loop {
+        match conn.execute(sql).await {
+            Ok(rows) => return Ok(rows),
+            Err(err) => {
+                if attempt < DEADLOCK_RETRY_DELAYS_MS.len()
+                    && !cancel.load(Ordering::Relaxed)
+                    && !is_connection_lost(&err)
+                    && is_retryable_deadlock(&err)
+                {
+                    let delay = DEADLOCK_RETRY_DELAYS_MS[attempt];
+                    attempt += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    }
+}
+
+async fn execute_batch_retry(
+    conn: &mut Conn,
+    batch_sql: &str,
+    wrap_tx: bool,
+    cancel: &AtomicBool,
+) -> Result<u64, String> {
+    let mut attempt = 0usize;
+    loop {
+        match conn.execute(batch_sql).await {
+            Ok(rows) => return Ok(rows),
+            Err(err) => {
+                if attempt < DEADLOCK_RETRY_DELAYS_MS.len()
+                    && !cancel.load(Ordering::Relaxed)
+                    && !is_connection_lost(&err)
+                    && is_retryable_deadlock(&err)
+                {
+                    if wrap_tx {
+                        let _ = conn.execute("ROLLBACK").await;
+                    }
+                    let delay = DEADLOCK_RETRY_DELAYS_MS[attempt];
+                    attempt += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn exec_phase1_extra_worker(
     conn: &mut Conn,
@@ -837,7 +902,7 @@ async fn exec_phase1_extra_worker(
             in_flight.store(0, Ordering::Relaxed);
             return false;
         }
-        if let Err(err) = conn.execute(sql).await {
+        if let Err(err) = execute_sql_retry(conn, sql, cancel).await {
             in_flight.store(0, Ordering::Relaxed);
             fail_phase1(
                 error,
@@ -865,7 +930,7 @@ async fn exec_phase1_extra_worker(
                     }
                     return false;
                 }
-                if let Err(err) = conn.execute(&sql).await {
+                if let Err(err) = execute_sql_retry(conn, &sql, cancel).await {
                     dec_in_flight(in_flight, total_in_flight);
                     fail_phase1(
                         error,
@@ -891,7 +956,7 @@ async fn exec_phase1_extra_worker(
             PreMsg::Session { sql } => {
                 let res = if stop_phase1(error, cancel, notify, usize::MAX, None) {
                     Err(())
-                } else if let Err(err) = conn.execute(&sql).await {
+                } else if let Err(err) = execute_sql_retry(conn, &sql, cancel).await {
                     fail_phase1(
                         error,
                         cancel,
@@ -1072,7 +1137,7 @@ where
                             || is_mysql_tx_forbidden_set(&stmt.sql)))
                     || (tx_begin && (workers > 1 || in_tx));
                 if !skip_exec {
-                    if let Err(err) = coordinator.execute(&stmt.sql).await {
+                    if let Err(err) = execute_sql_retry(coordinator, &stmt.sql, ctx.cancel).await {
                         return Err(statement_failure(index, stmt.line, err));
                     }
                     if tx_begin {
@@ -1207,6 +1272,7 @@ where
 
         let mut ddl_table_workers: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
+        let mut fk_tables: HashSet<String> = HashSet::new();
         let mut worker_assigned_tables = vec![0usize; workers];
         let mut worker_opened = vec![false; workers];
         worker_opened[0] = true;
@@ -1340,7 +1406,10 @@ where
                         continue;
                     }
 
-                    if let Some(table) = pre_target_table(driver, &stmt.sql) {
+                    collect_fk_tables(&stmt.sql, &mut fk_tables);
+                    if let Some(table) = pre_target_table(driver, &stmt.sql)
+                        .filter(|table| !fk_tables.contains(table.as_str()))
+                    {
                         let w = if let Some(&existing) = ddl_table_workers.get(table.as_str()) {
                             existing
                         } else {
@@ -1539,7 +1608,9 @@ where
                         }
                         break;
                     }
-                    if let Err(err) = coordinator.execute(&sql).await {
+                    if let Err(err) =
+                        execute_sql_retry(coordinator, &sql, &coord_cancel).await
+                    {
                         dec_in_flight(&coord_in_flight, &coord_total_in_flight);
                         fail_phase1(
                             &coord_error,
@@ -2027,11 +2098,13 @@ struct ProgressBatch {
 
 enum WorkerDeqs {
     Memory {
+        table_id: usize,
         cursor: std::io::Cursor<Arc<[u8]>>,
         victim: usize,
         peeked: Option<NextRecord>,
     },
     Disk {
+        table_id: usize,
         path: PathBuf,
         reader: Option<BufReader<File>>,
         victim: usize,
@@ -2056,22 +2129,31 @@ enum NextRecord {
 
 impl WorkerDeqs {
     fn open(chunk: DataChunk, victim: usize) -> Result<Self, String> {
+        let table_id = chunk.table_id;
         match chunk.source {
             ChunkSource::Memory(bytes) => {
                 let mut cursor = std::io::Cursor::new(bytes);
                 read_magic(&mut cursor)?;
                 Ok(WorkerDeqs::Memory {
+                    table_id,
                     cursor,
                     victim,
                     peeked: None,
                 })
             }
             ChunkSource::Disk(path) => Ok(WorkerDeqs::Disk {
+                table_id,
                 path,
                 reader: None,
                 victim,
                 peeked: None,
             }),
+        }
+    }
+
+    fn table_id(&self) -> usize {
+        match self {
+            WorkerDeqs::Memory { table_id, .. } | WorkerDeqs::Disk { table_id, .. } => *table_id,
         }
     }
 
@@ -2286,8 +2368,40 @@ impl SharedQueues {
                 return Ok(Some(batch));
             }
         }
-        // Own queue is empty: steal a batch from another worker's queue.
+        // Own queue is empty: first try to steal an untouched chunk from the back of
+        // another worker's queue (preferring a different table than its active front chunk)
+        // so two workers do not contend on the same table while queued tables remain.
         let n = self.queues.len();
+        for require_different_table in [true, false] {
+            for offset in 1..n {
+                let other = (worker + offset) % n;
+                let stolen = {
+                    let mut deq = lock(&self.queues[other]);
+                    if deq.len() > 1 {
+                        let front_table = deq.front().map(WorkerDeqs::table_id);
+                        let back_table = deq.back().map(WorkerDeqs::table_id);
+                        if !require_different_table || front_table != back_table {
+                            deq.pop_back()
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                };
+                if let Some(chunk_deq) = stolen {
+                    if let Some(slot) = self.queues.get(worker) {
+                        let mut own_deq = lock(slot);
+                        own_deq.push_back(chunk_deq);
+                        if let Some(batch) = Self::pop_batch_from_deq(&mut own_deq, worker, track)?
+                        {
+                            return Ok(Some(batch));
+                        }
+                    }
+                }
+            }
+        }
+        // All remaining queues are down to their final chunk: steal a batch from the front.
         for offset in 1..n {
             let other = (worker + offset) % n;
             let mut deq = lock(&self.queues[other]);
@@ -2406,7 +2520,7 @@ async fn exec_phase2_worker(conn: &mut Conn, run_preamble: bool, worker: usize, 
                 }
                 if to_run.len() == 1 {
                     let stmt = &to_run[0];
-                    if let Err(err) = conn.execute(&stmt.sql).await {
+                    if let Err(err) = execute_sql_retry(conn, &stmt.sql, &ctx.cancel).await {
                         fail(
                             &ctx.error,
                             &ctx.cancel,
@@ -2424,7 +2538,7 @@ async fn exec_phase2_worker(conn: &mut Conn, run_preamble: bool, worker: usize, 
                     });
                 } else {
                     build_batch_sql(&mut batch_sql, &to_run, true);
-                    match conn.execute(&batch_sql).await {
+                    match execute_batch_retry(conn, &batch_sql, true, &ctx.cancel).await {
                         Ok(_) => {
                             let mut total_b = 0u64;
                             let mut indexes = Vec::with_capacity(to_run.len());
@@ -2452,7 +2566,9 @@ async fn exec_phase2_worker(conn: &mut Conn, run_preamble: bool, worker: usize, 
                             }
                             let _ = conn.execute("ROLLBACK").await;
                             for stmt in &to_run {
-                                if let Err(item_err) = conn.execute(&stmt.sql).await {
+                                if let Err(item_err) =
+                                    execute_sql_retry(conn, &stmt.sql, &ctx.cancel).await
+                                {
                                     fail(
                                         &ctx.error,
                                         &ctx.cancel,
@@ -2469,10 +2585,13 @@ async fn exec_phase2_worker(conn: &mut Conn, run_preamble: bool, worker: usize, 
                                     indexes: vec![(stmt.index, b)],
                                 });
                             }
-                            let batch_err = statement_failure(to_run[0].index, to_run[0].line, err);
-                            fail(&ctx.error, &ctx.cancel, batch_err);
-                            ctx.cancel_notify.notify_waiters();
-                            return;
+                            if !is_retryable_deadlock(&err) {
+                                let batch_err =
+                                    statement_failure(to_run[0].index, to_run[0].line, err);
+                                fail(&ctx.error, &ctx.cancel, batch_err);
+                                ctx.cancel_notify.notify_waiters();
+                                return;
+                            }
                         }
                     }
                 }
@@ -2642,7 +2761,7 @@ async fn exec_post<Report>(
                 && (is_lock_or_unlock_tables(&stmt.sql) || is_mysql_tx_forbidden_set(&stmt.sql)))
             || (tx_end && (outer_tx || workers > 1 || !in_tx || Some(pos) != last_tx_end));
         if !skip_exec {
-            if let Err(err) = conn.execute(&stmt.sql).await {
+            if let Err(err) = execute_sql_retry(conn, &stmt.sql, ctx.cancel).await {
                 fail(
                     ctx.error,
                     ctx.cancel,
@@ -2703,7 +2822,7 @@ where
     if batch.len() == 1 {
         let stmt = batch.pop().expect("single statement");
         *batch_bytes = 0;
-        if let Err(err) = conn.execute(&stmt.sql).await {
+        if let Err(err) = execute_sql_retry(conn, &stmt.sql, ctx.cancel).await {
             fail(
                 ctx.error,
                 ctx.cancel,
@@ -2717,7 +2836,7 @@ where
 
     let wrap_tx = !ctx.in_transaction;
     build_batch_sql(batch_sql, batch, wrap_tx);
-    match conn.execute(batch_sql).await {
+    match execute_batch_retry(conn, batch_sql, wrap_tx, ctx.cancel).await {
         Ok(_) => {
             let mut total_b = 0u64;
             let mut indexes = Vec::with_capacity(batch.len());
@@ -2753,7 +2872,7 @@ where
                 let _ = conn.execute("ROLLBACK").await;
             }
             for stmt in batch.iter() {
-                if let Err(item_err) = conn.execute(&stmt.sql).await {
+                if let Err(item_err) = execute_sql_retry(conn, &stmt.sql, ctx.cancel).await {
                     fail(
                         ctx.error,
                         ctx.cancel,
@@ -2765,11 +2884,16 @@ where
                 }
                 note_progress(ctx.progress, stmt.sql.len() as u64, stmt.index, worker);
             }
-            let batch_err = statement_failure(batch[0].index, batch[0].line, err);
-            fail(ctx.error, ctx.cancel, batch_err);
+            if !is_retryable_deadlock(&err) {
+                let batch_err = statement_failure(batch[0].index, batch[0].line, err);
+                fail(ctx.error, ctx.cancel, batch_err);
+                batch.clear();
+                *batch_bytes = 0;
+                return Err(());
+            }
             batch.clear();
             *batch_bytes = 0;
-            Err(())
+            Ok(())
         }
     }
 }
@@ -4314,6 +4438,91 @@ fn has_top_level_comma(sql: &str) -> bool {
     false
 }
 
+/// Records both the defining table and any `REFERENCES <table_ident>` target
+/// tables when a `CREATE TABLE` or `ALTER TABLE` statement introduces foreign
+/// keys. In MySQL 8.0, once a foreign key links two tables in the data
+/// dictionary, subsequent `DROP TABLE`, `CREATE TABLE`, or `ALTER TABLE`
+/// statements on either table acquire metadata locks on both tables even when
+/// `FOREIGN_KEY_CHECKS=0`, so they must execute as barriers on the coordinator.
+fn collect_fk_tables(sql: &str, fk_tables: &mut HashSet<String>) {
+    let mut head = Words::new(sql);
+    let Some(first) = head.next() else {
+        return;
+    };
+    if !first.eq_ignore_ascii_case("CREATE") && !first.eq_ignore_ascii_case("ALTER") {
+        return;
+    }
+    let mut has_fk = false;
+    let mut scan = Words::new(sql);
+    while let Some(w) = scan.next() {
+        if w.eq_ignore_ascii_case("REFERENCES") {
+            has_fk = true;
+            if let Some((ref_table, _)) = read_qualified_table_ident(&sql[scan.index..]) {
+                if !ref_table.is_empty() {
+                    fk_tables.insert(ref_table);
+                }
+            }
+        } else if w.eq_ignore_ascii_case("FOREIGN") {
+            has_fk = true;
+        }
+    }
+    if has_fk {
+        if let Some(own_table) = ddl_own_table(sql) {
+            fk_tables.insert(own_table);
+        }
+    }
+}
+
+fn ddl_own_table(sql: &str) -> Option<String> {
+    let mut words = Words::new(sql);
+    let first = words.next()?;
+    if first.eq_ignore_ascii_case("CREATE") {
+        let mut word = words.next()?;
+        if word.eq_ignore_ascii_case("UNLOGGED") {
+            word = words.next()?;
+        }
+        if !word.eq_ignore_ascii_case("TABLE") {
+            return None;
+        }
+        let mut after_kw = words.index;
+        if let Some(w1) = words.next() {
+            if w1.eq_ignore_ascii_case("IF") {
+                if let Some(w2) = words.next() {
+                    if w2.eq_ignore_ascii_case("NOT") {
+                        if let Some(w3) = words.next() {
+                            if w3.eq_ignore_ascii_case("EXISTS") {
+                                after_kw = words.index;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let (table, _) = read_qualified_table_ident(&sql[after_kw..])?;
+        return (!table.is_empty()).then_some(table);
+    }
+    if first.eq_ignore_ascii_case("ALTER") {
+        let second = words.next()?;
+        if !second.eq_ignore_ascii_case("TABLE") {
+            return None;
+        }
+        let mut after_kw = words.index;
+        while let Some(w) = words.next() {
+            if w.eq_ignore_ascii_case("IF")
+                || w.eq_ignore_ascii_case("EXISTS")
+                || w.eq_ignore_ascii_case("ONLY")
+            {
+                after_kw = words.index;
+            } else {
+                break;
+            }
+        }
+        let (table, _) = read_qualified_table_ident(&sql[after_kw..])?;
+        return (!table.is_empty()).then_some(table);
+    }
+    None
+}
+
 /// Returns `Some(normalized_table)` when a Phase 1 `Decision::Pre` statement
 /// operates on a single table without cross-table dependencies, so multiple
 /// worker connections can execute independent table DDL in parallel while
@@ -4408,7 +4617,8 @@ fn pre_target_table(driver: Driver, sql: &str) -> Option<String> {
                 || w.eq_ignore_ascii_case("INHERITS")
                 || w.eq_ignore_ascii_case("PARTITION")
                 || w.eq_ignore_ascii_case("SELECT")
-                || (driver == Driver::Postgres && w.eq_ignore_ascii_case("REFERENCES"))
+                || w.eq_ignore_ascii_case("REFERENCES")
+                || w.eq_ignore_ascii_case("FOREIGN")
             {
                 return None;
             }
@@ -4436,6 +4646,7 @@ fn pre_target_table(driver: Driver, sql: &str) -> Option<String> {
         for w in Words::new(rest) {
             if w.eq_ignore_ascii_case("RENAME")
                 || w.eq_ignore_ascii_case("REFERENCES")
+                || w.eq_ignore_ascii_case("FOREIGN")
                 || w.eq_ignore_ascii_case("INHERIT")
                 || w.eq_ignore_ascii_case("ATTACH")
                 || w.eq_ignore_ascii_case("DETACH")
@@ -6165,6 +6376,29 @@ INSERT INTO items VALUES (3, 'three');\n\
             None
         );
         assert_eq!(
+            pre_target_table(
+                Driver::Mysql,
+                "CREATE TABLE `cost_data_items` (`id` bigint unsigned NOT NULL, `cost_data_group_id` int unsigned NOT NULL, `cost_data_task_id` int unsigned NOT NULL, CONSTRAINT `fk_group` FOREIGN KEY (`cost_data_group_id`) REFERENCES `cost_data_groups` (`id`), CONSTRAINT `fk_task` FOREIGN KEY (`cost_data_task_id`) REFERENCES `cost_data_tasks` (`id`))"
+            ),
+            None
+        );
+        let mut fk_tables = HashSet::new();
+        collect_fk_tables(
+            "CREATE TABLE `cost_data_items` (`id` bigint, CONSTRAINT `fk_group` FOREIGN KEY (`cost_data_group_id`) REFERENCES `cost_data_groups` (`id`), CONSTRAINT `fk_task` FOREIGN KEY (`cost_data_task_id`) REFERENCES `cost_data_tasks` (`id`))",
+            &mut fk_tables,
+        );
+        assert!(fk_tables.contains("cost_data_items"));
+        assert!(fk_tables.contains("cost_data_groups"));
+        assert!(fk_tables.contains("cost_data_tasks"));
+        assert!(is_retryable_deadlock(
+            "Deadlock found when trying to get lock; try restarting transaction"
+        ));
+        assert!(is_retryable_deadlock(
+            "Lock wait timeout exceeded; try restarting transaction"
+        ));
+        assert!(is_retryable_deadlock("ERROR: deadlock detected"));
+        assert!(!is_retryable_deadlock("Duplicate entry '1' for key 'PRIMARY'"));
+        assert_eq!(
             pre_target_table(Driver::Postgres, "CREATE SEQUENCE users_id_seq"),
             None
         );
@@ -6287,5 +6521,57 @@ INSERT INTO delta VALUES (4, 'd');
 
         coord.close().await;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn work_stealing_steals_untouched_table_chunk_from_back_before_active_front_table() {
+        let script = "\
+INSERT INTO `table_a` VALUES (1);\n\
+INSERT INTO `table_a` VALUES (2);\n\
+INSERT INTO `table_a` VALUES (3);\n\
+INSERT INTO `table_b` VALUES (10);\n\
+INSERT INTO `table_b` VALUES (20);\n\
+INSERT INTO `table_c` VALUES (100);\n\
+";
+        let mut temps = TempFiles::default();
+        let plan = plan_dump(
+            Cursor::new(script.as_bytes()),
+            Driver::Mysql,
+            2,
+            &AtomicBool::new(false),
+            &mut temps,
+        )
+        .unwrap();
+
+        let groups = assign_workers(&plan.data, 2);
+        // Worker 0 has 1 table (`table_a`, 3 stmts); Worker 1 has 2 tables (`table_b` at front, `table_c` at back).
+        assert_eq!(groups[0].len(), 1);
+        assert_eq!(groups[1].len(), 2);
+
+        let queues = SharedQueues::new(&groups).unwrap();
+        let track = LoadTrack::planning(2);
+        track.install(&plan.data_statements);
+
+        // Worker 0 finishes its own `table_a` batch.
+        let PoppedBatch::Sql(w0_first) = queues.pop_batch(0, Some(&track)).unwrap().unwrap() else {
+            panic!("expected SQL batch");
+        };
+        assert_eq!(w0_first.len(), 3);
+        assert!(w0_first[0].sql.contains("table_a"));
+
+        // Worker 0 is now idle while Worker 1 still has `table_b` (front) and `table_c` (back).
+        // Worker 0 steals `table_c` from the back of Worker 1's queue instead of colliding on `table_b`.
+        let PoppedBatch::Sql(w0_stolen) = queues.pop_batch(0, Some(&track)).unwrap().unwrap() else {
+            panic!("expected stolen SQL batch");
+        };
+        assert_eq!(w0_stolen.len(), 1);
+        assert!(w0_stolen[0].sql.contains("table_c"));
+
+        // Worker 1 still gets its own front `table_b` batch undisturbed.
+        let PoppedBatch::Sql(w1_own) = queues.pop_batch(1, Some(&track)).unwrap().unwrap() else {
+            panic!("expected Worker 1 front SQL batch");
+        };
+        assert_eq!(w1_own.len(), 2);
+        assert!(w1_own[0].sql.contains("table_b"));
     }
 }

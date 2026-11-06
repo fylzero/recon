@@ -80,8 +80,9 @@ const percent = computed(() => {
   if (!current) {
     return 0;
   }
-  const done = current.phase === "planning" ? current.fileBytes : current.statements;
-  const total = current.phase === "planning" ? current.fileTotalBytes : current.totalStatements;
+  const planning = current.phase === "planning" || !current.totalStatements;
+  const done = planning ? current.fileBytes : current.statements;
+  const total = planning ? current.fileTotalBytes : current.totalStatements;
   return total ? Math.min(100, Math.round((done / total) * 100)) : 0;
 });
 const uncertain = computed(() => Boolean(resumePoint.value && resumePoint.value.to > resumePoint.value.from));

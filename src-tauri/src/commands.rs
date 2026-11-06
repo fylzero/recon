@@ -755,8 +755,8 @@ pub fn update_preferences(
     if let Some(value) = patch.notifications {
         data.notifications = sanitize_notifications(&value);
     }
-    if let Some(value) = patch.machine_stats {
-        data.machine_stats = value;
+    if let Some(machine_stats) = patch.machine_stats {
+        data.machine_stats = machine_stats;
     }
     persist::save(&app, &data)?;
     Ok(data.clone())
