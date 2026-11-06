@@ -1,7 +1,7 @@
 import type { WireNode } from "./filters/compile";
 import type { FilterKind } from "./filters/model";
 
-export type Driver = "mysql" | "postgres" | "sqlite";
+export type Driver = "mysql" | "postgres" | "sqlite" | "mssql";
 export type SslMode = "disable" | "prefer" | "require" | "verify-ca" | "verify-full";
 export type PasswordSource = "password" | "aws-iam" | "command";
 
@@ -9,6 +9,7 @@ export const DRIVER_OPTIONS: { id: Driver; label: string; defaultPort: number }[
   { id: "mysql", label: "MySQL", defaultPort: 3306 },
   { id: "postgres", label: "PostgreSQL", defaultPort: 5432 },
   { id: "sqlite", label: "SQLite", defaultPort: 0 },
+  { id: "mssql", label: "SQL Server", defaultPort: 1433 },
 ];
 
 export function driverLabel(driver: Driver) {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from "vue";
 import * as api from "../api";
-import type { Driver, TruncateOptions } from "../types";
+import { driverLabel, type Driver, type TruncateOptions } from "../types";
 import Modal from "./Modal.vue";
 
 const props = defineProps<{
@@ -111,12 +111,16 @@ async function start() {
         <p class="muted tiny table-action-hint">
           Needed when other tables have foreign keys to {{ it }}.
           <template v-if="action === 'truncate'">Rows that point here are left in place.</template>
+          <template v-else-if="driver === 'mssql'">
+            SQL Server can't leave them pointing at a missing table, so those foreign keys are dropped. The tables and
+            their rows are kept.
+          </template>
           <template v-else>Those foreign keys are left pointing at a table that no longer exists.</template>
         </p>
       </template>
       <p v-if="action === 'drop' && driver !== 'postgres'" class="muted tiny">
-        {{ driver === "mysql" ? "MySQL" : "SQLite" }} has no cascading drop, so other tables and views are never
-        removed with {{ single ? "it" : "them" }}.
+        {{ driverLabel(driver) }} has no cascading drop, so other tables and views are never removed with
+        {{ single ? "it" : "them" }}.
       </p>
       <template v-if="action === 'truncate'">
         <p v-if="driver === 'mysql'" class="muted tiny">MySQL always restarts AUTO_INCREMENT at 1 when truncating.</p>
@@ -128,6 +132,10 @@ async function start() {
           <p class="muted tiny table-action-hint">
             <template v-if="driver === 'postgres'">
               Resets the sequences behind serial and identity columns so new rows are numbered from 1 again.
+            </template>
+            <template v-else-if="driver === 'mssql'">
+              Resets identity columns to their seed so new rows are numbered from the start again. Without it, rows
+              are deleted and numbering carries on.
             </template>
             <template v-else>
               Resets AUTOINCREMENT counters so new rows are numbered from 1 again. Other integer keys start over once

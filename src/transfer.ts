@@ -144,5 +144,8 @@ export function backupLimits(driver: Driver) {
   if (driver === "postgres") {
     return "Grants, owners of individual objects, row-level security policies, custom collations and operators, and extended statistics aren't backed up.";
   }
+  if (driver === "mssql") {
+    return "Logins, users, permissions, and assemblies aren't backed up.";
+  }
   return "";
 }

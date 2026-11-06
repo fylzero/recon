@@ -5,7 +5,7 @@
 <h1 align="center">Recon</h1>
 
 <p align="center">
-  A database client for macOS, Windows, and Linux. Connect to MySQL, PostgreSQL, and SQLite with built-in drivers—no additional software required. No account, no cloud: your connections stay on your machine, and your credentials stay in the macOS Keychain, Windows Credential Manager, or the Linux system keyring.
+  A database client for macOS, Windows, and Linux. Connect to MySQL, PostgreSQL, SQLite, and SQL Server with built-in drivers—no additional software required. No account, no cloud: your connections stay on your machine, and your credentials stay in the macOS Keychain, Windows Credential Manager, or the Linux system keyring.
 </p>
 
 <p align="center">
@@ -30,13 +30,13 @@
 
 ## About
 
-Recon is an open-source database client for macOS, Windows, and Linux, built with Tauri, Vue, and Rust. It works with MySQL, PostgreSQL, and SQLite databases without separate database drivers or command-line tools.
+Recon is an open-source database client for macOS, Windows, and Linux, built with Tauri, Vue, and Rust. It works with MySQL, PostgreSQL, SQLite, and SQL Server databases without separate database drivers or command-line tools.
 
 **Key characteristics:**
 
 - **Open source**: Free to use and modify under the MIT license
 - **Privacy-focused**: Database credentials stored exclusively in the macOS Keychain, Windows Credential Manager, or the Linux system keyring
-- **No external dependencies**: MySQL, PostgreSQL, and SQLite drivers compiled directly into the app
+- **No external dependencies**: MySQL, PostgreSQL, SQLite, and SQL Server drivers compiled directly into the app
 - **No account, no cloud**: Connections and queries go straight from your machine to your database
 - **Native app**: A Tauri shell with a Rust backend, not a bundled browser
 
@@ -46,7 +46,7 @@ Recon is an open-source database client for macOS, Windows, and Linux, built wit
 - Multiple database connections with organized grouping
 - Secure password storage in the macOS Keychain, Windows Credential Manager, or the Linux system keyring
 - SSH tunnel support for remote databases
-- SSL/TLS encryption for MySQL and PostgreSQL
+- SSL/TLS encryption for MySQL, PostgreSQL, and SQL Server
 - AWS IAM authentication support
 - Connection testing before saving
 
@@ -84,6 +84,7 @@ Recon is an open-source database client for macOS, Windows, and Linux, built wit
 - **MySQL / MariaDB**: Full support with SSL/TLS
 - **PostgreSQL**: Complete feature set with SSL/TLS
 - **SQLite**: Local database file support with ability to create new databases
+- **SQL Server**: SQL Server 2022 and newer, signing in with a SQL Server login. Windows and Microsoft Entra ID authentication aren't supported yet. Connect to a named instance on its port rather than by `host\INSTANCE`.
 
 ## Download & Installation
 
@@ -252,7 +253,7 @@ This command:
 2. Compiles the Rust/Tauri backend
 3. Opens the native Recon window with hot-reload enabled
 
-**Note**: The **first** `tauri dev` (or `tauri build`) downloads crates and compiles from scratch, including the MySQL, PostgreSQL, and SQLite drivers. This often takes several minutes. Subsequent runs are much faster.
+**Note**: The **first** `tauri dev` (or `tauri build`) downloads crates and compiles from scratch, including the MySQL, PostgreSQL, SQLite, and SQL Server drivers. This often takes several minutes. Subsequent runs are much faster.
 
 ### Building a release
 

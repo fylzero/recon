@@ -11,7 +11,7 @@ use super::{dialect, hex, CellValue};
 use crate::models::Driver;
 
 const BOM: &[u8] = b"\xEF\xBB\xBF";
-const DELIMITERS: [u8; 4] = [b',', b'\t', b';', b'|'];
+const DELIMITERS: &[u8] = b",\t;|";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -584,7 +584,7 @@ pub enum ImportValue {
 
 impl ImportValue {
     pub fn from_field(field: Field, null_markers: &[String]) -> Self {
-        if !field.quoted && null_markers.iter().any(|marker| *marker == field.text) {
+        if !field.quoted && null_markers.contains(&field.text) {
             ImportValue::Null
         } else {
             ImportValue::Text(field.text)
@@ -894,6 +894,13 @@ impl TypeGuess {
             Driver::Sqlite if self.float => "REAL",
             Driver::Sqlite if self.date => "DATE",
             Driver::Sqlite if self.timestamp => "DATETIME",
+            Driver::Mssql if self.boolean => "bit",
+            Driver::Mssql if self.int => "bigint",
+            Driver::Mssql if self.float => "float",
+            Driver::Mssql if self.date => "date",
+            Driver::Mssql if self.timestamp && self.zoned => "datetimeoffset",
+            Driver::Mssql if self.timestamp => "datetime2",
+            Driver::Mssql => "nvarchar(max)",
             _ => text,
         };
         name.into()
@@ -912,7 +919,7 @@ impl TargetColumn {
         let lower = data_type.trim().to_ascii_lowercase();
         TargetColumn {
             binary: lower.contains("bytea") || lower.contains("blob") || lower.contains("binary"),
-            boolean: lower.contains("bool") || lower == "tinyint(1)",
+            boolean: lower.contains("bool") || lower == "tinyint(1)" || lower == "bit",
         }
     }
 }
@@ -959,6 +966,12 @@ pub fn import_literal(driver: Driver, value: &ImportValue, target: TargetColumn)
             format!("X'{}'", hex_body(text).unwrap_or_default())
         }
         (Driver::Mysql, ImportValue::Text(text) | ImportValue::Json(text)) => mysql_string(text),
+        (Driver::Mssql, ImportValue::Text(text)) if target.binary && hex_body(text).is_some() => {
+            format!("0x{}", hex_body(text).unwrap_or_default())
+        }
+        (Driver::Mssql, ImportValue::Text(text) | ImportValue::Json(text)) => {
+            super::mssql::n_literal(text)
+        }
         (_, ImportValue::Text(text) | ImportValue::Json(text)) => sqlite_text(text),
     }
 }
@@ -983,6 +996,7 @@ pub fn create_table_sql(
                 quote("id")
             ),
             Driver::Sqlite => format!("{} INTEGER PRIMARY KEY AUTOINCREMENT", quote("id")),
+            Driver::Mssql => format!("{} bigint IDENTITY(1,1) NOT NULL PRIMARY KEY", quote("id")),
         });
     }
     for (name, data_type) in columns {
@@ -1036,6 +1050,10 @@ pub fn insert_parts(
                 conflict.to_string(),
             )
         }
+        Driver::Mssql => (
+            format!("INSERT INTO {table} ({list}) VALUES "),
+            String::new(),
+        ),
     }
 }
 

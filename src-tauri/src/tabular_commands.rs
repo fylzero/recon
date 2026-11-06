@@ -19,8 +19,8 @@ use crate::db::tabular::{
     TypeGuess,
 };
 use crate::db::{
-    describe_error, dialect, mysql, postgres, sqlite, BrowseRequest, CellValue, Conn, EditValue,
-    ResultStore, Session, SessionStore,
+    describe_error, dialect, mssql, mysql, postgres, sqlite, BrowseRequest, CellValue, Conn,
+    EditValue, ResultStore, Session, SessionStore,
 };
 use crate::db_commands::{export_statement, table_columns, tables_in};
 use crate::models::Driver;
@@ -29,6 +29,7 @@ use crate::transfer_commands::{
     file_name, open_sql_file, sibling, ExportProgressEvent, ExportResult, Sink, SqlFile, Throttle,
     Transfer, TransferStore, EXPORT_PROGRESS_EVENT, IMPORT_CANCELLED, IMPORT_PROGRESS_EVENT,
 };
+use tiberius::QueryItem;
 
 const REPORT_EVERY: u64 = 500;
 const PREVIEW_ROWS: usize = 20;
@@ -78,7 +79,7 @@ async fn drain<R: Row>(
         values.clear();
         values.extend((0..row.len()).map(|index| cell(&row, index)));
         writer.write_row(&values)?;
-        if writer.rows() % REPORT_EVERY == 0 {
+        if writer.rows().is_multiple_of(REPORT_EVERY) {
             report(writer.rows());
         }
     }
@@ -155,6 +156,51 @@ pub(crate) async fn write_query(
                 }
             }
         }
+        Conn::Mssql(conn) => {
+            let mut stream = conn
+                .client()
+                .simple_query(sql)
+                .await
+                .map_err(mssql::describe)?;
+            let mut columns = None;
+            let mut values = Vec::new();
+            while let Some(item) = stream.try_next().await.map_err(mssql::describe)? {
+                if cancel.load(Ordering::Relaxed) {
+                    drop(stream);
+                    let _ = conn.client().cancel_query().await;
+                    return Err(dump::CANCELLED.into());
+                }
+                match item {
+                    QueryItem::Metadata(meta) if columns.is_none() => {
+                        columns = Some(
+                            meta.columns()
+                                .iter()
+                                .map(|column| column.name().to_string())
+                                .collect(),
+                        );
+                    }
+                    QueryItem::Row(row) => {
+                        if !writer.has_columns() {
+                            if let Some(names) = columns.clone() {
+                                writer.set_columns(names)?;
+                            }
+                        }
+                        values.clear();
+                        values.extend((0..row.len()).map(|index| mssql::cell(&row, index)));
+                        writer.write_row(&values)?;
+                        if writer.rows().is_multiple_of(REPORT_EVERY) {
+                            report(writer.rows());
+                        }
+                    }
+                    QueryItem::Metadata(_) => {}
+                }
+            }
+            if !writer.has_columns() {
+                if let Some(names) = columns {
+                    writer.set_columns(names)?;
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -168,6 +214,7 @@ fn snapshot_sql(driver: Driver) -> &'static [&'static str] {
             "START TRANSACTION WITH CONSISTENT SNAPSHOT",
         ],
         Driver::Sqlite => &["BEGIN"],
+        Driver::Mssql => &["BEGIN TRAN"],
     }
 }
 

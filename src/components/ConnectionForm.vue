@@ -234,6 +234,9 @@ watch(driver, (next, previous) => {
   if (next !== "sqlite" && (!port.value || port.value === previousDefault)) {
     port.value = nextDefault;
   }
+  if (next === "mssql" && passwordSource.value === "aws-iam") {
+    passwordSource.value = "password";
+  }
 });
 
 watch(
@@ -639,14 +642,14 @@ async function submit(connectAfter: boolean) {
               type="text"
               spellcheck="false"
               autocomplete="off"
-              :placeholder="driver === 'postgres' ? 'postgres' : 'root'"
+              :placeholder="driver === 'postgres' ? 'postgres' : driver === 'mssql' ? 'sa' : 'root'"
             />
           </label>
           <label class="modal-label">
             <span class="muted tiny">Authentication</span>
             <select v-model="passwordSource">
               <option value="password">Password</option>
-              <option value="aws-iam">AWS IAM</option>
+              <option v-if="driver !== 'mssql'" value="aws-iam">AWS IAM</option>
               <option value="command">Password command</option>
             </select>
           </label>

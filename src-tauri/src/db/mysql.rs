@@ -765,6 +765,7 @@ mod tests {
                     &shapes,
                     &change,
                     current,
+                    None,
                 )
                 .unwrap(),
             );

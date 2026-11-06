@@ -60,6 +60,10 @@ const TYPES: Record<Driver, string[]> = {
     "VARCHAR(255)", "TEXT", "JSONB", "UUID", "BYTEA",
   ],
   sqlite: ["INTEGER", "REAL", "NUMERIC", "BOOLEAN", "TEXT", "BLOB"],
+  mssql: [
+    "bigint", "int", "bit", "decimal(20,6)", "float", "date", "datetime2", "datetimeoffset",
+    "nvarchar(255)", "nvarchar(max)", "uniqueidentifier", "varbinary(max)",
+  ],
 };
 
 interface NewColumn {

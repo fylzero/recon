@@ -323,6 +323,24 @@ impl Table {
                 quote_literal(&self.raw)
             )),
             Driver::Sqlite => None,
+            Driver::Mssql => {
+                let (schema, name) = match self.parts.as_slice() {
+                    [name] => ("dbo".to_string(), name.clone()),
+                    [schema, name] | [_, schema, name] => (schema.clone(), name.clone()),
+                    _ => return None,
+                };
+                Some(format!(
+                    "SELECT c.name FROM sys.indexes i \
+                     JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
+                     JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id \
+                     JOIN sys.tables t ON t.object_id = i.object_id \
+                     JOIN sys.schemas s ON s.schema_id = t.schema_id \
+                     WHERE i.is_primary_key = 1 AND s.name = {} AND t.name = {} \
+                     ORDER BY ic.key_ordinal",
+                    super::mssql::n_literal(&schema),
+                    super::mssql::n_literal(&name)
+                ))
+            }
         }
     }
 

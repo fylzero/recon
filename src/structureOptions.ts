@@ -54,6 +54,21 @@ export const DATA_TYPES: Record<Driver, string[]> = {
     "integer[]",
   ],
   sqlite: ["INTEGER", "TEXT", "REAL", "NUMERIC", "BLOB", "BOOLEAN", "DATETIME", "VARCHAR(255)"],
+  mssql: [
+    "bigint",
+    "int",
+    "bit",
+    "decimal(10,2)",
+    "float",
+    "nvarchar(255)",
+    "nvarchar(max)",
+    "uniqueidentifier",
+    "date",
+    "datetime2",
+    "datetimeoffset",
+    "time",
+    "varbinary(max)",
+  ],
 };
 
 /** Common default expressions. Defaults are SQL, so text needs its quotes. */
@@ -61,8 +76,15 @@ export const DEFAULT_VALUES: Record<Driver, string[]> = {
   mysql: ["NULL", "CURRENT_TIMESTAMP", "0", "1", "''", "(uuid())"],
   postgres: ["NULL", "now()", "CURRENT_TIMESTAMP", "gen_random_uuid()", "0", "true", "false", "''"],
   sqlite: ["NULL", "CURRENT_TIMESTAMP", "0", "1", "''"],
+  mssql: ["NULL", "CURRENT_TIMESTAMP", "0", "1", "N''"],
 };
 
 export function quoteIdentifier(driver: Driver, name: string) {
-  return driver === "mysql" ? `\`${name.replace(/`/g, "``")}\`` : `"${name.replace(/"/g, '""')}"`;
+  if (driver === "mysql") {
+    return `\`${name.replace(/`/g, "``")}\``;
+  }
+  if (driver === "mssql") {
+    return `[${name.replace(/]/g, "]]")}]`;
+  }
+  return `"${name.replace(/"/g, '""')}"`;
 }

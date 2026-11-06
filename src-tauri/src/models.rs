@@ -144,6 +144,7 @@ pub enum Driver {
     Mysql,
     Postgres,
     Sqlite,
+    Mssql,
 }
 
 impl Driver {
@@ -152,6 +153,7 @@ impl Driver {
             Driver::Mysql => 3306,
             Driver::Postgres => 5432,
             Driver::Sqlite => 0,
+            Driver::Mssql => 1433,
         }
     }
 
@@ -160,6 +162,7 @@ impl Driver {
             Driver::Mysql => "MySQL",
             Driver::Postgres => "PostgreSQL",
             Driver::Sqlite => "SQLite",
+            Driver::Mssql => "SQL Server",
         }
     }
 }

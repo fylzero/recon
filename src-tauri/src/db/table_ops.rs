@@ -1,18 +1,18 @@
 use serde::Deserialize;
 
-use super::{dialect, quote_double, quote_literal};
+use super::{dialect, mssql, quote_double, quote_literal};
 use crate::models::Driver;
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TruncateOptions {
-    /// MySQL and SQLite only. Postgres can't skip the check, so it uses `cascade` instead.
+    /// Not Postgres, which can't skip the check, so it uses `cascade` instead.
     #[serde(default)]
     pub disable_foreign_keys: bool,
     /// Postgres only: also empties every table with a foreign key to one of these.
     #[serde(default)]
     pub cascade: bool,
-    /// Postgres and SQLite only. MySQL's TRUNCATE always resets AUTO_INCREMENT.
+    /// Not MySQL, whose TRUNCATE always resets AUTO_INCREMENT.
     #[serde(default)]
     pub restart_identity: bool,
 }
@@ -28,7 +28,7 @@ pub fn sqlite_sequence_sql(namespace: &str) -> String {
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DropOptions {
-    /// MySQL and SQLite only. Postgres can't skip the check, so it uses `cascade` instead.
+    /// Not Postgres, which can't skip the check, so it uses `cascade` instead.
     #[serde(default)]
     pub disable_foreign_keys: bool,
     /// Postgres only: also drops the views and foreign key constraints that depend on these tables.
@@ -92,7 +92,118 @@ pub fn truncate_statements(
             }
             sql.push("COMMIT".to_string());
         }
+        Driver::Mssql => {
+            sql.extend(
+                dialect
+                    .use_namespace_sql(namespace)
+                    .filter(|_| !namespace.is_empty()),
+            );
+            sql.push(mssql_truncate(&qualified, options));
+        }
     }
+    sql
+}
+
+/**
+ * Collects the foreign keys that point at one of `qualified` into
+ * `@keys (tbl, name)`. `between_targets` keeps only keys whose own table is
+ * one of them too, and `enabled` only keys that are switched on.
+ */
+fn mssql_keys_to(qualified: &[String], between_targets: bool, enabled: bool) -> String {
+    let targets = qualified
+        .iter()
+        .map(|table| format!("OBJECT_ID({})", mssql::n_literal(table)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut filter = format!("fk.referenced_object_id IN ({targets})");
+    if between_targets {
+        filter.push_str(&format!(" AND fk.parent_object_id IN ({targets})"));
+    }
+    if enabled {
+        filter.push_str(" AND fk.is_disabled = 0");
+    }
+    format!(
+        "DECLARE @keys TABLE (tbl nvarchar(600), name sysname);\n\
+         INSERT INTO @keys SELECT QUOTENAME(s.name) + N'.' + QUOTENAME(t.name), fk.name \
+         FROM sys.foreign_keys fk \
+         JOIN sys.tables t ON t.object_id = fk.parent_object_id \
+         JOIN sys.schemas s ON s.schema_id = t.schema_id \
+         WHERE {filter};\n\
+         DECLARE @sql nvarchar(max);\n"
+    )
+}
+
+/// Runs `ALTER TABLE <tbl> <action> <name>` for every key collected by `mssql_keys_to`.
+fn mssql_each_key(action: &str) -> String {
+    format!(
+        "SET @sql = N'';\n\
+         SELECT @sql += N'ALTER TABLE ' + tbl + N' {action} ' + QUOTENAME(name) + N';' FROM @keys;\n\
+         EXEC sp_executesql @sql;\n"
+    )
+}
+
+/**
+ * TRUNCATE also resets the identity and is refused while any foreign key
+ * points at the table, so it's only used when both are wanted anyway.
+ * Disabled keys are turned back on without rechecking, so rows that point
+ * here stay. One batch with XACT_ABORT, so a failure changes nothing.
+ */
+fn mssql_truncate(qualified: &[String], options: TruncateOptions) -> String {
+    let mut sql = String::from("SET XACT_ABORT ON;\nBEGIN TRAN;\n");
+    if options.disable_foreign_keys {
+        sql.push_str(&mssql_keys_to(qualified, false, true));
+        sql.push_str(&mssql_each_key("NOCHECK CONSTRAINT"));
+    }
+    if options.restart_identity {
+        sql.push_str("DECLARE @seed bigint;\n");
+    }
+    for table in qualified {
+        let name = mssql::n_literal(table);
+        if !options.restart_identity {
+            sql.push_str(&format!("DELETE FROM {table};\n"));
+            continue;
+        }
+        /*
+         * RESEED sets the last value used, except on a table that has never
+         * had a row, where it's the next one. Skipping those keeps them at
+         * their seed.
+         */
+        sql.push_str(&format!(
+            "IF EXISTS (SELECT 1 FROM sys.foreign_keys WHERE referenced_object_id = OBJECT_ID({name}))\n\
+             BEGIN\n\
+             DELETE FROM {table};\n\
+             SET @seed = (SELECT CAST(seed_value AS bigint) - CAST(increment_value AS bigint) \
+             FROM sys.identity_columns WHERE object_id = OBJECT_ID({name}) AND last_value IS NOT NULL);\n\
+             IF @seed IS NOT NULL DBCC CHECKIDENT ({name}, RESEED, @seed);\n\
+             END\n\
+             ELSE TRUNCATE TABLE {table};\n"
+        ));
+    }
+    if options.disable_foreign_keys {
+        sql.push_str(&mssql_each_key("CHECK CONSTRAINT"));
+    }
+    sql.push_str("COMMIT;");
+    sql
+}
+
+/**
+ * Foreign keys between the dropped tables go first, since DROP TABLE won't
+ * drop a table another one still references. With `disable_foreign_keys`,
+ * keys in other tables that point here are dropped too: SQL Server can't
+ * leave them pointing at a missing table.
+ */
+fn mssql_drop(qualified: &[String], options: DropOptions) -> String {
+    let mut sql = String::from("SET XACT_ABORT ON;\nBEGIN TRAN;\n");
+    sql.push_str(&mssql_keys_to(
+        qualified,
+        !options.disable_foreign_keys,
+        false,
+    ));
+    sql.push_str(&mssql_each_key("DROP CONSTRAINT"));
+    sql.push_str(&format!(
+        "DROP TABLE IF EXISTS {};\nCOMMIT;",
+        qualified.join(", ")
+    ));
     sql
 }
 
@@ -106,6 +217,7 @@ pub fn create_statement(driver: Driver, namespace: &str, table: &str) -> String 
         Driver::Mysql => "`id` bigint unsigned NOT NULL AUTO_INCREMENT PRIMARY KEY",
         Driver::Postgres => "\"id\" bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY",
         Driver::Sqlite => "\"id\" INTEGER PRIMARY KEY AUTOINCREMENT",
+        Driver::Mssql => "[id] bigint IDENTITY(1,1) NOT NULL PRIMARY KEY",
     };
     format!("CREATE TABLE {qualified} ({id})")
 }
@@ -144,6 +256,14 @@ pub fn drop_statements(
             sql.push("BEGIN".to_string());
             sql.extend(qualified.iter().map(|table| format!("DROP TABLE {table}")));
             sql.push("COMMIT".to_string());
+        }
+        Driver::Mssql => {
+            sql.extend(
+                dialect
+                    .use_namespace_sql(namespace)
+                    .filter(|_| !namespace.is_empty()),
+            );
+            sql.push(mssql_drop(&qualified, options));
         }
     }
     sql
@@ -387,5 +507,51 @@ mod tests {
             scalar(&mut conn, "SELECT COUNT(*) FROM posts").await,
             CellValue::Int(1)
         );
+    }
+
+    #[test]
+    fn empties_and_drops_sql_server_tables_in_one_transaction() {
+        let keep = TruncateOptions::default();
+        let sql = truncate_statements(Driver::Mssql, "app", &["dbo.posts".into()], keep, false);
+        assert_eq!(sql[0], "USE [app]");
+        assert!(sql[1].starts_with("SET XACT_ABORT ON;\nBEGIN TRAN;"));
+        assert!(sql[1].contains("DELETE FROM [app].[dbo].[posts];"));
+        assert!(!sql[1].contains("TRUNCATE"));
+        assert!(sql[1].ends_with("COMMIT;"));
+
+        let restart = TruncateOptions {
+            disable_foreign_keys: true,
+            restart_identity: true,
+            ..TruncateOptions::default()
+        };
+        let sql = truncate_statements(
+            Driver::Mssql,
+            "app",
+            &["dbo.o'brien".into()],
+            restart,
+            false,
+        );
+        assert!(sql[1].contains("OBJECT_ID(N'[app].[dbo].[o''brien]')"));
+        assert!(sql[1].contains("ELSE TRUNCATE TABLE [app].[dbo].[o'brien];"));
+        let off = sql[1].find("NOCHECK CONSTRAINT").unwrap();
+        let on = sql[1].rfind("' CHECK CONSTRAINT").unwrap();
+        assert!(off < sql[1].find("DELETE FROM").unwrap() && on > off);
+        assert!(!sql[1].contains("WITH CHECK"));
+
+        let drop = drop_statements(
+            Driver::Mssql,
+            "app",
+            &["dbo.a".into(), "dbo.b".into()],
+            DropOptions::default(),
+        );
+        assert!(drop[1].contains("AND fk.parent_object_id IN ("));
+        assert!(drop[1].contains("DROP CONSTRAINT"));
+        assert!(drop[1].contains("DROP TABLE IF EXISTS [app].[dbo].[a], [app].[dbo].[b];"));
+        let every = DropOptions {
+            disable_foreign_keys: true,
+            ..DropOptions::default()
+        };
+        let drop = drop_statements(Driver::Mssql, "app", &["dbo.a".into()], every);
+        assert!(!drop[1].contains("fk.parent_object_id IN ("));
     }
 }

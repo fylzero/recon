@@ -269,6 +269,7 @@ pub async fn test_connection(
         Driver::Mysql => db::mysql::test(&target, password.as_deref(), &tls).await,
         Driver::Postgres => db::postgres::test(&target, password.as_deref(), &tls).await,
         Driver::Sqlite => db::sqlite::test(&target).await,
+        Driver::Mssql => db::mssql::test(&target, password.as_deref()).await,
     };
     let outcome = outcome.map_err(|err| explain(tunnel.as_deref(), err));
     if let Some(tunnel) = tunnel {
@@ -285,6 +286,7 @@ pub async fn create_sqlite_database(path: String) -> Result<(), String> {
     db::sqlite::create(path.trim()).await
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn connect(
     app: AppHandle,
@@ -364,6 +366,7 @@ async fn open_session(
         Driver::Mysql => db::mysql::open(&target, password.as_deref(), &tls).await,
         Driver::Postgres => db::postgres::open(&target, password.as_deref(), &tls).await,
         Driver::Sqlite => db::sqlite::open(&target).await,
+        Driver::Mssql => db::mssql::open(&target, password.as_deref()).await,
     };
     let opened = match opened {
         Ok(opened) => opened,
@@ -729,6 +732,26 @@ pub async fn rename_database(
     session.forget_columns(Some(&from), None);
     let dialect = dialect(session.driver);
     match (session.driver, dialect.rename_namespace_sql(&from, to)) {
+        (Driver::Mssql, Some(sql)) => {
+            session.pool.quiesce().await;
+            let blockers = pool_run(
+                &session,
+                &db::mssql::other_sessions_sql(&from),
+                1,
+                QueryOrigin::Schema,
+            )
+            .await;
+            if let Ok(output) = blockers {
+                if first_text(&output).parse::<u64>().unwrap_or(0) > 0 {
+                    return Err(
+                        "SQL Server can't rename a database while other sessions are using it. Disconnect them and try again."
+                            .into(),
+                    );
+                }
+            }
+            pool_run(&session, "USE [master]", 0, QueryOrigin::Schema).await?;
+            pool_run(&session, &sql, 0, QueryOrigin::Schema).await?;
+        }
         (_, Some(sql)) => {
             pool_run(&session, &sql, 0, QueryOrigin::Schema).await?;
         }
@@ -1003,7 +1026,7 @@ async fn load_columns(
                     Driver::Postgres => {
                         serde_json::from_str(&text_at(&text, 6)).unwrap_or_default()
                     }
-                    Driver::Sqlite => Vec::new(),
+                    Driver::Sqlite | Driver::Mssql => Vec::new(),
                 };
                 let mut column = ColumnDetail {
                     name: text_at(&text, 0),
@@ -1255,27 +1278,33 @@ fn order_clause(
 }
 
 /** The filtered `SELECT *` with the request's sort, but no LIMIT. */
-async fn sorted_select(session: &Session, request: &BrowseRequest) -> Result<Fragment, String> {
+/// The select, and whether it has an ORDER BY: the chosen column, then the primary key.
+async fn sorted_select(
+    session: &Session,
+    request: &BrowseRequest,
+) -> Result<(Fragment, bool), String> {
     let mut statement = filtered_select(session, request, "*").await?;
     let columns = table_columns(session, &request.namespace, &request.table).await?;
-    if let Some(order) = order_clause(
+    let order = order_clause(
         dialect(session.driver),
         &columns,
         request.order_by.as_deref(),
         request.order_dir,
-    )? {
+    )?;
+    let ordered = order.is_some();
+    if let Some(order) = order {
         statement.push_sql(order);
     }
-    Ok(statement)
+    Ok((statement, ordered))
 }
 
 async fn browse_statement(
     session: &Session,
     request: &BrowseRequest,
 ) -> Result<(Fragment, u64), String> {
-    let mut statement = sorted_select(session, request).await?;
+    let (mut statement, ordered) = sorted_select(session, request).await?;
     let limit = request.limit.clamp(1, BROWSE_LIMIT_MAX);
-    statement.push_sql(format!(" LIMIT {limit} OFFSET {}", request.offset));
+    statement.push_sql(dialect(session.driver).limit_sql(limit, request.offset, ordered));
     Ok((statement, limit))
 }
 
@@ -1290,7 +1319,9 @@ pub(crate) async fn export_statement(
             .await
             .map(|(statement, _)| statement);
     }
-    sorted_select(session, request).await
+    sorted_select(session, request)
+        .await
+        .map(|(statement, _)| statement)
 }
 
 fn record_statement(
@@ -1363,14 +1394,23 @@ async fn run_tracked(
     statement: &Fragment,
     limit: usize,
 ) -> Result<RawOutput, String> {
+    let mut tracked = None;
     if let Some(id) = request_id {
         if let Some(backend) = conn.backend_id().await {
             session.running.lock().await.insert(id.to_string(), backend);
+            tracked = Some(id);
         }
     }
     let outcome = conn.run_statement(statement, limit).await;
     if let Some(id) = request_id {
-        session.running.lock().await.remove(id);
+        let cancelled = session.running.lock().await.remove(id).is_none();
+        /*
+         * SQL Server cancels by ending the session, which reads as a lost
+         * connection. Reporting it as one would reconnect and run it again.
+         */
+        if cancelled && tracked.is_some() && outcome.is_err() && session.driver == Driver::Mssql {
+            return Err("Query cancelled.".into());
+        }
     }
     outcome
 }
@@ -1383,16 +1423,21 @@ async fn cancel_request(session: &Session, request_id: Option<&str>) {
     let Some(id) = request_id else {
         return;
     };
-    let running = session.running.lock().await;
+    let mut running = session.running.lock().await;
     let Some(backend) = running.get(id).copied() else {
         return;
     };
     let sql = match session.driver {
         Driver::Mysql => format!("KILL QUERY {backend}"),
         Driver::Postgres => format!("SELECT pg_cancel_backend({backend})"),
+        // SQL Server has no KILL QUERY. Its pool replaces the ended connection.
+        Driver::Mssql => format!("KILL {backend}"),
         Driver::Sqlite => return,
     };
-    let _ = session.pool.run(&sql, 1).await;
+    let killed = session.pool.run(&sql, 1).await.is_ok();
+    if killed && session.driver == Driver::Mssql {
+        running.remove(id);
+    }
     drop(running);
 }
 
@@ -1745,16 +1790,43 @@ async fn save(session: Arc<Session>, requests: &[SaveRequest]) -> Result<usize, 
         } else {
             Vec::new()
         };
+        let identities = if session.driver == Driver::Mssql {
+            let sql = db::mssql::identity_columns_sql(&request.namespace, &request.table);
+            db::mssql::identity_columns(
+                &pool_run(&session, &sql, usize::MAX, QueryOrigin::Schema).await?,
+            )
+        } else {
+            Vec::new()
+        };
+        let identity_insert = |enabled: bool| {
+            let sql = db::mssql::identity_insert_sql(&table, enabled);
+            db::EditStatement {
+                sql: sql.clone(),
+                display: sql,
+                params: Vec::new(),
+                table: table.clone(),
+                label: "IDENTITY_INSERT".into(),
+                expect_one_row: false,
+            }
+        };
         for insert in &request.inserts {
             let overriding = sequences
                 .iter()
                 .any(|column| column.always && explicit(insert, &column.name));
+            // With IDENTITY_INSERT on, rows that leave the identity column out are rejected.
+            let sets_identity = identities.iter().any(|column| explicit(insert, column));
+            if sets_identity {
+                statements.push(identity_insert(true));
+            }
             statements.push(db::insert_statement(
                 session.driver,
                 &table,
                 insert,
                 overriding,
             ));
+            if sets_identity {
+                statements.push(identity_insert(false));
+            }
         }
         for column in &sequences {
             if request
@@ -1766,20 +1838,33 @@ async fn save(session: Arc<Session>, requests: &[SaveRequest]) -> Result<usize, 
             }
         }
         if !request.columns.is_empty() {
-            let current = if session.driver == Driver::Mysql {
+            let mysql_current = if session.driver == Driver::Mysql {
                 let sql = db::mysql::column_definitions_sql(&request.namespace, &request.table);
                 let output = pool_run(&session, &sql, usize::MAX, QueryOrigin::Schema).await?;
                 db::mysql::column_definitions(&output)
             } else {
                 Vec::new()
             };
+            let mssql_current = if session.driver == Driver::Mssql {
+                let sql = db::mssql::column_definitions_sql(&request.namespace, &request.table);
+                let output = pool_run(&session, &sql, usize::MAX, QueryOrigin::Schema).await?;
+                db::mssql::column_definitions(&output)
+            } else {
+                Vec::new()
+            };
             for change in &request.columns {
-                let existing = current.iter().find(|column| column.name == change.column);
+                let mysql_existing = mysql_current
+                    .iter()
+                    .find(|column| column.name == change.column);
+                let mssql_existing = mssql_current
+                    .iter()
+                    .find(|column| column.name == change.column);
                 schema_statements.extend(db::alter_statements(
                     session.driver,
                     &table,
                     change,
-                    existing,
+                    mysql_existing,
+                    mssql_existing,
                 )?);
             }
         }

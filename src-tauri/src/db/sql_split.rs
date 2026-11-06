@@ -69,6 +69,10 @@ impl Splitter {
 
     pub fn push_line(&mut self, line: &str, out: &mut Vec<Statement>) {
         self.line += 1;
+        if self.state == State::Normal && self.driver == Driver::Mssql && is_go_batch(line.trim()) {
+            self.emit(out);
+            return;
+        }
         if self.state == State::Normal && !self.started {
             let trimmed = line.trim();
             if self.driver == Driver::Mysql && starts_with_word(trimmed, "DELIMITER") {
@@ -167,6 +171,13 @@ impl Splitter {
                             };
                             self.push(c);
                         }
+                        '[' if self.driver == Driver::Mssql => {
+                            self.state = State::Quote {
+                                quote: ']',
+                                backslash: false,
+                            };
+                            self.push(c);
+                        }
                         '-' if next == Some('-')
                             && (!mysql || chars.get(i + 2).is_none_or(|c| c.is_whitespace())) =>
                         {
@@ -240,11 +251,20 @@ impl Splitter {
             self.buf.push(';');
             return;
         }
+        if self.driver == Driver::Mssql && is_mssql_routine(&self.buf) {
+            self.buf.push(';');
+            return;
+        }
         self.emit(out);
     }
 
     fn emit(&mut self, out: &mut Vec<Statement>) {
         let sql = self.buf.trim_end();
+        if is_go_batch(sql.trim()) {
+            self.buf.clear();
+            self.started = false;
+            return;
+        }
         if !sql.is_empty() {
             out.push(Statement {
                 sql: sql.to_string(),
@@ -254,6 +274,23 @@ impl Splitter {
         self.buf.clear();
         self.started = false;
     }
+}
+
+fn is_go_batch(line: &str) -> bool {
+    let mut parts = line.split_whitespace();
+    let Some(word) = parts.next() else {
+        return false;
+    };
+    word.eq_ignore_ascii_case("GO")
+        && match parts.next() {
+            None => true,
+            Some(count) => count.chars().all(|c| c.is_ascii_digit()) && parts.next().is_none(),
+        }
+}
+
+/// A procedure, function, or trigger keeps its internal semicolons until the next `GO`.
+fn is_mssql_routine(sql: &str) -> bool {
+    super::mssql::defined_module(sql).is_some_and(|kind| kind != "VIEW")
 }
 
 fn is_ident_char(c: char) -> bool {
@@ -509,5 +546,25 @@ mod tests {
         ));
         assert!(!is_copy_from_stdin("COPY users TO stdout"));
         assert!(!is_copy_from_stdin("SELECT 'COPY x FROM stdin'"));
+    }
+
+    #[test]
+    fn splits_sql_server_batches_on_go_and_keeps_brackets() {
+        let sql = "INSERT INTO [odd;name] VALUES (N'a;b');\nGO\n\
+                   CREATE PROCEDURE [dbo].[p] AS BEGIN\n  SELECT 1;\n  SELECT [a]]b];\nEND\nGO 2\n\
+                   SELECT 2;\n";
+        assert_eq!(
+            split(Driver::Mssql, sql),
+            vec![
+                "INSERT INTO [odd;name] VALUES (N'a;b')",
+                "CREATE PROCEDURE [dbo].[p] AS BEGIN\n  SELECT 1;\n  SELECT [a]]b];\nEND",
+                "SELECT 2",
+            ]
+        );
+        let commented = "-- Keeps its semicolons\nCREATE OR ALTER PROCEDURE p AS\n  SELECT 1;\n  SELECT 2;\nGO\n";
+        assert_eq!(
+            split(Driver::Mssql, commented),
+            vec!["CREATE OR ALTER PROCEDURE p AS\n  SELECT 1;\n  SELECT 2;"]
+        );
     }
 }

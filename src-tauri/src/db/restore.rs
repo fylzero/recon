@@ -5,7 +5,8 @@ use serde::Serialize;
 
 use super::dump::mysql_literal;
 use super::{
-    dialect, first_text, quote_backtick, quote_double, quote_literal, text_at, CellValue, Conn,
+    dialect, first_text, quote_backtick, quote_bracket, quote_double, quote_literal, text_at,
+    CellValue, Conn,
 };
 use crate::models::Driver;
 
@@ -33,6 +34,7 @@ fn driver_name(driver: Driver) -> &'static str {
         Driver::Mysql => "mysql",
         Driver::Postgres => "postgres",
         Driver::Sqlite => "sqlite",
+        Driver::Mssql => "mssql",
     }
 }
 
@@ -41,6 +43,7 @@ fn parse_driver(name: &str) -> Option<Driver> {
         "mysql" => Some(Driver::Mysql),
         "postgres" => Some(Driver::Postgres),
         "sqlite" => Some(Driver::Sqlite),
+        "mssql" => Some(Driver::Mssql),
         _ => None,
     }
 }
@@ -162,7 +165,105 @@ pub async fn reset_namespace(
         Driver::Mysql => reset_mysql(conn, namespace).await,
         Driver::Postgres => reset_postgres(conn, namespace).await,
         Driver::Sqlite => reset_sqlite(conn, namespace).await,
+        Driver::Mssql => reset_mssql(conn).await,
     }
+}
+
+/**
+ * Empties the current database in place. The caller switches to it first:
+ * `USE` is not allowed inside the restore's transaction.
+ */
+async fn reset_mssql(conn: &mut Conn) -> Result<(), String> {
+    let user = "s.name NOT IN (N'sys', N'INFORMATION_SCHEMA')";
+    let foreign_keys = conn
+        .run(
+            "SELECT OBJECT_SCHEMA_NAME(parent_object_id), OBJECT_NAME(parent_object_id), name FROM sys.foreign_keys",
+            usize::MAX,
+            None,
+        )
+        .await?
+        .text_rows();
+    for row in &foreign_keys {
+        conn.execute(&format!(
+            "ALTER TABLE {} DROP CONSTRAINT {}",
+            mssql_qualified(&text_at(row, 0), &text_at(row, 1)),
+            quote_bracket(&text_at(row, 2))
+        ))
+        .await?;
+    }
+    for (schema, name) in mssql_pairs(conn, &format!("SELECT s.name, o.name FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id WHERE o.type = 'TR' AND {user}")).await? {
+        conn.execute(&format!("DROP TRIGGER {}", mssql_qualified(&schema, &name))).await?;
+    }
+    let mut views = mssql_pairs(conn, &format!("SELECT s.name, o.name FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id WHERE o.type = 'V' AND {user}")).await?;
+    let mut last_error = String::new();
+    while !views.is_empty() {
+        let mut left = Vec::new();
+        let mut dropped = false;
+        for (schema, name) in views {
+            match conn
+                .execute(&format!("DROP VIEW {}", mssql_qualified(&schema, &name)))
+                .await
+            {
+                Ok(_) => dropped = true,
+                Err(err) => {
+                    last_error = err;
+                    left.push((schema, name));
+                }
+            }
+        }
+        if !dropped {
+            return Err(format!(
+                "Couldn't drop a view while restoring: {last_error}"
+            ));
+        }
+        views = left;
+    }
+    for (schema, name) in mssql_pairs(
+        conn,
+        &format!("SELECT s.name, o.name FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id WHERE o.type IN ('P', 'PC') AND {user}"),
+    )
+    .await?
+    {
+        conn.execute(&format!("DROP PROCEDURE {}", mssql_qualified(&schema, &name))).await?;
+    }
+    for (schema, name) in mssql_pairs(
+        conn,
+        &format!("SELECT s.name, o.name FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id WHERE o.type IN ('FN', 'IF', 'TF', 'FS', 'FT') AND {user}"),
+    )
+    .await?
+    {
+        conn.execute(&format!("DROP FUNCTION {}", mssql_qualified(&schema, &name))).await?;
+    }
+    for (schema, name) in mssql_pairs(
+        conn,
+        "SELECT sch.name, seq.name FROM sys.sequences seq JOIN sys.schemas sch ON sch.schema_id = seq.schema_id \
+         WHERE sch.name NOT IN (N'sys', N'INFORMATION_SCHEMA')",
+    )
+    .await?
+    {
+        conn.execute(&format!("DROP SEQUENCE {}", mssql_qualified(&schema, &name))).await?;
+    }
+    for (schema, name) in mssql_pairs(conn, "SELECT sch.name, syn.name FROM sys.synonyms syn JOIN sys.schemas sch ON sch.schema_id = syn.schema_id").await? {
+        conn.execute(&format!("DROP SYNONYM {}", mssql_qualified(&schema, &name))).await?;
+    }
+    for (schema, name) in mssql_pairs(conn, &format!("SELECT s.name, t.name FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id WHERE {user}")).await? {
+        conn.execute(&format!("DROP TABLE {}", mssql_qualified(&schema, &name))).await?;
+    }
+    Ok(())
+}
+
+async fn mssql_pairs(conn: &mut Conn, sql: &str) -> Result<Vec<(String, String)>, String> {
+    Ok(conn
+        .run(sql, usize::MAX, None)
+        .await?
+        .text_rows()
+        .into_iter()
+        .map(|row| (text_at(&row, 0), text_at(&row, 1)))
+        .collect())
+}
+
+fn mssql_qualified(schema: &str, name: &str) -> String {
+    format!("{}.{}", quote_bracket(schema), quote_bracket(name))
 }
 
 /**

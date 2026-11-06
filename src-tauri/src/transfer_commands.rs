@@ -818,6 +818,7 @@ async fn backend_of(conn: &mut Conn, driver: Driver) -> Option<Backend> {
             "SELECT pid, backend_start::text FROM pg_stat_activity WHERE pid = pg_backend_pid()"
         }
         Driver::Sqlite => return None,
+        Driver::Mssql => "SELECT @@SPID",
     };
     let row = conn.run(sql, 1, None).await.ok()?.text_rows().pop()?;
     Some(Backend {
@@ -841,6 +842,7 @@ async fn end_backend(conn: &mut Conn, driver: Driver, backend: &Backend) {
             quote_literal(backend.started.as_deref().unwrap_or_default())
         ),
         Driver::Sqlite => return,
+        Driver::Mssql => format!("KILL {}", backend.id),
     };
     let _ = conn.execute(&sql).await;
 }
@@ -1264,10 +1266,11 @@ pub fn read_backup_info(path: String) -> Result<BackupInfo, String> {
 }
 
 /// Clears the namespace and replays the backup in one transaction, so a failure or cancel leaves everything as it was.
-async fn restore_postgres(
+async fn restore_in_transaction(
     app: &AppHandle,
     session: &Session,
     transfer: &Transfer<'_>,
+    driver: Driver,
     namespace: &str,
     path: &str,
     executed: &mut u64,
@@ -1275,14 +1278,21 @@ async fn restore_postgres(
     let mut file = open_sql_file(path)?;
     let mut conn = session.pool.detached().await?;
     let ran = async {
-        conn.execute("BEGIN").await?;
-        restore::reset_namespace(&mut conn, Driver::Postgres, namespace).await?;
-        let mut tracker = Tracker::new(Driver::Postgres);
+        if driver == Driver::Mssql {
+            // USE cannot run inside a transaction.
+            conn.execute(&format!("USE {}", crate::db::quote_bracket(namespace)))
+                .await?;
+            conn.execute("BEGIN TRAN").await?;
+        } else {
+            conn.execute("BEGIN").await?;
+        }
+        restore::reset_namespace(&mut conn, driver, namespace).await?;
+        let mut tracker = Tracker::new(driver);
         let mut report = |progress| emit_progress(app, transfer.transfer_id, progress, 0, None);
         run_sql_file(
             &mut report,
             &mut conn,
-            Driver::Postgres,
+            driver,
             transfer,
             &mut file,
             0,
@@ -1313,8 +1323,8 @@ async fn restore_postgres(
 
 /**
  * Clears the namespace and replays a backup into it on one connection. On
- * Postgres both happen in a single transaction, so a failure or cancel leaves
- * everything as it was. Elsewhere DDL commits as it goes, so cancelling is
+ * Postgres and SQL Server both happen in a single transaction, so a failure or
+ * cancel leaves everything as it was. Elsewhere DDL commits as it goes, so cancelling is
  * ignored while clearing, where stopping would leave the namespace empty, and
  * a dropped connection picks up where it stopped like an import does.
  */
@@ -1350,10 +1360,18 @@ pub async fn restore_database(
     let started = Instant::now();
     let mut executed = 0u64;
 
-    let outcome = if driver == Driver::Postgres {
-        restore_postgres(&app, &session, &transfer, &namespace, &path, &mut executed)
-            .await
-            .map_err(ImportError::from)
+    let outcome = if driver == Driver::Postgres || driver == Driver::Mssql {
+        restore_in_transaction(
+            &app,
+            &session,
+            &transfer,
+            driver,
+            &namespace,
+            &path,
+            &mut executed,
+        )
+        .await
+        .map_err(ImportError::from)
     } else {
         let replay = Replay {
             app: &app,

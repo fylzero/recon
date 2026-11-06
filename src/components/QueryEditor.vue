@@ -142,7 +142,13 @@ const formatterLanguage = computed<SqlLanguage>(() => {
   if (props.driver === "postgres") {
     return "postgresql";
   }
-  return props.driver === "sqlite" ? "sqlite" : "mysql";
+  if (props.driver === "sqlite") {
+    return "sqlite";
+  }
+  if (props.driver === "mssql") {
+    return "tsql";
+  }
+  return "mysql";
 });
 
 function languageExtension() {

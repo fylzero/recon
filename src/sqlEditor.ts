@@ -1,4 +1,4 @@
-import { MySQL, PostgreSQL, SQLite, type SQLDialect } from "@codemirror/lang-sql";
+import { MSSQL, MySQL, PostgreSQL, SQLite, type SQLDialect } from "@codemirror/lang-sql";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { EditorView } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
@@ -8,7 +8,13 @@ export function sqlDialect(driver: Driver): SQLDialect {
   if (driver === "postgres") {
     return PostgreSQL;
   }
-  return driver === "sqlite" ? SQLite : MySQL;
+  if (driver === "sqlite") {
+    return SQLite;
+  }
+  if (driver === "mssql") {
+    return MSSQL;
+  }
+  return MySQL;
 }
 
 export const sqlEditorTheme = EditorView.theme(

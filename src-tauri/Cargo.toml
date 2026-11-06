@@ -1,7 +1,7 @@
 [package]
 name = "Recon"
 version = "1.12.0"
-description = "A database client for MySQL, PostgreSQL, and SQLite"
+description = "A database client for MySQL, PostgreSQL, SQLite, and SQL Server"
 authors = ["RazorKode LLC"]
 license = "MIT"
 edition = "2021"
@@ -30,11 +30,14 @@ sqlx = { version = "0.8", default-features = false, features = [
     "postgres",
     "sqlite",
 ] }
-futures-util = "0.3"
+futures-util = { version = "0.3", features = ["io"] }
 flate2 = "1"
 russh = { version = "0.63", default-features = false, features = ["ring", "rsa", "flate2"] }
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-notification = "2"
+tiberius = { version = "0.13", default-features = false, features = ["tds73", "rustls"] }
+deadpool = "0.12"
+tokio-util = { version = "0.7.20", features = ["compat"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
