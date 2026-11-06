@@ -105,6 +105,28 @@ export function formatBytes(bytes: number) {
   return `${unit ? value.toFixed(1) : value} ${units[unit]}`;
 }
 
+/** Formats a transfer duration in milliseconds for completion toasts, matching the dashboard clock when >= 1 minute. */
+export function formatDuration(durationMs: number) {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) {
+    return "0.0s";
+  }
+  if (durationMs < 100) {
+    return `${Math.max(1, Math.round(durationMs))}ms`;
+  }
+  const totalSeconds = durationMs / 1000;
+  if (totalSeconds < 60) {
+    return `${totalSeconds.toFixed(1)}s`;
+  }
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const secText = seconds.toFixed(1).padStart(4, "0");
+  if (hours > 0) {
+    return `${hours}h ${minutes}m ${secText}s`;
+  }
+  return `${minutes}m ${secText}s`;
+}
+
 /** Picks a stopped import or restore up again, from `point.from` to run the uncertain statements again or `point.to` to skip them. */
 export function resumeAt(point: ImportResumePoint, skip: number): ImportResume {
   return { skip, line: point.line, fingerprint: point.fingerprint, backend: point.backend };

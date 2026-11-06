@@ -140,7 +140,7 @@ pub async fn list_aws_profiles() -> Vec<String> {
  */
 pub async fn fetch(entry: &ConnectionEntry) -> Result<String, String> {
     let (mut command, label) = match entry.password_source {
-        PasswordSource::Password => {
+        PasswordSource::Password | PasswordSource::None => {
             return Err("This connection doesn't fetch its password.".into())
         }
         PasswordSource::AwsIam => (aws_command(aws_args(entry)), "The AWS CLI"),
@@ -305,5 +305,6 @@ mod tests {
         cmd.password_command = PRINTS_NOTHING.into();
         assert!(fetch(&cmd).await.unwrap_err().contains("printed nothing"));
         assert!(fetch(&entry(PasswordSource::Password)).await.is_err());
+        assert!(fetch(&entry(PasswordSource::None)).await.is_err());
     }
 }

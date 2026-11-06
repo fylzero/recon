@@ -10,6 +10,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "keyring",
+ "memchr",
  "russh",
  "serde",
  "serde_json",

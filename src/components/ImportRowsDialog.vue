@@ -5,7 +5,7 @@ import * as api from "../api";
 import { useApp } from "../composables/useApp";
 import { useTransferJob } from "../composables/useTransfers";
 import { baseName } from "../platform";
-import { formatBytes } from "../transfer";
+import { formatBytes, formatDuration } from "../transfer";
 import type {
   ColumnDetail,
   Driver,
@@ -339,7 +339,7 @@ async function start() {
   try {
     const result = await api.importRows(props.connectionId, transferId, request);
     const into = result.created ? `new table “${request.table}”` : `“${request.table}”`;
-    showToast(`Imported ${rowsLabel(result.rows)} into ${into} in ${(result.durationMs / 1000).toFixed(1)}s`);
+    showToast(`Imported ${rowsLabel(result.rows)} into ${into} in ${formatDuration(result.durationMs)}`);
     emit("imported");
     emit("close");
   } catch (err) {

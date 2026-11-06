@@ -3,7 +3,7 @@ import type { FilterKind } from "./filters/model";
 
 export type Driver = "mysql" | "postgres" | "sqlite";
 export type SslMode = "disable" | "prefer" | "require" | "verify-ca" | "verify-full";
-export type PasswordSource = "password" | "aws-iam" | "command";
+export type PasswordSource = "password" | "none" | "aws-iam" | "command";
 
 export const DRIVER_OPTIONS: { id: Driver; label: string; defaultPort: number }[] = [
   { id: "mysql", label: "MySQL", defaultPort: 3306 },
@@ -130,7 +130,9 @@ export interface AppData {
   sidebarWidth?: number;
   maxAutoColumnWidth?: number;
   autoApplyFilters?: boolean;
+  multithreadedImport?: boolean;
   notifications?: NotificationMode;
+  machineStats?: boolean;
   window?: WindowState;
 }
 
@@ -148,7 +150,9 @@ export interface PreferencesPatch {
   sidebarWidth?: number;
   maxAutoColumnWidth?: number;
   autoApplyFilters?: boolean;
+  multithreadedImport?: boolean;
   notifications?: NotificationMode;
+  machineStats?: boolean;
 }
 
 export interface BytesCell {
@@ -483,16 +487,36 @@ export interface ImportResult {
   durationMs: number;
 }
 
+export interface ImportWorkerProgress {
+  index: number;
+  statements: number;
+  totalStatements: number;
+  state: "waiting" | "running" | "done";
+}
+
 export interface ImportProgress {
   transferId: string;
   statements: number;
   bytes: number;
   totalBytes: number;
-  /** `skipping` past statements that already ran when resuming, or `reconnecting` after the connection dropped. */
-  phase: "running" | "skipping" | "reconnecting";
+  /** `planning` while the file is split, `running`, `skipping` past statements that already ran, or `reconnecting` after the connection dropped. */
+  phase: "planning" | "running" | "skipping" | "reconnecting";
   /** Failed reconnect attempts so far, with the last one's error. */
   attempt: number;
   error: string | null;
+  fileBytes: number;
+  fileTotalBytes: number;
+  /** 0 until the split has counted statements. */
+  totalStatements: number;
+  workers: ImportWorkerProgress[];
+}
+
+/** Per-logical-core load and, when the machine exposes one, a Celsius temperature. */
+export interface MachineStats {
+  /** One number per logical core, 0–100, or null when that reading is unavailable. */
+  load: number[] | null;
+  /** Degrees Celsius, or null when unavailable. */
+  temperatureC: number | null;
 }
 
 export interface ImportBackend {

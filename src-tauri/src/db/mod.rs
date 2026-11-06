@@ -6,6 +6,7 @@ pub mod postgres;
 pub mod replace;
 pub mod restore;
 pub mod resume;
+pub mod sql_load;
 pub mod sql_split;
 pub mod sqlite;
 pub mod ssh;
@@ -1101,6 +1102,101 @@ impl Pool {
         })
     }
 
+    /**
+     * Capacity for `extra` connections on top of this pool's resting cap.
+     *
+     * sqlx 0.8.6 sizes the semaphore and the idle queue when the pool is
+     * created. This builds a lazy pool from this pool's connect options — the
+     * dial the session pool already uses, SSH local forward included — whose
+     * cap is the resting cap plus `extra`. `RaisedMax::detached` acquires and
+     * detaches from this pool while it has a free slot, and from the raised
+     * pool — after copying this pool's latest options, refreshed password
+     * included — when the resting cap is already checked out. `close`, also
+     * `Drop`, shuts the raised pool down. `extra` of 0, and SQLite, keep using
+     * this pool and open nothing else.
+     */
+    pub fn raise_max(&self, extra: u32) -> RaisedMax {
+        let raised = if extra == 0 {
+            None
+        } else {
+            let max = self.connection_limit().saturating_add(extra).max(1);
+            self.open_limited(max)
+        };
+        RaisedMax {
+            inner: Arc::new(RaisedInner {
+                source: self.clone(),
+                raised,
+                closed: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    fn connection_limit(&self) -> u32 {
+        match self {
+            Pool::MySql(pool) => pool.options().get_max_connections(),
+            Pool::Postgres(pool) => pool.options().get_max_connections(),
+            Pool::Sqlite(pool) => pool.options().get_max_connections(),
+        }
+    }
+
+    fn size(&self) -> u32 {
+        match self {
+            Pool::MySql(pool) => pool.size(),
+            Pool::Postgres(pool) => pool.size(),
+            Pool::Sqlite(pool) => pool.size(),
+        }
+    }
+
+    fn num_idle(&self) -> usize {
+        match self {
+            Pool::MySql(pool) => pool.num_idle(),
+            Pool::Postgres(pool) => pool.num_idle(),
+            Pool::Sqlite(pool) => pool.num_idle(),
+        }
+    }
+
+    /// True when `acquire` can take an idle connection or open one under the resting cap.
+    fn has_spare_slot(&self) -> bool {
+        self.num_idle() > 0 || self.size() < self.connection_limit()
+    }
+
+    /// `None` for SQLite, which never takes a second pool.
+    fn open_limited(&self, max: u32) -> Option<Pool> {
+        match self {
+            Pool::Sqlite(_) => None,
+            Pool::MySql(pool) => {
+                let options = (*pool.connect_options())
+                    .clone()
+                    .statement_cache_capacity(0);
+                let limits = pool.options();
+                let raised = sqlx::mysql::MySqlPoolOptions::new()
+                    .max_connections(max)
+                    .min_connections(0)
+                    .acquire_timeout(limits.get_acquire_timeout())
+                    .idle_timeout(limits.get_idle_timeout())
+                    .max_lifetime(limits.get_max_lifetime())
+                    .test_before_acquire(limits.get_test_before_acquire())
+                    .connect_lazy_with(options);
+                Some(Pool::MySql(raised))
+            }
+            Pool::Postgres(pool) => {
+                let options = (*pool.connect_options())
+                    .clone()
+                    .statement_cache_capacity(0);
+                let limits = pool.options();
+                let raised = sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(max)
+                    .min_connections(0)
+                    .acquire_timeout(limits.get_acquire_timeout())
+                    .idle_timeout(limits.get_idle_timeout())
+                    .max_lifetime(limits.get_max_lifetime())
+                    .test_before_acquire(limits.get_test_before_acquire())
+                    .connect_lazy_with(options);
+                Some(Pool::Postgres(raised))
+            }
+        }
+    }
+
     pub async fn acquire(&self) -> Result<PooledConn, String> {
         Ok(match self {
             Pool::MySql(pool) => PooledConn::MySql(pool.acquire().await.map_err(describe_error)?),
@@ -1117,6 +1213,75 @@ impl Pool {
         limit: usize,
     ) -> Result<RawOutput, String> {
         self.acquire().await?.run_statement(statement, limit).await
+    }
+}
+
+struct RaisedInner {
+    source: Pool,
+    raised: Option<Pool>,
+    closed: AtomicBool,
+}
+
+impl Drop for RaisedInner {
+    fn drop(&mut self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let Some(pool) = self.raised.take() else {
+            return;
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                pool.close().await;
+            });
+        }
+    }
+}
+
+/// Headroom from `Pool::raise_max`. Clone shares one cap and one close.
+#[derive(Clone)]
+pub struct RaisedMax {
+    inner: Arc<RaisedInner>,
+}
+
+impl RaisedMax {
+    /// Acquires and detaches. Uses the session pool while it has a free slot,
+    /// and the raised pool when that cap is already checked out.
+    pub async fn detached(&self) -> Result<Conn, String> {
+        let Some(raised) = &self.inner.raised else {
+            return self.inner.source.detached().await;
+        };
+        if self.inner.source.has_spare_slot() {
+            return self.inner.source.detached().await;
+        }
+        match (&self.inner.source, raised) {
+            (Pool::MySql(source), Pool::MySql(raised)) => {
+                raised.set_connect_options(
+                    (*source.connect_options())
+                        .clone()
+                        .statement_cache_capacity(0),
+                );
+            }
+            (Pool::Postgres(source), Pool::Postgres(raised)) => {
+                raised.set_connect_options(
+                    (*source.connect_options())
+                        .clone()
+                        .statement_cache_capacity(0),
+                );
+            }
+            _ => {}
+        }
+        raised.detached().await
+    }
+
+    /// Closes the raised pool. A second call, including `Drop` after this, does nothing.
+    pub async fn close(&self) {
+        if self.inner.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if let Some(pool) = &self.inner.raised {
+            pool.close().await;
+        }
     }
 }
 

@@ -18,7 +18,7 @@ use crate::db::{
     RowInsert, RowValues, SaveRequest, SchemaColumn, SchemaDiagram, Session, SessionStore,
     TableInfo, TableStructure,
 };
-use crate::models::{ConnectionEntry, Driver};
+use crate::models::{ConnectionEntry, Driver, PasswordSource};
 use crate::prompts::Prompter;
 use crate::query_log::{self, QueryOrigin, QueryRecord};
 use crate::secrets;
@@ -77,7 +77,7 @@ async fn password_for(
     password: Option<String>,
     prompter: &Prompter,
 ) -> Result<Option<String>, String> {
-    if entry.driver == Driver::Sqlite {
+    if entry.driver == Driver::Sqlite || entry.password_source == PasswordSource::None {
         return Ok(None);
     }
     if entry.password_source.is_fetched() {
@@ -466,7 +466,7 @@ async fn reopen_credentials(
             .unwrap_or_else(|| stale.entry.clone())
     };
     let saved = password_for(&entry, None, prompter).await?;
-    if entry.password_source.is_fetched() {
+    if entry.password_source.is_fetched() || entry.password_source == PasswordSource::None {
         return Ok((entry, saved));
     }
     Ok((entry, saved.or_else(|| stale.password.clone())))
@@ -480,11 +480,12 @@ async fn rebuild(
     prompter: &Prompter,
 ) -> Result<(Arc<Session>, SessionInfo), String> {
     let (entry, saved) = reopen_credentials(app, stale, prompter).await?;
-    let password = if entry.password_source.is_fetched() {
-        saved
-    } else {
-        password.filter(|value| !value.is_empty()).or(saved)
-    };
+    let password =
+        if entry.password_source.is_fetched() || entry.password_source == PasswordSource::None {
+            saved
+        } else {
+            password.filter(|value| !value.is_empty()).or(saved)
+        };
     let reuse = reusable_tunnel(stale, &entry);
     let (session, info) =
         open_session(entry, password, &stale.namespace(), prompter, reuse).await?;
@@ -2000,6 +2001,20 @@ pub async fn cancel_query(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn no_password_ignores_typed_credentials() {
+        let mut entry: ConnectionEntry =
+            serde_json::from_str(r#"{"name":"local","driver":"postgres","id":"saved"}"#).unwrap();
+        entry.password_source = PasswordSource::None;
+        entry.save_password = true;
+        assert_eq!(
+            password_for(&entry, Some("typed-secret".into()), &Prompter::background(),)
+                .await
+                .unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn picks_a_sensible_namespace() {

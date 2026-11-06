@@ -1800,14 +1800,25 @@ mod tests {
         assert_eq!(summary.rows, 3);
         assert!(!sql.contains("doubled)"), "{sql}");
 
-        let mut target = SqliteConnection::connect("sqlite::memory:").await.unwrap();
-        let statements = split_all(Driver::Sqlite, sql.as_bytes());
-        for statement in &statements {
-            sqlx::raw_sql(&statement.sql)
-                .execute(&mut target)
-                .await
-                .unwrap_or_else(|err| panic!("{err}: {}", statement.sql));
-        }
+        let target = SqliteConnection::connect("sqlite::memory:").await.unwrap();
+        let mut conn = Conn::Sqlite(target);
+        let cancel = AtomicBool::new(false);
+        crate::db::sql_load::load_sql(
+            &mut conn,
+            Driver::Sqlite,
+            std::io::BufReader::new(std::io::Cursor::new(sql.as_bytes())),
+            1,
+            || async { Err::<Conn, String>("SQLite replay stays on one connection".into()) },
+            &cancel,
+            |_progress| {},
+            std::iter::empty::<&str>(),
+            &HashSet::new(),
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{err}"));
+        let Conn::Sqlite(mut target) = conn else {
+            unreachable!("sqlite connection");
+        };
         let users = sqlite::run(
             &mut target,
             "SELECT id, name, score, avatar, doubled FROM users ORDER BY id",
@@ -1954,15 +1965,29 @@ mod tests {
 
         let compare = "SELECT id, name, big, price, ratio, doc, at, HEX(raw), bits + 0, note, doubled FROM users ORDER BY id";
         let expected = conn.run(compare, 10, None).await.unwrap().text_rows();
-        async fn import(conn: &mut Conn, sql: Vec<u8>) {
+        async fn import(conn: &mut Conn, pool: &crate::db::Pool, sql: Vec<u8>) {
             conn.execute("USE recon_dump_dst").await.unwrap();
-            for statement in split_all(Driver::Mysql, &sql) {
-                conn.execute(&statement.sql).await.unwrap_or_else(|err| {
-                    panic!("line {}: {err}: {}", statement.line, statement.sql)
-                });
-            }
+            let cancel = AtomicBool::new(false);
+            let workers = replay_workers(pool);
+            let pool = pool.clone();
+            crate::db::sql_load::load_sql(
+                conn,
+                Driver::Mysql,
+                std::io::BufReader::new(std::io::Cursor::new(sql)),
+                workers,
+                move || {
+                    let pool = pool.clone();
+                    async move { pool.detached().await }
+                },
+                &cancel,
+                |_progress| {},
+                ["USE recon_dump_dst", "SET FOREIGN_KEY_CHECKS = 0"],
+                &HashSet::new(),
+            )
+            .await
+            .unwrap_or_else(|err| panic!("{err}"));
         }
-        import(&mut conn, sql.clone().into_bytes()).await;
+        import(&mut conn, &opened.pool, sql.clone().into_bytes()).await;
         assert_eq!(
             conn.run(compare, 10, None).await.unwrap().text_rows(),
             expected
@@ -1978,7 +2003,7 @@ mod tests {
             Some("-- not a comment; /* nor this */")
         );
 
-        import(&mut conn, sql.clone().into_bytes()).await;
+        import(&mut conn, &opened.pool, sql.clone().into_bytes()).await;
         assert_eq!(
             conn.run(compare, 10, None).await.unwrap().text_rows(),
             expected
@@ -2029,7 +2054,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(leftovers.rows[0][0].as_i64(), Some(0));
-        import(&mut conn, sql.into_bytes()).await;
+        import(&mut conn, &opened.pool, sql.into_bytes()).await;
         assert_eq!(
             conn.run(compare, 10, None).await.unwrap().text_rows(),
             expected
@@ -2073,7 +2098,7 @@ mod tests {
             conn.execute("CREATE DATABASE recon_dump_dst")
                 .await
                 .unwrap();
-            import(&mut conn, output.stdout).await;
+            import(&mut conn, &opened.pool, output.stdout).await;
             assert_eq!(
                 conn.run(compare, 10, None).await.unwrap().text_rows(),
                 expected
@@ -2114,15 +2139,42 @@ mod tests {
         String::from_utf8(out).unwrap()
     }
 
-    async fn import_postgres(conn: &mut Conn, schema: &str, sql: &str) {
-        conn.execute(&format!("SET search_path TO {schema}, public"))
-            .await
-            .unwrap();
-        for statement in split_all(Driver::Postgres, sql.as_bytes()) {
-            conn.execute(&statement.sql)
-                .await
-                .unwrap_or_else(|err| panic!("line {}: {err}: {}", statement.line, statement.sql));
+    /// Two phase-2 workers when the pool can open one more connection.
+    fn replay_workers(pool: &crate::db::Pool) -> usize {
+        let (size, max) = match pool {
+            crate::db::Pool::MySql(pool) => (pool.size(), pool.options().get_max_connections()),
+            crate::db::Pool::Postgres(pool) => (pool.size(), pool.options().get_max_connections()),
+            crate::db::Pool::Sqlite(pool) => (pool.size(), pool.options().get_max_connections()),
+        };
+        if size < max {
+            2
+        } else {
+            1
         }
+    }
+
+    async fn import_postgres(conn: &mut Conn, pool: &crate::db::Pool, schema: &str, sql: &str) {
+        let search_path = format!("SET search_path TO {schema}, public");
+        conn.execute(&search_path).await.unwrap();
+        let cancel = AtomicBool::new(false);
+        let workers = replay_workers(pool);
+        let pool = pool.clone();
+        crate::db::sql_load::load_sql(
+            conn,
+            Driver::Postgres,
+            std::io::BufReader::new(std::io::Cursor::new(sql.as_bytes())),
+            workers,
+            move || {
+                let pool = pool.clone();
+                async move { pool.detached().await }
+            },
+            &cancel,
+            |_progress| {},
+            [search_path],
+            &HashSet::new(),
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{err}"));
     }
 
     /**
@@ -2223,7 +2275,7 @@ mod tests {
         let mut dst = target.conn;
         dst.execute("SET ROLE recon_dump_user").await.unwrap();
         dst.execute("CREATE SCHEMA moved").await.unwrap();
-        import_postgres(&mut dst, "moved", &sql).await;
+        import_postgres(&mut dst, &target.pool, "moved", &sql).await;
         assert_eq!(
             dst.run(compare, 10, None).await.unwrap().text_rows(),
             expected
@@ -2234,7 +2286,7 @@ mod tests {
             .unwrap();
         assert_eq!(audited.rows[0][0].as_i64(), Some(2));
 
-        import_postgres(&mut dst, "moved", &sql).await;
+        import_postgres(&mut dst, &target.pool, "moved", &sql).await;
         assert_eq!(
             dst.run(compare, 10, None).await.unwrap().text_rows(),
             expected
@@ -2318,7 +2370,7 @@ mod tests {
             "{subset}"
         );
         dst.execute("CREATE SCHEMA subset").await.unwrap();
-        import_postgres(&mut dst, "subset", &subset).await;
+        import_postgres(&mut dst, &target.pool, "subset", &subset).await;
         dst.execute("INSERT INTO extras (label) VALUES ('next')")
             .await
             .unwrap();

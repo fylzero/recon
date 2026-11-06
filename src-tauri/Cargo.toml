@@ -32,6 +32,7 @@ sqlx = { version = "0.8", default-features = false, features = [
 ] }
 futures-util = "0.3"
 flate2 = "1"
+memchr = "2"
 russh = { version = "0.63", default-features = false, features = ["ring", "rsa", "flate2"] }
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-notification = "2"

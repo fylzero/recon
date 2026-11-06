@@ -3,6 +3,7 @@ mod commands;
 mod console;
 mod db;
 mod db_commands;
+mod machine_stats;
 mod menu;
 mod models;
 mod persist;
@@ -76,6 +77,7 @@ pub fn run() {
             commands::resolve_ssh_host,
             commands::list_aws_profiles,
             commands::update_preferences,
+            machine_stats::machine_stats,
             commands::replace_app_data,
             commands::write_text_file,
             commands::read_text_file,
