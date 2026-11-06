@@ -8,10 +8,11 @@ use sqlx::mysql::{MySqlConnection, MySqlRow};
 use sqlx::postgres::{PgConnection, PgRow};
 use sqlx::sqlite::{SqliteConnection, SqliteRow};
 use sqlx::{Database, Executor, Row};
+use tiberius::QueryItem;
 
 use super::{
-    describe_error, hex, mysql, postgres, quote_backtick, quote_double, quote_literal, sqlite, text_at, texts,
-    CellValue, Conn, RawOutput,
+    describe_error, hex, mssql, mysql, postgres, quote_backtick, quote_bracket, quote_double, quote_literal, sqlite, text_at,
+    texts, CellValue, Conn, Dialect, RawOutput,
 };
 
 pub const CANCELLED: &str = "Export cancelled.";
@@ -142,6 +143,7 @@ pub async fn run(
         Conn::MySql(conn) => dump_mysql(conn, namespace, tables, options, dump).await,
         Conn::Postgres(conn) => dump_postgres(conn, namespace, tables, options, dump).await,
         Conn::Sqlite(conn) => dump_sqlite(conn, namespace, tables, options, dump).await,
+        Conn::Mssql(conn) => dump_mssql(conn.client(), namespace, tables, options, dump).await,
     }
 }
 
@@ -1382,6 +1384,383 @@ async fn postgres_sequence_position(conn: &mut PgConnection, sequence: &PgSequen
         let last = row.first().and_then(CellValue::to_text).unwrap_or_else(|| "1".into());
         (last, row.get(1).is_some_and(CellValue::is_truthy))
     }))
+}
+
+async fn dump_mssql(
+    client: &mut mssql::MssqlClient,
+    namespace: &str,
+    tables: &[DumpTable],
+    options: DumpOptions,
+    dump: &mut Dump<'_>,
+) -> Result<(), String> {
+    let db = quote_bracket(namespace);
+    mssql::run(client, &format!("USE {db}"), 0, None).await?;
+    let isolated = mssql::run(client, "SET TRANSACTION ISOLATION LEVEL SNAPSHOT", 0, None).await.is_ok()
+        && mssql::run(client, "BEGIN TRAN", 0, None).await.is_ok();
+    let outcome = dump_mssql_body(client, namespace, tables, options, dump).await;
+    if isolated {
+        let _ = mssql::run(client, "COMMIT", 0, None).await;
+    }
+    outcome
+}
+
+async fn dump_mssql_body(
+    client: &mut mssql::MssqlClient,
+    namespace: &str,
+    tables: &[DumpTable],
+    options: DumpOptions,
+    dump: &mut Dump<'_>,
+) -> Result<(), String> {
+    let db = quote_bracket(namespace);
+    dump.write("\nSET NOCOUNT ON;\n")?;
+    if options.structure {
+        let sequences = mssql::run(
+            client,
+            &format!(
+                "SELECT sch.name, seq.name, CONVERT(nvarchar(40), seq.start_value), \
+                 CONVERT(nvarchar(40), seq.increment), CONVERT(nvarchar(40), seq.minimum_value), \
+                 CONVERT(nvarchar(40), seq.maximum_value), seq.is_cycling, TYPE_NAME(seq.system_type_id) \
+                 FROM {db}.sys.sequences seq \
+                 JOIN {db}.sys.schemas sch ON sch.schema_id = seq.schema_id \
+                 WHERE sch.name NOT IN (N'sys', N'INFORMATION_SCHEMA') \
+                 ORDER BY sch.name, seq.name"
+            ),
+            usize::MAX,
+            None,
+        )
+        .await?
+        .rows;
+        if !sequences.is_empty() {
+            dump.write("\n-- Sequences\n")?;
+        }
+        for row in &sequences {
+            let qualified = mssql_name(&mssql_text(row, 0), &mssql_text(row, 1));
+            let cycle = if mssql_flag(row, 6) { "CYCLE" } else { "NO CYCLE" };
+            if options.drop_tables {
+                dump.write(&format!("DROP SEQUENCE IF EXISTS {qualified};\n"))?;
+            }
+            dump.write(&format!(
+                "CREATE SEQUENCE {qualified} AS {} START WITH {} INCREMENT BY {} MINVALUE {} MAXVALUE {} {cycle};\n",
+                mssql_text(row, 7),
+                mssql_text(row, 2),
+                mssql_text(row, 3),
+                mssql_text(row, 4),
+                mssql_text(row, 5),
+            ))?;
+        }
+    }
+
+    let mut foreign_keys = String::new();
+    for table in tables.iter().filter(|table| !table.view) {
+        dump.start(&table.name)?;
+        let (schema, name) = mssql::split_table(&table.name);
+        let qualified = mssql_name(schema, name);
+        if options.drop_tables {
+            dump.write(&format!("DROP TABLE IF EXISTS {qualified};\n"))?;
+        }
+        let columns = mssql::run(client, &mssql_columns_sql(namespace, schema, name), usize::MAX, None).await?.rows;
+        let indexes = if options.structure {
+            mssql::run(client, &Dialect::index_definitions_sql(&mssql::MssqlDialect, namespace, &table.name), usize::MAX, None)
+                .await?
+                .rows
+        } else {
+            Vec::new()
+        };
+        if options.structure {
+            dump.write(&mssql_create_table(&qualified, &columns, &indexes))?;
+        }
+        if options.data {
+            let inserted: Vec<&Vec<CellValue>> = columns.iter().filter(|row| !mssql_flag(row, 4)).collect();
+            if !inserted.is_empty() {
+                let names: Vec<String> = inserted.iter().map(|row| mssql_text(row, 0)).collect();
+                let list = column_list(&names, quote_bracket);
+                let identity = inserted.iter().any(|row| mssql_flag(row, 3));
+                if identity {
+                    dump.write(&format!("{};\n", mssql::identity_insert_sql(&qualified, true)))?;
+                }
+                let select = format!("SELECT {list} FROM {qualified}");
+                let insert = format!("INSERT INTO {qualified} ({list})");
+                write_mssql_rows(dump, client, &table.name, &select, &insert).await?;
+                if identity {
+                    dump.write(&format!("{};\n", mssql::identity_insert_sql(&qualified, false)))?;
+                }
+            }
+        }
+        if options.structure {
+            for row in indexes.iter().filter(|row| !mssql_flag(row, 3) && !mssql_flag(row, 7)) {
+                let unique = if mssql_flag(row, 2) { "UNIQUE " } else { "" };
+                let filter = mssql_text(row, 4);
+                let where_sql = if filter.is_empty() { String::new() } else { format!(" WHERE {filter}") };
+                dump.write(&format!(
+                    "CREATE {unique}INDEX {} ON {qualified} ({}){where_sql};\n",
+                    quote_bracket(&mssql_text(row, 0)),
+                    mssql_text(row, 1)
+                ))?;
+            }
+            let keys = mssql::run(client, &Dialect::foreign_keys_sql(&mssql::MssqlDialect, namespace, &table.name), usize::MAX, None)
+                .await?
+                .rows;
+            foreign_keys.push_str(&mssql_foreign_keys(&qualified, &keys));
+        }
+    }
+    if !foreign_keys.is_empty() {
+        dump.write(&format!("\n-- Foreign keys\n{foreign_keys}"))?;
+    }
+
+    if options.structure {
+        let modules = mssql::run(
+            client,
+            &format!(
+                "SELECT o.type, s.name, o.name, OBJECT_DEFINITION(o.object_id), \
+                 COALESCE(OBJECT_SCHEMA_NAME(o.parent_object_id), N''), COALESCE(OBJECT_NAME(o.parent_object_id), N'') \
+                 FROM {db}.sys.objects o \
+                 JOIN {db}.sys.schemas s ON s.schema_id = o.schema_id \
+                 WHERE o.type IN ('V', 'P', 'FN', 'IF', 'TF', 'TR') \
+                   AND s.name NOT IN (N'sys', N'INFORMATION_SCHEMA')"
+            ),
+            usize::MAX,
+            None,
+        )
+        .await?
+        .rows;
+        let wanted: HashSet<&str> = tables.iter().map(|table| table.name.as_str()).collect();
+        let mut views = Vec::new();
+        for row in &modules {
+            let object = format!("{}.{}", mssql_text(row, 1), mssql_text(row, 2));
+            let kind = mssql_text(row, 0);
+            if kind.trim() == "V" && wanted.contains(object.as_str()) {
+                views.push((mssql_name(&mssql_text(row, 1), &mssql_text(row, 2)), mssql_text(row, 3)));
+            }
+        }
+        let views = dependency_order(views, |(_, definition), (other, _)| definition.contains(other));
+        for (name, definition) in &views {
+            dump.start(name)?;
+            if definition.is_empty() {
+                dump.skip(name, "no permission to read its definition")?;
+                continue;
+            }
+            if options.drop_tables {
+                dump.write(&format!("DROP VIEW IF EXISTS {name};\n"))?;
+            }
+            write_batch(dump, definition)?;
+        }
+        if options.routines {
+            for row in &modules {
+                let kind = mssql_text(row, 0);
+                let kind = kind.trim();
+                if !matches!(kind, "P" | "FN" | "IF" | "TF") {
+                    continue;
+                }
+                dump.check()?;
+                let definition = mssql_text(row, 3);
+                let qualified = mssql_name(&mssql_text(row, 1), &mssql_text(row, 2));
+                if definition.is_empty() {
+                    dump.skip(&qualified, "no permission to read its definition")?;
+                    continue;
+                }
+                let drop_kind = if kind == "P" { "PROCEDURE" } else { "FUNCTION" };
+                if options.drop_tables {
+                    dump.write(&format!("DROP {drop_kind} IF EXISTS {qualified};\n"))?;
+                }
+                write_batch(dump, &definition)?;
+            }
+        }
+        let chosen: HashSet<&str> = tables.iter().filter(|table| !table.view).map(|table| table.name.as_str()).collect();
+        for row in &modules {
+            if mssql_text(row, 0).trim() != "TR" {
+                continue;
+            }
+            let parent = format!("{}.{}", mssql_text(row, 4), mssql_text(row, 5));
+            if !chosen.contains(parent.as_str()) {
+                continue;
+            }
+            dump.check()?;
+            let definition = mssql_text(row, 3);
+            if definition.is_empty() {
+                dump.skip(&mssql_text(row, 2), "no permission to read its definition")?;
+                continue;
+            }
+            if options.drop_tables {
+                dump.write(&format!("DROP TRIGGER IF EXISTS {};\n", mssql_name(&mssql_text(row, 1), &mssql_text(row, 2))))?;
+            }
+            write_batch(dump, &definition)?;
+        }
+        let synonyms = mssql::run(
+            client,
+            &format!(
+                "SELECT sch.name, syn.name, syn.base_object_name \
+                 FROM {db}.sys.synonyms syn \
+                 JOIN {db}.sys.schemas sch ON sch.schema_id = syn.schema_id \
+                 ORDER BY sch.name, syn.name"
+            ),
+            usize::MAX,
+            None,
+        )
+        .await?
+        .rows;
+        if !synonyms.is_empty() {
+            dump.write("\n-- Synonyms\n")?;
+        }
+        let prefix = format!("{db}.");
+        for row in &synonyms {
+            let base = mssql_text(row, 2);
+            let base = base.strip_prefix(&prefix).unwrap_or(&base);
+            let qualified = mssql_name(&mssql_text(row, 0), &mssql_text(row, 1));
+            if options.drop_tables {
+                dump.write(&format!("DROP SYNONYM IF EXISTS {qualified};\n"))?;
+            }
+            dump.write(&format!("CREATE SYNONYM {qualified} FOR {base};\n"))?;
+        }
+    }
+    Ok(())
+}
+
+fn mssql_columns_sql(namespace: &str, schema: &str, name: &str) -> String {
+    let db = quote_bracket(namespace);
+    format!(
+        "SELECT c.name, {expr}, c.is_nullable, c.is_identity, c.is_computed, cc.definition, cc.is_persisted, \
+         OBJECT_DEFINITION(dc.object_id), CONVERT(nvarchar(40), ic.seed_value), CONVERT(nvarchar(40), ic.increment_value) \
+         FROM {db}.sys.columns c \
+         JOIN {db}.sys.objects o ON o.object_id = c.object_id \
+         JOIN {db}.sys.schemas s ON s.schema_id = o.schema_id \
+         JOIN {db}.sys.types ty ON ty.user_type_id = c.user_type_id \
+         LEFT JOIN {db}.sys.computed_columns cc ON cc.object_id = c.object_id AND cc.column_id = c.column_id \
+         LEFT JOIN {db}.sys.default_constraints dc ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id \
+         LEFT JOIN {db}.sys.identity_columns ic ON ic.object_id = c.object_id AND ic.column_id = c.column_id \
+         WHERE s.name = {schema_lit} AND o.name = {name_lit} \
+         ORDER BY c.column_id",
+        expr = mssql::TYPE_EXPR,
+        schema_lit = mssql::n_literal(schema),
+        name_lit = mssql::n_literal(name),
+    )
+}
+
+fn mssql_create_table(qualified: &str, columns: &[Vec<CellValue>], indexes: &[Vec<CellValue>]) -> String {
+    let mut parts: Vec<String> = columns.iter().map(mssql_column_sql).collect();
+    for row in indexes.iter().filter(|row| mssql_flag(row, 3) || mssql_flag(row, 7)) {
+        let kind = if mssql_flag(row, 3) { "PRIMARY KEY" } else { "UNIQUE" };
+        parts.push(format!(
+            "CONSTRAINT {} {kind} ({})",
+            quote_bracket(&mssql_text(row, 0)),
+            mssql_text(row, 1)
+        ));
+    }
+    format!("CREATE TABLE {qualified} (\n    {}\n);\n", parts.join(",\n    "))
+}
+
+fn mssql_column_sql(row: &Vec<CellValue>) -> String {
+    let name = quote_bracket(&mssql_text(row, 0));
+    if mssql_flag(row, 4) {
+        let persisted = if mssql_flag(row, 6) { " PERSISTED" } else { "" };
+        return format!("{name} AS ({}){persisted}", mssql_text(row, 5));
+    }
+    let identity = if mssql_flag(row, 3) {
+        format!(" IDENTITY({}, {})", mssql_text(row, 8), mssql_text(row, 9))
+    } else {
+        String::new()
+    };
+    let default = {
+        let expr = mssql_text(row, 7);
+        if expr.is_empty() { String::new() } else { format!(" DEFAULT {expr}") }
+    };
+    let null_sql = if mssql_flag(row, 2) { "NULL" } else { "NOT NULL" };
+    format!("{name} {}{identity}{default} {null_sql}", mssql_text(row, 1))
+}
+
+fn mssql_foreign_keys(table: &str, rows: &[Vec<CellValue>]) -> String {
+    let mut sql = String::new();
+    let mut name = String::new();
+    let mut columns = Vec::new();
+    let mut referenced = String::new();
+    let mut ref_columns = Vec::new();
+    let flush = |sql: &mut String, name: &str, columns: &[String], referenced: &str, ref_columns: &[String]| {
+        if name.is_empty() {
+            return;
+        }
+        sql.push_str(&format!(
+            "ALTER TABLE {table} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {referenced} ({});\n",
+            quote_bracket(name),
+            columns.join(", "),
+            ref_columns.join(", ")
+        ));
+    };
+    for row in rows {
+        let next = mssql_text(row, 0);
+        if next != name {
+            flush(&mut sql, &name, &columns, &referenced, &ref_columns);
+            name = next;
+            columns.clear();
+            ref_columns.clear();
+            referenced = mssql_name(&mssql_text(row, 2), &mssql_text(row, 3));
+        }
+        columns.push(quote_bracket(&mssql_text(row, 1)));
+        ref_columns.push(quote_bracket(&mssql_text(row, 4)));
+    }
+    flush(&mut sql, &name, &columns, &referenced, &ref_columns);
+    sql
+}
+
+fn mssql_name(schema: &str, name: &str) -> String {
+    format!("{}.{}", quote_bracket(schema), quote_bracket(name))
+}
+
+fn mssql_text(row: &[CellValue], index: usize) -> String {
+    row.get(index).and_then(CellValue::to_text).unwrap_or_default()
+}
+
+fn mssql_flag(row: &[CellValue], index: usize) -> bool {
+    row.get(index).is_some_and(CellValue::is_truthy)
+}
+
+/// `CREATE VIEW`, `CREATE PROCEDURE`, and `CREATE TRIGGER` have to be the first statement of a batch.
+fn write_batch(dump: &mut Dump<'_>, definition: &str) -> Result<(), String> {
+    dump.write(&format!("\nGO\n{}\nGO\n", definition.trim()))
+}
+
+async fn write_mssql_rows(
+    dump: &mut Dump<'_>,
+    client: &mut mssql::MssqlClient,
+    table: &str,
+    select: &str,
+    insert: &str,
+) -> Result<(), String> {
+    let mut stream = client.simple_query(select).await.map_err(mssql::describe)?;
+    let mut batch = String::new();
+    let mut batched = 0;
+    let mut rows = 0u64;
+    while let Some(item) = stream.try_next().await.map_err(mssql::describe)? {
+        let QueryItem::Row(row) = item else { continue };
+        dump.check()?;
+        if batched == 0 {
+            batch.push_str(insert);
+            batch.push_str(" VALUES\n(");
+        } else {
+            batch.push_str(",\n(");
+        }
+        for index in 0..row.len() {
+            if index > 0 {
+                batch.push_str(", ");
+            }
+            batch.push_str(&mssql::literal(&mssql::cell(&row, index)));
+        }
+        batch.push(')');
+        batched += 1;
+        rows += 1;
+        if batched >= BATCH_ROWS || batch.len() >= BATCH_BYTES {
+            batch.push_str(";\n");
+            dump.write(&batch)?;
+            batch.clear();
+            batched = 0;
+            dump.report(table, rows);
+        }
+    }
+    if batched > 0 {
+        batch.push_str(";\n");
+        dump.write(&batch)?;
+    }
+    dump.summary.rows += rows;
+    dump.report(table, rows);
+    Ok(())
 }
 
 async fn dump_sqlite(

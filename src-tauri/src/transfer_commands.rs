@@ -647,9 +647,14 @@ pub async fn restore_database(
     let renamed = |err: String| if err == IMPORT_CANCELLED { RESTORE_CANCELLED.to_string() } else { err };
     let outcome = async {
         let mut conn = session.pool.detached().await?;
-        let result = if driver == Driver::Postgres {
+        let result = if driver == Driver::Postgres || driver == Driver::Mssql {
             let ran = async {
-                conn.execute("BEGIN").await?;
+                if driver == Driver::Mssql {
+                    conn.execute(&format!("USE {}", crate::db::quote_bracket(&namespace))).await?;
+                    conn.execute("BEGIN TRAN").await?;
+                } else {
+                    conn.execute("BEGIN").await?;
+                }
                 restore::reset_namespace(&mut conn, driver, &namespace).await?;
                 run_sql_file(&app, &mut conn, driver, &transfer, &mut file, &mut executed).await?;
                 if transfer.cancelled() {

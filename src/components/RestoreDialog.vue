@@ -31,7 +31,7 @@ let transferId = "";
 let stopProgress: UnlistenFn | null = null;
 
 const label = computed(() => props.namespaceLabel.toLowerCase());
-const atomic = computed(() => props.driver === "postgres");
+const atomic = computed(() => props.driver === "postgres" || props.driver === "mssql");
 const fileName = computed(() => props.path.split("/").pop() ?? props.path);
 const created = computed(() => {
   const date = new Date(props.info.createdAt);
@@ -44,6 +44,9 @@ const loss = computed(() => {
   }
   if (props.driver === "mysql") {
     return `Events in “${props.namespace}” are kept as they are.`;
+  }
+  if (props.driver === "mssql") {
+    return `Logins, users, and permissions in “${props.namespace}” are kept. Assemblies and Service Broker objects are removed only when a statement in the backup drops them.`;
   }
   return "";
 });

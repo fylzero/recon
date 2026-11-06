@@ -589,7 +589,7 @@ mod tests {
             let change: ColumnChange = serde_json::from_value(change).unwrap();
             let current = before.iter().find(|column| column.name == change.column);
             statements.extend(
-                super::super::alter_statements(crate::models::Driver::Mysql, &shapes, &change, current).unwrap(),
+                super::super::alter_statements(crate::models::Driver::Mysql, &shapes, &change, current, None).unwrap(),
             );
         }
         opened.pool.apply(&statements).await.unwrap();

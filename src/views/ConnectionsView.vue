@@ -146,7 +146,7 @@ async function sortAlphabetically() {
         </div>
 
         <p v-if="isEmpty && !creating" class="muted">
-          Add a MySQL, PostgreSQL, or SQLite connection. Groups keep related connections together.
+          Add a MySQL, PostgreSQL, SQLite, or SQL Server connection. Groups keep related connections together.
         </p>
 
         <div

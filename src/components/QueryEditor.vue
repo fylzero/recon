@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { MySQL, PostgreSQL, SQLite, sql, type SQLNamespace } from "@codemirror/lang-sql";
+import { MSSQL, MySQL, PostgreSQL, SQLite, sql, type SQLNamespace } from "@codemirror/lang-sql";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { Compartment, EditorState, Prec } from "@codemirror/state";
 import { EditorView, keymap, placeholder } from "@codemirror/view";
@@ -61,14 +61,26 @@ const dialect = computed(() => {
   if (props.driver === "postgres") {
     return PostgreSQL;
   }
-  return props.driver === "sqlite" ? SQLite : MySQL;
+  if (props.driver === "sqlite") {
+    return SQLite;
+  }
+  if (props.driver === "mssql") {
+    return MSSQL;
+  }
+  return MySQL;
 });
 
 const formatterLanguage = computed<SqlLanguage>(() => {
   if (props.driver === "postgres") {
     return "postgresql";
   }
-  return props.driver === "sqlite" ? "sqlite" : "mysql";
+  if (props.driver === "sqlite") {
+    return "sqlite";
+  }
+  if (props.driver === "mssql") {
+    return "tsql";
+  }
+  return "mysql";
 });
 
 const editorTheme = EditorView.theme(

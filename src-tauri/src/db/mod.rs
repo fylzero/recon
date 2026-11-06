@@ -1,5 +1,6 @@
 pub mod dump;
 pub mod filter;
+pub mod mssql;
 pub mod mysql;
 pub mod postgres;
 pub mod restore;
@@ -419,6 +420,7 @@ pub fn insert_statement(driver: Driver, table: &str, insert: &RowInsert, overrid
         values.push(match &cell.value {
             EditValue::Null => "NULL".to_string(),
             value if driver == Driver::Postgres => value.postgres_literal(),
+            value if driver == Driver::Mssql => mssql::edit_literal(value),
             value => {
                 params.push(value.clone());
                 "?".to_string()
@@ -489,7 +491,9 @@ pub fn create_index_statement(
     let unique = if index.unique { "UNIQUE " } else { "" };
     let sql = match driver {
         Driver::Mysql => format!("ALTER TABLE {table} ADD {unique}INDEX {} ({columns})", dialect.quote_ident(name)),
-        Driver::Postgres => format!("CREATE {unique}INDEX {} ON {table} ({columns})", dialect.quote_ident(name)),
+        Driver::Postgres | Driver::Mssql => {
+            format!("CREATE {unique}INDEX {} ON {table} ({columns})", dialect.quote_ident(name))
+        }
         Driver::Sqlite => format!(
             "CREATE {unique}INDEX {} ON {} ({columns})",
             dialect.qualified(namespace, name),
@@ -547,6 +551,7 @@ pub fn alter_statements(
     table: &str,
     change: &ColumnChange,
     mysql_current: Option<&mysql::ColumnDefinition>,
+    mssql_current: Option<&mssql::ColumnDefinition>,
 ) -> Result<Vec<EditStatement>, String> {
     validate_column_change(change)?;
     let quote = |ident: &str| dialect(driver).quote_ident(ident);
@@ -582,6 +587,12 @@ pub fn alter_statements(
             }
             Ok(sql.into_iter().map(statement).collect())
         }
+        Driver::Mssql => {
+            let current = mssql_current.ok_or_else(|| {
+                format!("Column {} no longer exists in {table}. Reload and try again.", change.column)
+            })?;
+            Ok(mssql::alter_column_statements(table, change, current)?.into_iter().map(statement).collect())
+        }
         Driver::Sqlite => {
             if !change.only_renames() {
                 return Err(format!(
@@ -606,12 +617,11 @@ pub fn update_statement(driver: Driver, table: &str, update: &RowUpdate) -> Resu
         return Err("There is nothing to update.".into());
     }
     let dialect = dialect(driver);
-    let inline = driver == Driver::Postgres;
     let mut params = Vec::new();
-    let mut value_sql = |value: &EditValue| {
-        if inline {
-            value.postgres_literal()
-        } else {
+    let mut value_sql = |value: &EditValue| match driver {
+        Driver::Postgres => value.postgres_literal(),
+        Driver::Mssql => mssql::edit_literal(value),
+        Driver::Mysql | Driver::Sqlite => {
             params.push(value.clone());
             "?".to_string()
         }
@@ -745,6 +755,12 @@ pub trait Dialect: Sync {
         raw
     }
 
+    /// Appended after an optional ORDER BY. `ordered` is false when the caller did not sort.
+    fn limit_sql(&self, limit: u64, offset: u64, ordered: bool) -> String {
+        let _ = ordered;
+        format!(" LIMIT {limit} OFFSET {offset}")
+    }
+
     fn qualified(&self, namespace: &str, table: &str) -> String {
         if namespace.is_empty() {
             return self.quote_ident(table);
@@ -758,6 +774,7 @@ pub fn dialect(driver: Driver) -> &'static dyn Dialect {
         Driver::Mysql => &mysql::MysqlDialect,
         Driver::Postgres => &postgres::PostgresDialect,
         Driver::Sqlite => &sqlite::SqliteDialect,
+        Driver::Mssql => &mssql::MssqlDialect,
     }
 }
 
@@ -765,14 +782,23 @@ pub enum Pool {
     MySql(sqlx::MySqlPool),
     Postgres(sqlx::PgPool),
     Sqlite(sqlx::SqlitePool),
+    Mssql(mssql::MssqlPool),
 }
 
 impl Pool {
+    /// Drops idle connections so a following statement can take an exclusive lock.
+    pub async fn quiesce(&self) {
+        if let Pool::Mssql(pool) = self {
+            pool.quiesce().await;
+        }
+    }
+
     pub async fn close(&self) {
         match self {
             Pool::MySql(pool) => pool.close().await,
             Pool::Postgres(pool) => pool.close().await,
             Pool::Sqlite(pool) => pool.close().await,
+            Pool::Mssql(pool) => pool.close().await,
         }
     }
 
@@ -790,6 +816,7 @@ impl Pool {
                 let mut conn = pool.acquire().await.map_err(describe_error)?;
                 sqlite::run(&mut conn, sql, limit, None).await
             }
+            Pool::Mssql(pool) => pool.run(sql, limit).await,
         }
     }
 
@@ -798,6 +825,7 @@ impl Pool {
             Pool::MySql(pool) => apply_in_transaction!(pool, statements),
             Pool::Postgres(pool) => apply_in_transaction!(pool, statements),
             Pool::Sqlite(pool) => apply_in_transaction!(pool, statements),
+            Pool::Mssql(pool) => pool.apply(statements).await,
         }
     }
 
@@ -810,6 +838,7 @@ impl Pool {
             Pool::MySql(pool) => Conn::MySql(pool.acquire().await.map_err(describe_error)?.detach()),
             Pool::Postgres(pool) => Conn::Postgres(pool.acquire().await.map_err(describe_error)?.detach()),
             Pool::Sqlite(pool) => Conn::Sqlite(pool.acquire().await.map_err(describe_error)?.detach()),
+            Pool::Mssql(pool) => Conn::Mssql(pool.detached().await?),
         })
     }
 
@@ -818,6 +847,7 @@ impl Pool {
             Pool::MySql(pool) => PooledConn::MySql(pool.acquire().await.map_err(describe_error)?),
             Pool::Postgres(pool) => PooledConn::Postgres(pool.acquire().await.map_err(describe_error)?),
             Pool::Sqlite(pool) => PooledConn::Sqlite(pool.acquire().await.map_err(describe_error)?),
+            Pool::Mssql(pool) => PooledConn::Mssql(pool.checkout().await?),
         })
     }
 
@@ -834,6 +864,7 @@ pub enum PooledConn {
     MySql(sqlx::pool::PoolConnection<sqlx::MySql>),
     Postgres(sqlx::pool::PoolConnection<sqlx::Postgres>),
     Sqlite(sqlx::pool::PoolConnection<sqlx::Sqlite>),
+    Mssql(deadpool::managed::Object<mssql::MssqlManager>),
 }
 
 impl PooledConn {
@@ -842,6 +873,7 @@ impl PooledConn {
             PooledConn::MySql(_) => Driver::Mysql,
             PooledConn::Postgres(_) => Driver::Postgres,
             PooledConn::Sqlite(_) => Driver::Sqlite,
+            PooledConn::Mssql(_) => Driver::Mssql,
         }
     }
 
@@ -850,6 +882,7 @@ impl PooledConn {
             PooledConn::MySql(conn) => mysql::run(conn, sql, limit, None).await,
             PooledConn::Postgres(conn) => postgres::run(conn, sql, limit, None).await,
             PooledConn::Sqlite(conn) => sqlite::run(conn, sql, limit, None).await,
+            PooledConn::Mssql(conn) => mssql::run(conn.as_mut(), sql, limit, None).await,
         }
     }
 
@@ -876,6 +909,7 @@ impl PooledConn {
         let sql = match self {
             PooledConn::MySql(_) => "SELECT CONNECTION_ID()",
             PooledConn::Postgres(_) => "SELECT pg_backend_pid()",
+            PooledConn::Mssql(_) => "SELECT @@SPID",
             PooledConn::Sqlite(_) => return None,
         };
         self.run(sql, 1).await.ok()?.rows.first()?.first()?.as_i64()
@@ -909,7 +943,7 @@ impl PooledConn {
                 let set = self.run(&mysql, 0).await.is_ok() || self.run(&mariadb, 0).await.is_ok();
                 set && millis.is_some()
             }
-            PooledConn::Sqlite(_) => false,
+            PooledConn::Sqlite(_) | PooledConn::Mssql(_) => false,
         }
     }
 
@@ -919,6 +953,10 @@ impl PooledConn {
             PooledConn::MySql(conn) => conn.close().await,
             PooledConn::Postgres(conn) => conn.close().await,
             PooledConn::Sqlite(conn) => conn.close().await,
+            PooledConn::Mssql(conn) => {
+                let _ = deadpool::managed::Object::take(conn).close().await;
+                Ok(())
+            }
         };
     }
 }
@@ -930,13 +968,17 @@ pub fn is_timeout_or_cancel(message: &str) -> bool {
         || lower.contains("canceling statement")
         || lower.contains("maximum statement execution time")
         || lower.contains("max_statement_time")
-        || lower.contains("query execution was interrupted")
+        ||     lower.contains("query execution was interrupted")
+        || lower.contains("query was cancel")
+        || lower.contains("kill state")
+        || lower.contains("attention signal")
 }
 
 pub enum Conn {
     MySql(sqlx::MySqlConnection),
     Postgres(sqlx::PgConnection),
     Sqlite(sqlx::SqliteConnection),
+    Mssql(mssql::MssqlConn),
 }
 
 impl Conn {
@@ -950,6 +992,7 @@ impl Conn {
             Conn::MySql(conn) => mysql::run(conn, sql, limit, cancel).await,
             Conn::Postgres(conn) => postgres::run(conn, sql, limit, cancel).await,
             Conn::Sqlite(conn) => sqlite::run(conn, sql, limit, cancel).await,
+            Conn::Mssql(conn) => mssql::run(conn.client(), sql, limit, cancel).await,
         }
     }
 
@@ -960,6 +1003,7 @@ impl Conn {
             Conn::MySql(conn) => Executor::execute(conn, query).await.map(|done| done.rows_affected()),
             Conn::Postgres(conn) => Executor::execute(conn, query).await.map(|done| done.rows_affected()),
             Conn::Sqlite(conn) => Executor::execute(conn, query).await.map(|done| done.rows_affected()),
+            Conn::Mssql(conn) => return mssql::run(conn.client(), sql, 1, None).await.map(|output| output.rows_affected),
         }
         .map_err(describe_error)
     }
@@ -970,6 +1014,10 @@ impl Conn {
             Conn::MySql(conn) => conn.close().await,
             Conn::Postgres(conn) => conn.close().await,
             Conn::Sqlite(conn) => conn.close().await,
+            Conn::Mssql(conn) => {
+                conn.close().await;
+                Ok(())
+            }
         };
     }
 }
@@ -1302,6 +1350,10 @@ pub async fn with_timeout<T>(
     }
 }
 
+pub fn quote_bracket(ident: &str) -> String {
+    format!("[{}]", ident.replace(']', "]]"))
+}
+
 pub fn quote_double(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
@@ -1506,6 +1558,32 @@ pub fn index_statements(
                 statement(create),
             ])
         }
+        Driver::Mssql => {
+            let qualified_old = format!("{}.{}", mssql::strip_database(table), old);
+            if change.only_renames() || current.constraint {
+                if !change.only_renames() {
+                    return Err(format!(
+                        "Index {} belongs to a constraint, so Recon can only rename it. Change the constraint with SQL instead.",
+                        current.name
+                    ));
+                }
+                return Ok(vec![statement(mssql::sp_rename(&qualified_old, new_name, "INDEX"))]);
+            }
+            let columns = change.columns.as_deref().unwrap_or(&current.columns).trim();
+            if columns.is_empty() {
+                return Err(format!("Index {} uses expressions, so change it with SQL instead.", current.name));
+            }
+            let unique = if unique { "UNIQUE " } else { "" };
+            let filter = if current.definition.is_empty() {
+                String::new()
+            } else {
+                format!(" WHERE {}", current.definition)
+            };
+            Ok(vec![
+                statement(format!("DROP INDEX {old} ON {table}")),
+                statement(format!("CREATE {unique}INDEX {new} ON {table} ({columns}){filter}")),
+            ])
+        }
     }
 }
 
@@ -1634,7 +1712,7 @@ mod tests {
             "nullable": false,
             "defaultValue": "0",
         }));
-        let sql = alter_statements(Driver::Postgres, "\"people\"", &change, None)
+        let sql = alter_statements(Driver::Postgres, "\"people\"", &change, None, None)
             .unwrap()
             .into_iter()
             .map(|statement| statement.sql)
@@ -1650,7 +1728,7 @@ mod tests {
         );
         let drop = column_change(serde_json::json!({ "column": "age", "defaultValue": null }));
         assert_eq!(
-            alter_statements(Driver::Postgres, "\"people\"", &drop, None).unwrap()[0].sql,
+            alter_statements(Driver::Postgres, "\"people\"", &drop, None, None).unwrap()[0].sql,
             "ALTER TABLE \"people\" ALTER COLUMN \"age\" DROP DEFAULT"
         );
     }
@@ -1658,11 +1736,11 @@ mod tests {
     #[test]
     fn only_renames_sqlite_columns() {
         let rename = column_change(serde_json::json!({ "column": "a", "name": "b" }));
-        let statements = alter_statements(Driver::Sqlite, "\"t\"", &rename, None).unwrap();
+        let statements = alter_statements(Driver::Sqlite, "\"t\"", &rename, None, None).unwrap();
         assert_eq!(statements[0].sql, "ALTER TABLE \"t\" RENAME COLUMN \"a\" TO \"b\"");
         assert!(!statements[0].expect_one_row);
         let retype = column_change(serde_json::json!({ "column": "a", "dataType": "INTEGER" }));
-        assert!(alter_statements(Driver::Sqlite, "\"t\"", &retype, None).is_err());
+        assert!(alter_statements(Driver::Sqlite, "\"t\"", &retype, None, None).is_err());
     }
 
     #[test]
@@ -1672,7 +1750,7 @@ mod tests {
             serde_json::json!({ "column": "a", "dataType": "" }),
             serde_json::json!({ "column": "a", "defaultValue": "" }),
         ] {
-            assert!(alter_statements(Driver::Postgres, "\"t\"", &column_change(value), None).is_err());
+            assert!(alter_statements(Driver::Postgres, "\"t\"", &column_change(value), None, None).is_err());
         }
     }
 
@@ -1689,7 +1767,7 @@ mod tests {
             generated: false,
         };
         let change = column_change(serde_json::json!({ "column": "title", "nullable": false }));
-        let sql = alter_statements(Driver::Mysql, "`app`.`posts`", &change, Some(&current)).unwrap();
+        let sql = alter_statements(Driver::Mysql, "`app`.`posts`", &change, Some(&current), None).unwrap();
         assert_eq!(
             sql[0].sql,
             "ALTER TABLE `app`.`posts` CHANGE COLUMN `title` `title` varchar(191) COLLATE utf8mb4_unicode_ci \
@@ -1702,7 +1780,7 @@ mod tests {
             "dataType": "int",
             "defaultValue": null,
         }));
-        let sql = alter_statements(Driver::Mysql, "`posts`", &retype, Some(&current)).unwrap();
+        let sql = alter_statements(Driver::Mysql, "`posts`", &retype, Some(&current), None).unwrap();
         assert_eq!(
             sql[0].sql,
             "ALTER TABLE `posts` CHANGE COLUMN `title` `headline` int NULL on update CURRENT_TIMESTAMP \
@@ -1710,13 +1788,13 @@ mod tests {
         );
 
         let generated = mysql::ColumnDefinition { generated: true, ..current };
-        assert!(alter_statements(Driver::Mysql, "`posts`", &change, Some(&generated)).is_err());
+        assert!(alter_statements(Driver::Mysql, "`posts`", &change, Some(&generated), None).is_err());
         let rename = column_change(serde_json::json!({ "column": "title", "name": "t" }));
         assert_eq!(
-            alter_statements(Driver::Mysql, "`posts`", &rename, Some(&generated)).unwrap()[0].sql,
+            alter_statements(Driver::Mysql, "`posts`", &rename, Some(&generated), None).unwrap()[0].sql,
             "ALTER TABLE `posts` RENAME COLUMN `title` TO `t`"
         );
-        assert!(alter_statements(Driver::Mysql, "`posts`", &rename, None).is_err());
+        assert!(alter_statements(Driver::Mysql, "`posts`", &rename, None, None).is_err());
     }
 
     #[test]
@@ -1806,6 +1884,32 @@ mod tests {
         );
         let primary = IndexDefinition { primary: true, ..current };
         assert!(index_statements(Driver::Mysql, "", "`posts`", &rename, Some(&primary)).is_err());
+    }
+
+    #[test]
+    fn rebuilds_sql_server_indexes_and_renames_constraints() {
+        let mut current = index("", false, false);
+        current.columns = "[email]".into();
+        current.definition = "([active]=(1))".into();
+        let change = index_change(serde_json::json!({ "index": "users_email", "columns": "[email], [name]" }));
+        assert_eq!(
+            index_sql(Driver::Mssql, "[app].[dbo].[users]", &change, &current),
+            vec![
+                "DROP INDEX [users_email] ON [app].[dbo].[users]",
+                "CREATE INDEX [users_email] ON [app].[dbo].[users] ([email], [name]) WHERE ([active]=(1))",
+            ]
+        );
+        let rename = index_change(serde_json::json!({ "index": "users_email", "name": "by_email" }));
+        assert_eq!(
+            index_sql(Driver::Mssql, "[app].[dbo].[users]", &rename, &current),
+            vec!["EXEC sp_rename N'[dbo].[users].[users_email]', N'[by_email]', N'INDEX'"]
+        );
+        let constrained = IndexDefinition { constraint: true, ..current };
+        assert!(index_statements(Driver::Mssql, "app", "[app].[dbo].[users]", &change, Some(&constrained)).is_err());
+        assert_eq!(
+            index_sql(Driver::Mssql, "[app].[dbo].[users]", &rename, &constrained),
+            vec!["EXEC sp_rename N'[dbo].[users].[users_email]', N'[by_email]', N'INDEX'"]
+        );
     }
 
     #[tokio::test]
@@ -1961,7 +2065,7 @@ mod tests {
         };
         let mut statements = vec![update_statement(Driver::Sqlite, "\"users\"", &update).unwrap()];
         let rename = column_change(serde_json::json!({ "column": "name", "name": "full_name" }));
-        statements.extend(alter_statements(Driver::Sqlite, "\"users\"", &rename, None).unwrap());
+        statements.extend(alter_statements(Driver::Sqlite, "\"users\"", &rename, None, None).unwrap());
         pool.apply(&statements).await.unwrap();
         let saved = pool.run("SELECT full_name FROM users WHERE id = 1", 1).await.unwrap();
         assert_eq!(saved.rows[0][0], CellValue::Text("grace".into()));

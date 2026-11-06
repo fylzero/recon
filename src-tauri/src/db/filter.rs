@@ -49,6 +49,7 @@ pub fn classify(driver: Driver, data_type: &str) -> ColumnClass {
         Driver::Mysql => classify_mysql(&lower),
         Driver::Postgres => classify_postgres(&lower),
         Driver::Sqlite => classify_sqlite(&lower),
+        Driver::Mssql => classify_mssql(&lower),
     }
 }
 
@@ -118,6 +119,29 @@ fn classify_postgres(lower: &str) -> ColumnClass {
         "bytea" => ColumnClass::of(Binary),
         _ if base.starts_with("timestamp") => ColumnClass { kind: Datetime, tz },
         _ if base.starts_with("time") && !tz => ColumnClass::of(Time),
+        _ => ColumnClass::of(Other),
+    }
+}
+
+/// `timestamp` and `rowversion` are a binary row version, not a date.
+fn classify_mssql(lower: &str) -> ColumnClass {
+    use FilterKind::*;
+    let base = base_type(lower);
+    if matches!(base, "timestamp" | "rowversion") {
+        return ColumnClass::of(Binary);
+    }
+    match base {
+        "bit" => ColumnClass::of(Boolean),
+        "tinyint" | "smallint" | "int" | "bigint" | "decimal" | "numeric" | "float" | "real" | "money"
+        | "smallmoney" => ColumnClass::of(Number),
+        "char" | "varchar" | "nchar" | "nvarchar" | "text" | "ntext" | "sysname" => ColumnClass::of(Text),
+        "uniqueidentifier" => ColumnClass::of(Uuid),
+        "date" => ColumnClass::of(Date),
+        "time" => ColumnClass::of(Time),
+        "datetime" | "datetime2" | "smalldatetime" => ColumnClass::of(Datetime),
+        "datetimeoffset" => ColumnClass { kind: Datetime, tz: true },
+        "xml" => ColumnClass::of(Other),
+        "binary" | "varbinary" | "image" => ColumnClass::of(Binary),
         _ => ColumnClass::of(Other),
     }
 }
@@ -410,6 +434,7 @@ pub fn literal(driver: Driver, value: &EditValue) -> String {
             Driver::Postgres => format!("E'{}'", text.replace('\\', "\\\\").replace('\'', "''")),
             Driver::Mysql => quote_literal(&text.replace('\\', "\\\\")),
             Driver::Sqlite => quote_literal(text),
+            Driver::Mssql => format!("N'{}'", text.replace('\'', "''")),
         },
     }
 }
@@ -590,6 +615,9 @@ fn compare_expr(driver: Driver, ident: &str, class: ColumnClass, op: FilterOp) -
     match driver {
         Driver::Postgres if matches!(class.kind, Enum | Other | Json) => format!("{ident}::text"),
         Driver::Mysql if matches!(class.kind, Json | Other) && op.is_pattern() => format!("CAST({ident} AS CHAR)"),
+        Driver::Mssql if matches!(class.kind, Other | Json | Number) && op.is_pattern() => {
+            format!("CAST({ident} AS nvarchar(max))")
+        }
         Driver::Sqlite => match class.kind {
             Date => format!("date({ident})"),
             Datetime => format!("datetime({ident})"),
@@ -663,7 +691,7 @@ fn push_param(
         }
         FilterKind::Datetime => {
             let mut stamp = normalize_datetime(&text).ok_or_else(|| invalid("date and time"))?;
-            if postgres && class.tz {
+            if class.tz {
                 if let Some(offset) = ctx.utc_offset.and_then(offset_text) {
                     stamp.push_str(&offset);
                 }
@@ -824,8 +852,13 @@ fn offset_text(minutes: i32) -> Option<String> {
 /** A search over a column's text, for suggesting existing values. */
 pub fn suggestion_sql(driver: Driver, table: &str, column: &str, search: &str, sample: u32, limit: u32) -> Fragment {
     let ident = dialect(driver).quote_ident(column);
+    let inner = if driver == Driver::Mssql {
+        format!("SELECT TOP ({sample}) {ident} AS recon_value")
+    } else {
+        format!("SELECT {ident} AS recon_value")
+    };
     let mut sql = Fragment::new(format!(
-        "SELECT DISTINCT recon_value FROM (SELECT {ident} AS recon_value FROM {table} WHERE {ident} IS NOT NULL"
+        "SELECT DISTINCT recon_value FROM ({inner} FROM {table} WHERE {ident} IS NOT NULL"
     ));
     let search = search.trim();
     if !search.is_empty() {
@@ -833,12 +866,19 @@ pub fn suggestion_sql(driver: Driver, table: &str, column: &str, search: &str, s
             Driver::Postgres => format!("{ident}::text ILIKE "),
             Driver::Mysql => format!("CAST({ident} AS CHAR) LIKE "),
             Driver::Sqlite => format!("CAST({ident} AS TEXT) LIKE "),
+            Driver::Mssql => format!("CAST({ident} AS nvarchar(max)) LIKE "),
         };
         sql.push_sql(format!(" AND {text}"));
         sql.push_value(EditValue::Text(like_pattern(FilterOp::Contains, search)));
         sql.push_sql(format!(" ESCAPE '{LIKE_ESCAPE}'"));
     }
-    sql.push_sql(format!(" LIMIT {sample}) recon_sample ORDER BY recon_value LIMIT {limit}"));
+    if driver == Driver::Mssql {
+        sql.push_sql(format!(
+            ") AS recon_sample ORDER BY recon_value OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY"
+        ));
+    } else {
+        sql.push_sql(format!(" LIMIT {sample}) recon_sample ORDER BY recon_value LIMIT {limit}"));
+    }
     sql
 }
 
@@ -887,6 +927,13 @@ mod tests {
         assert_eq!(kind(Driver::Sqlite, "date"), Date);
         assert_eq!(kind(Driver::Sqlite, "VARCHAR(10)"), Text);
         assert_eq!(kind(Driver::Sqlite, ""), Other);
+        assert_eq!(kind(Driver::Mssql, "timestamp"), Binary);
+        assert_eq!(kind(Driver::Mssql, "rowversion"), Binary);
+        assert!(classify(Driver::Mssql, "datetimeoffset").tz);
+        assert!(!classify(Driver::Mssql, "datetime2").tz);
+        assert_eq!(kind(Driver::Mssql, "bit"), Boolean);
+        assert_eq!(kind(Driver::Mssql, "uniqueidentifier"), Uuid);
+        assert_eq!(kind(Driver::Mssql, "nvarchar(40)"), Text);
     }
 
     #[test]

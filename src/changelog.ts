@@ -6,6 +6,13 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.1.0",
+    date: "November 3, 2026",
+    notes: [
+      "SQL Server 2022 and newer can be connected, browsed, edited, exported, and restored, using a SQL login on port 1433.",
+    ],
+  },
+  {
     version: "1.0.1",
     date: "September 28, 2026",
     notes: [

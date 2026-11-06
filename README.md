@@ -5,7 +5,7 @@
 <h1 align="center">Recon</h1>
 
 <p align="center">
-  A local-first database client for macOS. Recon connects to MySQL, PostgreSQL, and SQLite with drivers built into the app, so there is nothing else to install. Passwords live in the macOS Keychain.
+  A local-first database client for macOS. Recon connects to MySQL, PostgreSQL, SQLite, and SQL Server with drivers built into the app, so there is nothing else to install. Passwords live in the macOS Keychain.
 </p>
 
 <p align="center">
@@ -76,7 +76,7 @@ That command:
 2. Compiles the Rust/Tauri shell
 3. Opens the native Recon window
 
-The **first** `tauri dev` (or `tauri build`) downloads crates and compiles from scratch, including the MySQL, PostgreSQL, and SQLite drivers. That often takes several minutes. Later runs are much faster.
+The **first** `tauri dev` (or `tauri build`) downloads crates and compiles from scratch, including the MySQL, PostgreSQL, SQLite, and SQL Server drivers. That often takes several minutes. Later runs are much faster.
 
 ## Supported databases
 
@@ -85,6 +85,7 @@ The **first** `tauri dev` (or `tauri build`) downloads crates and compiles from 
 | MySQL / MariaDB | Host, port (3306), user, password, database, SSL mode |
 | PostgreSQL | Host, port (5432), user, password, database, SSL mode |
 | SQLite | A database file on disk (Recon can create a new one) |
+| SQL Server | Host, port (1433), user, password, database, SSL mode. SQL Server 2022 or newer. |
 
 ## Export a native Mac app
 

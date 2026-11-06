@@ -1871,6 +1871,10 @@ body.reordering-repos .repo-row,
   color: #7ee0c7;
 }
 
+.driver-icon.driver-mssql {
+  color: #e07b7b;
+}
+
 .repo-row.colored .driver-icon {
   color: inherit;
 }

@@ -2195,7 +2195,7 @@ function onExecuted(statements: string[]) {
   let changedSchema = false;
   for (const statement of statements) {
     const use = /^\s*use\s+[`"[]?([^`"\]\s;]+)/i.exec(statement);
-    if (use && driver.value === "mysql") {
+    if (use && (driver.value === "mysql" || driver.value === "mssql")) {
       switched = use[1];
     }
     const path = /^\s*set\s+search_path\s*(?:to|=)\s*"?([^",\s;]+)/i.exec(statement);
@@ -2220,9 +2220,18 @@ function onExecuted(statements: string[]) {
 }
 
 function queryTable(table: TableInfo) {
-  const quote = driver.value === "mysql" ? "`" : '"';
-  const name = `${quote}${table.name.split(quote).join(quote + quote)}${quote}`;
-  openQueryTab(`SELECT * FROM ${name} LIMIT 100;`);
+  const quotePart = (part: string) => {
+    if (driver.value === "mysql") {
+      return `\`${part.split("`").join("``")}\``;
+    }
+    if (driver.value === "mssql") {
+      return `[${part.split("]").join("]]")}]`;
+    }
+    return `"${part.split('"').join('""')}"`;
+  };
+  const name = driver.value === "mssql" ? table.name.split(".").map(quotePart).join(".") : quotePart(table.name);
+  const limit = driver.value === "mssql" ? "ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY" : "LIMIT 100";
+  openQueryTab(`SELECT * FROM ${name} ${limit};`);
 }
 
 function editConnection() {

@@ -126,7 +126,7 @@ pub fn sanitize_connection(mut entry: ConnectionEntry) -> Result<ConnectionEntry
                     .unwrap_or_else(|| "SQLite".into());
             }
         }
-        Driver::Mysql | Driver::Postgres => {
+        Driver::Mysql | Driver::Postgres | Driver::Mssql => {
             if entry.host.is_empty() {
                 entry.host = "127.0.0.1".into();
             }

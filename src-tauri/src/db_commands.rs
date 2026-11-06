@@ -192,6 +192,7 @@ pub async fn test_connection(
         Driver::Mysql => db::mysql::test(&target, password.as_deref()).await,
         Driver::Postgres => db::postgres::test(&target, password.as_deref()).await,
         Driver::Sqlite => db::sqlite::test(&target).await,
+        Driver::Mssql => db::mssql::test(&target, password.as_deref()).await,
     };
     let outcome = outcome.map_err(|err| explain(tunnel.as_ref(), err));
     if let Some(tunnel) = tunnel {
@@ -252,6 +253,7 @@ async fn open_session(
         Driver::Mysql => db::mysql::open(&target, password.as_deref()).await,
         Driver::Postgres => db::postgres::open(&target, password.as_deref()).await,
         Driver::Sqlite => db::sqlite::open(&target).await,
+        Driver::Mssql => db::mssql::open(&target, password.as_deref()).await,
     };
     let opened = match opened {
         Ok(opened) => opened,
@@ -482,6 +484,20 @@ pub async fn rename_database(app: AppHandle, connection_id: String, from: String
     session.forget_columns(Some(&from), None);
     let dialect = dialect(session.driver);
     match (session.driver, dialect.rename_namespace_sql(&from, to)) {
+        (Driver::Mssql, Some(sql)) => {
+            session.pool.quiesce().await;
+            let blockers = pool_run(&session, &db::mssql::other_sessions_sql(&from), 1, QueryOrigin::Schema).await;
+            if let Ok(output) = blockers {
+                if first_text(&output).parse::<u64>().unwrap_or(0) > 0 {
+                    return Err(
+                        "SQL Server can't rename a database while other sessions are using it. Disconnect them and try again."
+                            .into(),
+                    );
+                }
+            }
+            pool_run(&session, "USE [master]", 0, QueryOrigin::Schema).await?;
+            pool_run(&session, &sql, 0, QueryOrigin::Schema).await?;
+        }
         (_, Some(sql)) => {
             pool_run(&session, &sql, 0, QueryOrigin::Schema).await?;
         }
@@ -606,7 +622,7 @@ async fn load_columns(session: &Session, namespace: &str, table: &str) -> Result
             let enum_values = match driver {
                 Driver::Mysql => filter::mysql_enum_values(&data_type),
                 Driver::Postgres => serde_json::from_str(&text_at(&text, 6)).unwrap_or_default(),
-                Driver::Sqlite => Vec::new(),
+                Driver::Sqlite | Driver::Mssql => Vec::new(),
             };
             let mut column = ColumnDetail {
                 name: text_at(&text, 0),
@@ -725,7 +741,8 @@ async fn browse_statement(session: &Session, request: &BrowseRequest) -> Result<
         ));
     }
     let limit = request.limit.clamp(1, BROWSE_LIMIT_MAX);
-    statement.push_sql(format!(" LIMIT {limit} OFFSET {}", request.offset));
+    let ordered = request.order_by.as_deref().is_some_and(|column| !column.is_empty());
+    statement.push_sql(dialect.limit_sql(limit, request.offset, ordered));
     Ok((statement, limit))
 }
 
@@ -820,6 +837,7 @@ async fn cancel_request(session: &Session, request_id: Option<&str>) {
     let sql = match session.driver {
         Driver::Mysql => format!("KILL QUERY {backend}"),
         Driver::Postgres => format!("SELECT pg_cancel_backend({backend})"),
+        Driver::Mssql => format!("KILL {backend}"),
         Driver::Sqlite => return,
     };
     let _ = session.pool.run(&sql, 1).await;
@@ -993,9 +1011,40 @@ async fn save(session: Arc<Session>, requests: &[SaveRequest]) -> Result<usize, 
         } else {
             Vec::new()
         };
+        let identities = if session.driver == Driver::Mssql {
+            let sql = db::mssql::identity_columns_sql(&request.namespace, &request.table);
+            db::mssql::identity_columns(&pool_run(&session, &sql, usize::MAX, QueryOrigin::Schema).await?)
+        } else {
+            Vec::new()
+        };
+        let identity_insert = identities
+            .iter()
+            .any(|column| request.inserts.iter().any(|insert| explicit(insert, column)));
+        if identity_insert {
+            let sql = db::mssql::identity_insert_sql(&table, true);
+            statements.push(db::EditStatement {
+                sql: sql.clone(),
+                display: sql,
+                params: Vec::new(),
+                table: table.clone(),
+                label: "IDENTITY_INSERT".into(),
+                expect_one_row: false,
+            });
+        }
         for insert in &request.inserts {
             let overriding = sequences.iter().any(|column| column.always && explicit(insert, &column.name));
             statements.push(db::insert_statement(session.driver, &table, insert, overriding));
+        }
+        if identity_insert {
+            let sql = db::mssql::identity_insert_sql(&table, false);
+            statements.push(db::EditStatement {
+                sql: sql.clone(),
+                display: sql,
+                params: Vec::new(),
+                table: table.clone(),
+                label: "IDENTITY_INSERT".into(),
+                expect_one_row: false,
+            });
         }
         for column in &sequences {
             if request.inserts.iter().any(|insert| explicit(insert, &column.name)) {
@@ -1003,16 +1052,30 @@ async fn save(session: Arc<Session>, requests: &[SaveRequest]) -> Result<usize, 
             }
         }
         if !request.columns.is_empty() {
-            let current = if session.driver == Driver::Mysql {
+            let mysql_current = if session.driver == Driver::Mysql {
                 let sql = db::mysql::column_definitions_sql(&request.namespace, &request.table);
                 let output = pool_run(&session, &sql, usize::MAX, QueryOrigin::Schema).await?;
                 db::mysql::column_definitions(&output)
             } else {
                 Vec::new()
             };
+            let mssql_current = if session.driver == Driver::Mssql {
+                let sql = db::mssql::column_definitions_sql(&request.namespace, &request.table);
+                let output = pool_run(&session, &sql, usize::MAX, QueryOrigin::Schema).await?;
+                db::mssql::column_definitions(&output)
+            } else {
+                Vec::new()
+            };
             for change in &request.columns {
-                let existing = current.iter().find(|column| column.name == change.column);
-                schema_statements.extend(db::alter_statements(session.driver, &table, change, existing)?);
+                let mysql_existing = mysql_current.iter().find(|column| column.name == change.column);
+                let mssql_existing = mssql_current.iter().find(|column| column.name == change.column);
+                schema_statements.extend(db::alter_statements(
+                    session.driver,
+                    &table,
+                    change,
+                    mysql_existing,
+                    mssql_existing,
+                )?);
             }
         }
         for column in &request.new_columns {

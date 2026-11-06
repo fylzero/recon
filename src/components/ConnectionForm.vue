@@ -384,7 +384,7 @@ async function submit(connectAfter: boolean) {
               type="text"
               spellcheck="false"
               autocomplete="off"
-              :placeholder="driver === 'postgres' ? 'postgres' : 'root'"
+              :placeholder="driver === 'postgres' ? 'postgres' : driver === 'mssql' ? 'sa' : 'root'"
             />
           </label>
           <label class="modal-label">

@@ -58,6 +58,23 @@ export function stripComments(sql: string) {
     .replace(/^\s*#[^\n]*/gm, " ");
 }
 
+function isGoLine(line: string) {
+  return /^\s*GO(?:\s+\d+)?\s*$/i.test(line);
+}
+
+function isMssqlRoutine(sql: string) {
+  const words = sql
+    .split(/[^A-Za-z0-9_]+/)
+    .filter(Boolean)
+    .slice(0, 4)
+    .map((word) => word.toUpperCase());
+  if (words[0] !== "CREATE") {
+    return false;
+  }
+  const kind = words[1] === "OR" ? words[3] : words[1];
+  return kind === "PROCEDURE" || kind === "PROC" || kind === "FUNCTION" || kind === "TRIGGER";
+}
+
 export function splitStatements(sql: string, driver: Driver): StatementRange[] {
   const ranges: StatementRange[] = [];
   const backslashEscapes = driver === "mysql";
@@ -66,8 +83,23 @@ export function splitStatements(sql: string, driver: Driver): StatementRange[] {
   while (index < sql.length) {
     const char = sql[index];
     const next = sql[index + 1];
+    const atLineStart = index === 0 || sql[index - 1] === "\n";
+    if (driver === "mssql" && atLineStart) {
+      const lineEnd = sql.indexOf("\n", index);
+      const line = sql.slice(index, lineEnd === -1 ? sql.length : lineEnd);
+      if (isGoLine(line)) {
+        pushRange(ranges, sql, start, index);
+        index = lineEnd === -1 ? sql.length : lineEnd + 1;
+        start = index;
+        continue;
+      }
+    }
     if (char === "'" || char === '"' || char === "`") {
       index = skipQuoted(sql, index, char, backslashEscapes && char !== "`");
+      continue;
+    }
+    if (driver === "mssql" && char === "[") {
+      index = skipQuoted(sql, index, "]", false);
       continue;
     }
     if (char === "-" && next === "-") {
@@ -94,6 +126,10 @@ export function splitStatements(sql: string, driver: Driver): StatementRange[] {
       }
     }
     if (char === ";") {
+      if (driver === "mssql" && isMssqlRoutine(sql.slice(start, index))) {
+        index += 1;
+        continue;
+      }
       pushRange(ranges, sql, start, index);
       start = index + 1;
     }
