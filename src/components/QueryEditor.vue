@@ -1,18 +1,23 @@
 <script setup lang="ts">
-import { MSSQL, MySQL, PostgreSQL, SQLite, sql, type SQLNamespace } from "@codemirror/lang-sql";
-import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import { sql, type SQLNamespace } from "@codemirror/lang-sql";
 import { Compartment, EditorState, Prec } from "@codemirror/state";
 import { EditorView, keymap, placeholder } from "@codemirror/view";
-import { tags as t } from "@lezer/highlight";
 import { basicSetup } from "codemirror";
 import { format as formatSql, type SqlLanguage } from "sql-formatter";
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
 import { splitStatements, statementAt } from "../sql";
+import { sqlDialect, sqlEditorTheme, sqlHighlighting } from "../sqlEditor";
+import { ariaModifier, baseName, shortcut } from "../platform";
 import { exportSqlFile } from "../transfer";
 import type { Driver, RowValues, StatementResult } from "../types";
+import type { CopyFormat } from "../cells";
+import { useGridFind } from "../composables/useGridFind";
+import { placeAtPoint, useDismiss, type PopoverPosition } from "../composables/usePopover";
 import DataGrid from "./DataGrid.vue";
+import ExportRowsDialog, { type ExportRowsSource } from "./ExportRowsDialog.vue";
+import GridFind from "./GridFind.vue";
 
 const FETCH_BLOCK = 500;
 const EDITOR_MIN = 80;
@@ -56,19 +61,82 @@ let modified = false;
 
 const current = computed(() => results.value[activeResult.value] ?? null);
 const statementCount = computed(() => results.value.length);
+const grid = ref<InstanceType<typeof DataGrid> | null>(null);
+const find = useGridFind(() => current.value?.rows ?? []);
+const findable = computed(() => Boolean(current.value?.result.columns.length && !current.value.result.error));
 
-const dialect = computed(() => {
-  if (props.driver === "postgres") {
-    return PostgreSQL;
+function gridElement() {
+  return grid.value?.$el as HTMLElement | undefined;
+}
+
+const gridMenu = ref<PopoverPosition | null>(null);
+const gridMenuEl = ref<HTMLElement | null>(null);
+
+useDismiss(
+  computed(() => Boolean(gridMenu.value)),
+  () => [gridMenuEl.value],
+  () => (gridMenu.value = null),
+);
+
+function openGridMenu(event: MouseEvent) {
+  gridMenu.value = { left: event.clientX, top: event.clientY };
+  void nextTick(() => {
+    gridMenu.value = placeAtPoint(event.clientX, event.clientY, gridMenuEl.value);
+  });
+}
+
+function copyFromMenu(format: CopyFormat) {
+  gridMenu.value = null;
+  void grid.value?.copySelection(format);
+}
+
+const exportSource = ref<ExportRowsSource | null>(null);
+
+function exportResult() {
+  const state = current.value;
+  if (!state?.result.resultId) {
+    return;
   }
-  if (props.driver === "sqlite") {
-    return SQLite;
+  exportSource.value = {
+    kind: "result",
+    resultId: state.result.resultId,
+    columns: state.result.columns.map((column) => column.name),
+    rowCount: state.result.rowCount,
+    truncated: state.result.truncated,
+  };
+}
+
+function closeFind() {
+  find.close();
+  gridElement()?.focus({ preventScroll: true });
+}
+
+/** Runs after CodeMirror, which keeps ⌘F, ⌘G, and ⌘E for itself while the editor has focus. */
+function onWindowKeydown(event: KeyboardEvent) {
+  if (!props.active || event.defaultPrevented || !(event.metaKey || event.ctrlKey) || event.altKey) {
+    return;
   }
-  if (props.driver === "mssql") {
-    return MSSQL;
+  const target = event.target;
+  if (target instanceof Node && host.value?.contains(target)) {
+    return;
   }
-  return MySQL;
-});
+  const key = event.key.toLowerCase();
+  if (key === "f" && !event.shiftKey && findable.value) {
+    event.preventDefault();
+    find.show(grid.value?.focusedCell()?.position);
+  } else if (key === "g" && find.open.value && findable.value) {
+    event.preventDefault();
+    find.step(event.shiftKey ? -1 : 1);
+  } else if (key === "e" && !event.shiftKey && target instanceof Node && gridElement()?.contains(target)) {
+    event.preventDefault();
+    const cell = grid.value?.focusedCell();
+    if (cell) {
+      find.search(cell.text, cell.position);
+    }
+  }
+}
+
+const dialect = computed(() => sqlDialect(props.driver));
 
 const formatterLanguage = computed<SqlLanguage>(() => {
   if (props.driver === "postgres") {
@@ -82,58 +150,6 @@ const formatterLanguage = computed<SqlLanguage>(() => {
   }
   return "mysql";
 });
-
-const editorTheme = EditorView.theme(
-  {
-    "&": {
-      height: "100%",
-      color: "var(--text)",
-      backgroundColor: "#0d1016",
-      fontSize: "var(--editor-font-size)",
-    },
-    "&.cm-focused": { outline: "none" },
-    ".cm-scroller": {
-      fontFamily: "var(--editor-font-family)",
-      lineHeight: "1.55",
-    },
-    ".cm-content": { caretColor: "var(--text)", padding: "0.45rem 0" },
-    ".cm-gutters": {
-      backgroundColor: "#0d1016",
-      color: "var(--muted)",
-      borderRight: "1px solid var(--border)",
-    },
-    ".cm-activeLine": { backgroundColor: "rgba(255, 255, 255, 0.03)" },
-    ".cm-activeLineGutter": { backgroundColor: "transparent" },
-    ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": {
-      backgroundColor: "#2a3344",
-    },
-    ".cm-cursor": { borderLeftColor: "var(--text)" },
-    ".cm-tooltip": {
-      backgroundColor: "var(--bg-raised)",
-      border: "1px solid var(--border)",
-      color: "var(--text)",
-    },
-    ".cm-tooltip-autocomplete > ul > li[aria-selected]": {
-      backgroundColor: "var(--bg-active)",
-      color: "var(--text)",
-    },
-    ".cm-placeholder": { color: "var(--muted)" },
-  },
-  { dark: true },
-);
-
-const editorHighlight = HighlightStyle.define([
-  { tag: t.keyword, color: "#c4a6ff" },
-  { tag: [t.string, t.special(t.string)], color: "#3dd68c" },
-  { tag: t.number, color: "#e6c07b" },
-  { tag: t.bool, color: "#9ec1ff" },
-  { tag: t.null, color: "#9ec1ff" },
-  { tag: [t.lineComment, t.blockComment], color: "#6b7588", fontStyle: "italic" },
-  { tag: t.typeName, color: "#7ee0c7" },
-  { tag: [t.operator, t.punctuation], color: "#aab4c6" },
-  { tag: t.special(t.name), color: "#f0a36b" },
-  { tag: t.invalid, color: "var(--bad)" },
-]);
 
 function languageExtension() {
   return sql({ dialect: dialect.value, schema: props.schema, upperCaseKeywords: true });
@@ -368,7 +384,7 @@ async function exportSql() {
   try {
     const path = await exportSqlFile(props.title, getText());
     if (path) {
-      showToast(`Exported to ${path.split("/").pop()}`);
+      showToast(`Exported to ${baseName(path)}`);
     }
   } catch (err) {
     showToast(String(err), "error");
@@ -425,9 +441,9 @@ onMounted(() => {
         beautifyKey,
         basicSetup,
         language.of(languageExtension()),
-        editorTheme,
-        syntaxHighlighting(editorHighlight),
-        placeholder("Write SQL here. ⌘↵ runs the statement under the cursor."),
+        sqlEditorTheme,
+        sqlHighlighting,
+        placeholder(`Write SQL here. ${shortcut("⌘↵")} runs the statement under the cursor.`),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
             const text = update.state.doc.toString();
@@ -442,9 +458,11 @@ onMounted(() => {
   if (props.active) {
     focus();
   }
+  window.addEventListener("keydown", onWindowKeydown);
 });
 
 onUnmounted(() => {
+  window.removeEventListener("keydown", onWindowKeydown);
   window.clearTimeout(saveTimer);
   if (view) {
     try {
@@ -468,7 +486,7 @@ defineExpose({ insertText, getText, focus, run });
         class="primary tiny"
         type="button"
         :disabled="running"
-        title="Run the statement under the cursor, or the selection (⌘↵)"
+        :title="`Run the statement under the cursor, or the selection (${shortcut('⌘↵')})`"
         @click="run(false)"
       >
         <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -480,7 +498,7 @@ defineExpose({ insertText, getText, focus, run });
         class="ghost tiny"
         type="button"
         :disabled="running"
-        title="Run every statement in the editor (⇧⌘↵)"
+        :title="`Run every statement in the editor (${shortcut('⇧⌘↵')})`"
         @click="run(true)"
       >
         Run all
@@ -506,7 +524,7 @@ defineExpose({ insertText, getText, focus, run });
         <button
           class="ghost tiny"
           type="button"
-          title="Format the SQL with line breaks and indentation, or just the selection (⇧⌥F)"
+          :title="`Format the SQL with line breaks and indentation, or just the selection (${shortcut('⇧⌥F')})`"
           @click="beautify"
         >
           <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -555,10 +573,17 @@ defineExpose({ insertText, getText, focus, run });
           <pre class="muted">{{ current.result.sql }}</pre>
         </div>
         <template v-else>
+          <GridFind v-if="find.open.value" :find="find" @close="closeFind" />
           <DataGrid
+            ref="grid"
             :columns="current.result.columns"
             :rows="current.rows"
+            :matches="find.byRow.value"
+            :current-match="find.current.value"
+            context-menus
             @need-rows="(start, end) => current && loadRows(current, start, end)"
+            @cell-menu="(_row, _col, event) => openGridMenu(event)"
+            @row-menu="(_row, event) => openGridMenu(event)"
           />
           <div class="pane-status muted tiny">
             {{ current.result.rowCount.toLocaleString() }}
@@ -567,6 +592,15 @@ defineExpose({ insertText, getText, focus, run });
             <span v-if="current.result.truncated" class="warn-text">
               · Cut off at the query row limit. Change it in Settings → General.
             </span>
+            <button
+              class="ghost tiny pane-status-action"
+              type="button"
+              :disabled="!current.result.resultId"
+              title="Export this result as CSV or JSON"
+              @click="exportResult"
+            >
+              Export…
+            </button>
           </div>
         </template>
       </template>
@@ -574,5 +608,33 @@ defineExpose({ insertText, getText, focus, run });
         Results appear here. Separate statements with semicolons.
       </p>
     </div>
+    <Teleport to="body">
+      <div
+        v-if="gridMenu"
+        ref="gridMenuEl"
+        class="overflow-menu-dropdown table-context-menu"
+        role="menu"
+        :style="{ left: `${gridMenu.left}px`, top: `${gridMenu.top}px` }"
+        @contextmenu.prevent
+      >
+        <button class="overflow-menu-item" type="button" role="menuitem" :aria-keyshortcuts="`${ariaModifier}+C`" @click="copyFromMenu('tsv')">
+          Copy
+        </button>
+        <button class="overflow-menu-item" type="button" role="menuitem" @click="copyFromMenu('csv')">
+          Copy as CSV
+        </button>
+        <button class="overflow-menu-item" type="button" role="menuitem" @click="copyFromMenu('json')">
+          Copy as JSON
+        </button>
+      </div>
+    </Teleport>
+    <ExportRowsDialog
+      v-if="exportSource"
+      :connection-id="connectionId"
+      title="Export query result"
+      :name="title"
+      :source="exportSource"
+      @close="exportSource = null"
+    />
   </div>
 </template>

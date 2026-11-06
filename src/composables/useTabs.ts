@@ -1,12 +1,15 @@
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { computed, ref } from "vue";
 import { useRouter } from "vue-router";
+import { DEFAULT_HEADER_COLOR } from "../color";
 import { useApp } from "./useApp";
+import { useTransfers } from "./useTransfers";
 
 export const CONNECTIONS_TAB_ID = "connections";
 export const SETTINGS_TAB_ID = "settings";
 export const CHANGELOG_TAB_ID = "changelog";
 
-export const SETTINGS_SECTIONS = ["general", "window", "updates", "json"] as const;
+export const SETTINGS_SECTIONS = ["general", "window", "json"] as const;
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 
 type UtilityPanel = "settings" | "changelog";
@@ -14,6 +17,7 @@ type UtilityPanel = "settings" | "changelog";
 export interface AppTab {
   id: string;
   title: string;
+  badge?: string;
   closable: boolean;
   accentColor?: string;
 }
@@ -27,9 +31,11 @@ export interface ConnectionTab {
   connectionId: string;
   title: string;
   namespace?: string;
+  openedAt: number;
 }
 
 const connectionTabs = ref<ConnectionTab[]>([]);
+let openCount = 0;
 const settingsTabOpen = ref(false);
 const changelogTabOpen = ref(false);
 const settingsSection = ref<SettingsSection>("general");
@@ -66,16 +72,22 @@ export function settingsPath(section: SettingsSection = settingsSection.value) {
 export function useTabs() {
   const router = useRouter();
   const { findConnection } = useApp();
+  const { runningFor } = useTransfers();
 
   const tabs = computed<AppTab[]>(() => [
     { id: CONNECTIONS_TAB_ID, title: "Connections", closable: false },
     ...connectionTabs.value.map((tab) => {
       const match = findConnection(tab.connectionId);
+      const title = liveTitles.value[tab.id] || tab.title;
+      const name = match?.connection.name.trim();
       return {
         id: tab.id,
-        title: liveTitles.value[tab.id] || tab.title,
+        title,
+        badge: match?.group && name && name !== title ? name : undefined,
         closable: true,
-        accentColor: match?.connection.headerColor || match?.group?.headerColor,
+        accentColor: match?.group
+          ? match.group.headerColor || DEFAULT_HEADER_COLOR
+          : match?.connection.headerColor || undefined,
       };
     }),
     ...(settingsTabOpen.value ? [{ id: SETTINGS_TAB_ID, title: "Settings", closable: true }] : []),
@@ -83,6 +95,11 @@ export function useTabs() {
       ? [{ id: CHANGELOG_TAB_ID, title: "Change Log", closable: true }]
       : []),
   ]);
+
+  // Panes keep their open order so reordering tabs never moves their DOM.
+  const connectionPanes = computed(() =>
+    [...connectionTabs.value].sort((a, b) => a.openedAt - b.openedAt),
+  );
 
   function titleFor(id: string) {
     return findConnection(id)?.connection.name ?? id;
@@ -92,7 +109,10 @@ export function useTabs() {
     if (connectionTabs.value.some((tab) => tab.id === id)) {
       return;
     }
-    connectionTabs.value = [...connectionTabs.value, { id, connectionId: id, title: titleFor(id) }];
+    connectionTabs.value = [
+      ...connectionTabs.value,
+      { id, connectionId: id, title: titleFor(id), openedAt: openCount++ },
+    ];
   }
 
   function routeFor(id: string) {
@@ -123,12 +143,34 @@ export function useTabs() {
 
   function openConnectionTab(connectionId: string, namespace: string, afterId = connectionId) {
     const id = `${connectionId}~${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-    const tab: ConnectionTab = { id, connectionId, title: titleFor(connectionId), namespace };
+    const tab: ConnectionTab = {
+      id,
+      connectionId,
+      title: titleFor(connectionId),
+      namespace,
+      openedAt: openCount++,
+    };
     const index = connectionTabs.value.findIndex((item) => item.id === afterId);
     const next = [...connectionTabs.value];
     next.splice(index >= 0 ? index + 1 : next.length, 0, tab);
     connectionTabs.value = next;
     activate(id);
+  }
+
+  function isReorderable(id: string) {
+    return connectionTabs.value.some((tab) => tab.id === id);
+  }
+
+  function moveTab(id: string, targetId: string) {
+    const from = connectionTabs.value.findIndex((tab) => tab.id === id);
+    const to = connectionTabs.value.findIndex((tab) => tab.id === targetId);
+    if (from === -1 || to === -1 || from === to) {
+      return;
+    }
+    const next = [...connectionTabs.value];
+    const [tab] = next.splice(from, 1);
+    next.splice(to, 0, tab);
+    connectionTabs.value = next;
   }
 
   function openConnections(ids: string[], focusId = ids[ids.length - 1]) {
@@ -200,7 +242,22 @@ export function useTabs() {
       closeUtilityTab(CHANGELOG_TAB_ID, changelogTabOpen);
       return;
     }
-    closeConnections([id]);
+    const running = runningFor(id);
+    if (!running.length) {
+      closeConnections([id]);
+      return;
+    }
+    const names = running.map((job) => job.label).join(", ");
+    void confirm(`${names} ${running.length === 1 ? "is" : "are"} still running in this tab. Closing the tab cancels it.`, {
+      title: "Close tab",
+      kind: "warning",
+      okLabel: "Close and cancel",
+      cancelLabel: "Keep open",
+    }).then((ok) => {
+      if (ok) {
+        closeConnections([id]);
+      }
+    });
   }
 
   function closeConnections(ids: string[]) {
@@ -266,6 +323,7 @@ export function useTabs() {
   return {
     tabs,
     connectionTabs,
+    connectionPanes,
     settingsTabOpen,
     changelogTabOpen,
     settingsSection,
@@ -273,6 +331,8 @@ export function useTabs() {
     openConnection,
     openConnectionTab,
     openConnections,
+    isReorderable,
+    moveTab,
     openSettings,
     openSettingsJson,
     openChangelog,

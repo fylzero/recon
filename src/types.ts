@@ -2,7 +2,8 @@ import type { WireNode } from "./filters/compile";
 import type { FilterKind } from "./filters/model";
 
 export type Driver = "mysql" | "postgres" | "sqlite" | "mssql";
-export type SslMode = "disable" | "prefer" | "require";
+export type SslMode = "disable" | "prefer" | "require" | "verify-ca" | "verify-full";
+export type PasswordSource = "password" | "aws-iam" | "command";
 
 export const DRIVER_OPTIONS: { id: Driver; label: string; defaultPort: number }[] = [
   { id: "mysql", label: "MySQL", defaultPort: 3306 },
@@ -24,12 +25,41 @@ export interface SshTunnel {
   user: string;
   auth: SshAuth;
   keyPath: string;
+  alsoPassword?: boolean;
+}
+
+export interface ResolvedSshHost {
+  hostname: string;
+  port: number | null;
+  user: string;
+  identityFiles: string[];
+  identityAgent: string;
+  proxyJump: string;
+  proxyCommand: string;
+}
+
+export interface AuthPrompt {
+  id: string;
+  title: string;
+  instructions: string;
+  prompt: string;
+  secret: boolean;
+  /** False while Recon waits on something outside the app, like a browser sign-in. */
+  input: boolean;
 }
 
 export const DEFAULT_SSH_PORT = 22;
 
 export function defaultSshTunnel(): SshTunnel {
-  return { enabled: false, host: "", port: DEFAULT_SSH_PORT, user: "", auth: "password", keyPath: "" };
+  return {
+    enabled: false,
+    host: "",
+    port: DEFAULT_SSH_PORT,
+    user: "",
+    auth: "password",
+    keyPath: "",
+    alsoPassword: false,
+  };
 }
 
 export interface ConnectionEntry {
@@ -44,6 +74,14 @@ export interface ConnectionEntry {
   sslMode: SslMode;
   headerColor: string;
   savePassword: boolean;
+  cleartextAuth?: boolean;
+  passwordSource?: PasswordSource;
+  awsRegion?: string;
+  awsProfile?: string;
+  passwordCommand?: string;
+  sslCaPath?: string;
+  sslCertPath?: string;
+  sslKeyPath?: string;
   ssh?: SshTunnel;
 }
 
@@ -80,6 +118,7 @@ export interface SavedQuery {
 export interface AppData {
   groups: ConnectionGroup[];
   connections?: ConnectionEntry[];
+  dashboardOrder?: string[];
   savedQueries?: SavedQuery[];
   editorFontFamily?: string;
   editorFontSize?: number;
@@ -92,8 +131,11 @@ export interface AppData {
   sidebarWidth?: number;
   maxAutoColumnWidth?: number;
   autoApplyFilters?: boolean;
+  notifications?: NotificationMode;
   window?: WindowState;
 }
+
+export type NotificationMode = "background" | "always" | "off";
 
 export interface PreferencesPatch {
   editorFontFamily?: string;
@@ -107,6 +149,7 @@ export interface PreferencesPatch {
   sidebarWidth?: number;
   maxAutoColumnWidth?: number;
   autoApplyFilters?: boolean;
+  notifications?: NotificationMode;
 }
 
 export interface BytesCell {
@@ -131,11 +174,21 @@ export interface SessionInfo {
   serverVersion: string;
   namespaces: NamespaceList;
   namespaceLabel: string;
+  systemNamespaces: string[];
 }
 
 export interface TableInfo {
   name: string;
   kind: "table" | "view";
+}
+
+export interface DropOptions {
+  disableForeignKeys: boolean;
+  cascade: boolean;
+}
+
+export interface TruncateOptions extends DropOptions {
+  restartIdentity: boolean;
 }
 
 export interface ColumnDetail {
@@ -176,6 +229,26 @@ export interface SchemaColumn {
   column: string;
 }
 
+export interface DiagramColumn {
+  name: string;
+  dataType: string;
+  primaryKey: boolean;
+}
+
+export interface DiagramTable {
+  name: string;
+  columns: DiagramColumn[];
+}
+
+export interface DiagramForeignKey extends ForeignKey {
+  table: string;
+}
+
+export interface SchemaDiagram {
+  tables: DiagramTable[];
+  foreignKeys: DiagramForeignKey[];
+}
+
 export type SortDirection = "asc" | "desc";
 
 export interface BrowseRequest {
@@ -193,6 +266,28 @@ export interface BrowseRequest {
   requestId?: string;
 }
 
+/** `contains` replaces every occurrence inside a value; `whole` replaces values that are exactly `find`. */
+export type ReplaceMode = "contains" | "whole";
+
+export interface ReplaceRequest {
+  namespace: string;
+  table: string;
+  column: string;
+  find: string;
+  replace: string;
+  mode: ReplaceMode;
+  filter: WireNode | null;
+  /** Minutes east of UTC. */
+  utcOffset: number;
+}
+
+export interface ReplacePreview {
+  count: number;
+  samples: { before: string; after: string }[];
+  /** The UPDATE with its values written out. */
+  sql: string;
+}
+
 /* Opens `table` showing only rows where every filter column equals its value. */
 export interface TableLink {
   namespace: string;
@@ -208,7 +303,8 @@ export interface BrowseResult {
   durationMs: number;
 }
 
-export type EditValue = null | boolean | number | string;
+/** `now` has the database fill in its current date, time, or timestamp when the row is saved. */
+export type EditValue = null | boolean | number | string | { now: "date" | "time" | "datetime" };
 
 export interface CellEdit {
   column: string;
@@ -241,6 +337,10 @@ export interface RowInsert {
   values: CellEdit[];
 }
 
+export interface RowDelete {
+  key: CellEdit[];
+}
+
 export interface NewColumn {
   name: string;
   dataType: string;
@@ -259,6 +359,7 @@ export interface SaveRequest {
   table: string;
   updates: RowUpdate[];
   inserts: RowInsert[];
+  deletes: RowDelete[];
   columns: ColumnChange[];
   newColumns: NewColumn[];
   indexes: IndexChange[];
@@ -286,6 +387,80 @@ export interface ExportRequest {
   structure: boolean;
   data: boolean;
   dropTables: boolean;
+  /** Rows as CSV or JSON instead of SQL. `path` is a folder when there's more than one table. */
+  tabular?: TabularOptions | null;
+}
+
+export type TabularFormat = "csv" | "json";
+export type JsonStyle = "array" | "lines";
+
+export interface TabularOptions {
+  format: TabularFormat;
+  delimiter: string;
+  header: boolean;
+  /** How NULL is written in CSV: "", "\\N", or "NULL". */
+  nullAs: string;
+  /** A UTF-8 byte order mark, which Excel needs to read the file as UTF-8. */
+  bom: boolean;
+  jsonStyle: JsonStyle;
+  gzip: boolean;
+}
+
+export interface ImportFileOptions {
+  format?: TabularFormat | null;
+  /** Detected from the first line when null. */
+  delimiter?: string | null;
+  header: boolean;
+  /** Unquoted CSV fields that mean NULL. */
+  nullMarkers: string[];
+}
+
+export interface ImportPreview {
+  fileName: string;
+  format: TabularFormat;
+  delimiter: string;
+  columns: string[];
+  /** A guessed column type for each column, for creating a table. */
+  types: string[];
+  rows: (string | null)[][];
+  sampled: number;
+  totalBytes: number;
+}
+
+export interface ColumnMapping {
+  /** Index into `sourceColumns`. */
+  source: number;
+  target: string;
+}
+
+export interface NewTable {
+  columns: { name: string; dataType: string }[];
+  idColumn: boolean;
+}
+
+export interface ImportRowsRequest {
+  namespace: string;
+  table: string;
+  path: string;
+  file: ImportFileOptions;
+  sourceColumns: string[];
+  mapping: ColumnMapping[];
+  create?: NewTable | null;
+  emptyFirst: boolean;
+  skipConflicts: boolean;
+}
+
+export interface ImportRowsResult {
+  rows: number;
+  durationMs: number;
+  created: boolean;
+}
+
+export interface ImportRowsProgress {
+  transferId: string;
+  rows: number;
+  bytes: number;
+  totalBytes: number;
 }
 
 export interface ExportResult {
@@ -314,6 +489,40 @@ export interface ImportProgress {
   statements: number;
   bytes: number;
   totalBytes: number;
+  /** `skipping` past statements that already ran when resuming, or `reconnecting` after the connection dropped. */
+  phase: "running" | "skipping" | "reconnecting";
+  /** Failed reconnect attempts so far, with the last one's error. */
+  attempt: number;
+  error: string | null;
+}
+
+export interface ImportBackend {
+  id: number;
+  started: string | null;
+}
+
+/** Where an import or restore that lost its connection can pick up again. */
+export interface ImportResumePoint {
+  /** Statements to skip to run the uncertain ones again, or just to carry on when none are. */
+  from: number;
+  /** Statements to skip to go past the uncertain ones instead. Equal to `from` when none are. */
+  to: number;
+  line: number;
+  fingerprint: string;
+  backend: ImportBackend | null;
+  likelySaved: boolean;
+}
+
+export interface ImportResume {
+  skip: number;
+  line: number;
+  fingerprint: string;
+  backend: ImportBackend | null;
+}
+
+export interface ImportFailure {
+  message: string;
+  resume: ImportResumePoint | null;
 }
 
 export interface BackupInfo {

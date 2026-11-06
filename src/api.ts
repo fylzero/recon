@@ -6,20 +6,33 @@ import type {
   BrowseResult,
   ConnectionEntry,
   ConnectionGroup,
+  DropOptions,
   ExportRequest,
   ExportResult,
+  ImportFailure,
+  ImportFileOptions,
+  ImportPreview,
   ImportResult,
+  ImportResume,
+  ImportRowsRequest,
+  ImportRowsResult,
   NamespaceList,
   PreferencesPatch,
   QueryLogEntry,
+  ReplacePreview,
+  ReplaceRequest,
+  ResolvedSshHost,
   RowValues,
   SavedQuery,
   SaveRequest,
   SchemaColumn,
+  SchemaDiagram,
   SessionInfo,
   StatementResult,
   TableInfo,
+  TabularOptions,
   TableStructure,
+  TruncateOptions,
   WindowState,
 } from "./types";
 
@@ -47,8 +60,8 @@ export function setAllGroupsExpanded(expanded: boolean) {
   return invoke<void>("set_all_groups_expanded", { expanded });
 }
 
-export function reorderGroups(groupIds: string[]) {
-  return invoke<void>("reorder_groups", { groupIds });
+export function reorderDashboard(ids: string[]) {
+  return invoke<void>("reorder_dashboard", { ids });
 }
 
 export function saveConnection(
@@ -56,8 +69,15 @@ export function saveConnection(
   connection: ConnectionEntry,
   password: string | null,
   sshSecret: string | null = null,
+  sshPassword: string | null = null,
 ) {
-  return invoke<ConnectionEntry>("save_connection", { groupId, connection, password, sshSecret });
+  return invoke<ConnectionEntry>("save_connection", {
+    groupId,
+    connection,
+    password,
+    sshSecret,
+    sshPassword,
+  });
 }
 
 export function removeConnection(connectionId: string) {
@@ -94,6 +114,26 @@ export function listSshKeys() {
 
 export function hasSavedSshSecret(connectionId: string) {
   return invoke<boolean>("has_saved_ssh_secret", { connectionId });
+}
+
+export function hasSavedSshPassword(connectionId: string) {
+  return invoke<boolean>("has_saved_ssh_password", { connectionId });
+}
+
+export function listSshHosts() {
+  return invoke<string[]>("list_ssh_hosts");
+}
+
+export function listAwsProfiles() {
+  return invoke<string[]>("list_aws_profiles");
+}
+
+export function resolveSshHost(host: string) {
+  return invoke<ResolvedSshHost | null>("resolve_ssh_host", { host });
+}
+
+export function answerPrompt(id: string, answer: string | null) {
+  return invoke<void>("answer_prompt", { id, answer });
 }
 
 export function updatePreferences(patch: PreferencesPatch) {
@@ -152,8 +192,9 @@ export function testConnection(
   connection: ConnectionEntry,
   password: string | null,
   sshSecret: string | null = null,
+  sshPassword: string | null = null,
 ) {
-  return invoke<string>("test_connection", { connection, password, sshSecret });
+  return invoke<string>("test_connection", { connection, password, sshSecret, sshPassword });
 }
 
 export function createSqliteDatabase(path: string) {
@@ -201,12 +242,33 @@ export function listTables(connectionId: string, namespace: string) {
   return invoke<TableInfo[]>("list_tables", { connectionId, namespace });
 }
 
+export function createTable(connectionId: string, namespace: string, table: string) {
+  return invoke<void>("create_table", { connectionId, namespace, table });
+}
+
+export function truncateTables(connectionId: string, namespace: string, tables: string[], options: TruncateOptions) {
+  return invoke<void>("truncate_tables", { connectionId, namespace, tables, options });
+}
+
+export function dropTables(connectionId: string, namespace: string, tables: string[], options: DropOptions) {
+  return invoke<void>("drop_tables", { connectionId, namespace, tables, options });
+}
+
 export function tableStructure(connectionId: string, namespace: string, table: string) {
   return invoke<TableStructure>("table_structure", { connectionId, namespace, table });
 }
 
 export function schemaColumns(connectionId: string, namespace: string) {
   return invoke<SchemaColumn[]>("schema_columns", { connectionId, namespace });
+}
+
+export function schemaDiagram(connectionId: string, namespace: string) {
+  return invoke<SchemaDiagram>("schema_diagram", { connectionId, namespace });
+}
+
+/** The distinct values in each type column, in the same order as `columns`. */
+export function morphTypes(connectionId: string, namespace: string, columns: SchemaColumn[]) {
+  return invoke<string[][]>("morph_types", { connectionId, namespace, columns });
 }
 
 export function browseTable(connectionId: string, request: BrowseRequest) {
@@ -237,6 +299,15 @@ export function distinctValues(
   return invoke<string[]>("distinct_values", { connectionId, namespace, table, column, search, limit });
 }
 
+export function previewReplace(connectionId: string, request: ReplaceRequest) {
+  return invoke<ReplacePreview>("preview_replace", { connectionId, request });
+}
+
+/** Resolves to the number of rows changed. */
+export function replaceValues(connectionId: string, request: ReplaceRequest) {
+  return invoke<number>("replace_values", { connectionId, request });
+}
+
 export function saveTableChanges(connectionId: string, requests: SaveRequest[]) {
   return invoke<number>("save_table_changes", { connectionId, requests });
 }
@@ -261,8 +332,45 @@ export function exportSql(connectionId: string, transferId: string, request: Exp
   return invoke<ExportResult>("export_sql", { connectionId, transferId, request });
 }
 
-export function importSql(connectionId: string, transferId: string, namespace: string, path: string) {
-  return invoke<ImportResult>("import_sql", { connectionId, transferId, namespace, path });
+export function exportBrowse(
+  connectionId: string,
+  transferId: string,
+  request: BrowseRequest,
+  pageOnly: boolean,
+  options: TabularOptions,
+  path: string,
+) {
+  return invoke<ExportResult>("export_browse", { connectionId, transferId, request, pageOnly, options, path });
+}
+
+export function exportResult(resultId: string, columns: string[], options: TabularOptions, path: string) {
+  return invoke<ExportResult>("export_result", { resultId, columns, options, path });
+}
+
+export function previewImport(connectionId: string, path: string, options: ImportFileOptions) {
+  return invoke<ImportPreview>("preview_import", { connectionId, path, options });
+}
+
+export function importRows(connectionId: string, transferId: string, request: ImportRowsRequest) {
+  return invoke<ImportRowsResult>("import_rows", { connectionId, transferId, request });
+}
+
+export function importSql(
+  connectionId: string,
+  transferId: string,
+  namespace: string,
+  path: string,
+  resume: ImportResume | null = null,
+) {
+  return invoke<ImportResult>("import_sql", { connectionId, transferId, namespace, path, resume });
+}
+
+/** What `importSql` and `restoreDatabase` reject with, which can say where to resume. */
+export function importFailure(err: unknown): ImportFailure {
+  if (err && typeof err === "object" && "message" in err) {
+    return err as ImportFailure;
+  }
+  return { message: String(err), resume: null };
 }
 
 export function backupDatabase(connectionId: string, transferId: string, namespace: string, path: string) {
@@ -273,8 +381,14 @@ export function readBackupInfo(path: string) {
   return invoke<BackupInfo>("read_backup_info", { path });
 }
 
-export function restoreDatabase(connectionId: string, transferId: string, namespace: string, path: string) {
-  return invoke<ImportResult>("restore_database", { connectionId, transferId, namespace, path });
+export function restoreDatabase(
+  connectionId: string,
+  transferId: string,
+  namespace: string,
+  path: string,
+  resume: ImportResume | null = null,
+) {
+  return invoke<ImportResult>("restore_database", { connectionId, transferId, namespace, path, resume });
 }
 
 export function cancelTransfer(transferId: string) {

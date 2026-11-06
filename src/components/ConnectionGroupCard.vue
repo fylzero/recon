@@ -3,10 +3,11 @@ import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { useApp } from "../composables/useApp";
 import { useConnectionForm } from "../composables/useConnectionForm";
-import { alphabeticalIds } from "../composables/useDragReorder";
+import { alphabeticalIds } from "../dashboard";
 import { useOverflowMenu } from "../composables/useOverflowMenu";
 import { useTabs } from "../composables/useTabs";
 import { contrastingText, DEFAULT_HEADER_COLOR } from "../color";
+import { secretStoreName } from "../platform";
 import type { ConnectionEntry, ConnectionGroup } from "../types";
 import ConnectionRow from "./ConnectionRow.vue";
 
@@ -19,6 +20,7 @@ const props = defineProps<{
   connectionsSortable?: boolean;
   draggingConnectionId?: string | null;
   dropTarget?: boolean;
+  forceExpanded?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -40,6 +42,7 @@ const {
 
 const connectionIds = () => props.group.connections.map((connection) => connection.id);
 const visibleConnections = computed(() => props.connections ?? props.group.connections);
+const expanded = computed(() => props.group.expanded || props.forceExpanded);
 const siblingIds = computed(() => visibleConnections.value.map((connection) => connection.id));
 const reorderingConnections = computed(
   () => Boolean(props.draggingConnectionId) && siblingIds.value.includes(props.draggingConnectionId!),
@@ -136,7 +139,7 @@ async function confirmDelete() {
   const count = props.group.connections.length;
   const ok = await confirm(
     count
-      ? `Delete group “${props.group.name}” and its ${count === 1 ? "connection" : `${count} connections`}? Saved passwords are removed from the Keychain. Databases are not touched.`
+      ? `Delete group “${props.group.name}” and its ${count === 1 ? "connection" : `${count} connections`}? Saved passwords are removed from the ${secretStoreName}. Databases are not touched.`
       : `Delete group “${props.group.name}”?`,
     { title: "Delete group", kind: "warning", okLabel: "Delete", cancelLabel: "Cancel" },
   );
@@ -160,7 +163,7 @@ function addConnection() {
 }
 
 function onHeaderClick(event: MouseEvent) {
-  if (props.draft || renaming.value) {
+  if (props.draft || renaming.value || props.forceExpanded) {
     return;
   }
   const target = event.target;
@@ -179,7 +182,6 @@ function onHeaderClick(event: MouseEvent) {
     class="group"
     :class="{ dragging, sortable, 'drop-target': dropTarget }"
     :data-group-id="draft ? undefined : group.id"
-    :data-connection-drop="draft ? undefined : group.id"
   >
     <div
       class="group-header"
@@ -208,8 +210,9 @@ function onHeaderClick(event: MouseEvent) {
       <button
         class="chevron"
         type="button"
-        :class="{ open: group.expanded }"
-        :aria-expanded="group.expanded"
+        :class="{ open: expanded }"
+        :aria-expanded="expanded"
+        :disabled="forceExpanded"
         @click="draft ? undefined : toggleGroup(group.id)"
       >
         <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -293,7 +296,7 @@ function onHeaderClick(event: MouseEvent) {
     </div>
 
     <div
-      v-if="group.expanded && visibleConnections.length"
+      v-if="expanded && visibleConnections.length"
       class="group-body"
       :class="{ reordering: reorderingConnections }"
     >
@@ -308,7 +311,7 @@ function onHeaderClick(event: MouseEvent) {
         @reorder-start="(event, id) => emit('connectionDragStart', event, id)"
       />
     </div>
-    <p v-else-if="group.expanded && !draft" class="muted tiny group-empty">
+    <p v-else-if="expanded && !draft" class="muted tiny group-empty">
       No connections yet.
       <button class="link-button" type="button" @click="addConnection">Add one</button>
     </p>

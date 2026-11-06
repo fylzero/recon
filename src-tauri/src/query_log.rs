@@ -108,7 +108,10 @@ pub fn paused(connection_id: &str) -> bool {
     LOGGER
         .lock()
         .ok()
-        .and_then(|slot| slot.as_ref().map(|logger| logger.paused.contains(connection_id)))
+        .and_then(|slot| {
+            slot.as_ref()
+                .map(|logger| logger.paused.contains(connection_id))
+        })
         .unwrap_or(false)
 }
 
@@ -269,16 +272,16 @@ mod tests {
 
     fn temp_log() -> PathBuf {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "recon-history-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let dir = std::env::temp_dir().join(format!("recon-history-{}-{}", std::process::id(), n));
         let _ = fs::create_dir_all(&dir);
         dir.join("query-history.jsonl")
     }
 
-    fn sample<'a>(connection: &'a str, sql: &'a str, outcome: Result<Option<u64>, &'a str>) -> QueryRecord<'a> {
+    fn sample<'a>(
+        connection: &'a str,
+        sql: &'a str,
+        outcome: Result<Option<u64>, &'a str>,
+    ) -> QueryRecord<'a> {
         QueryRecord {
             connection_id: connection,
             connection,
@@ -301,8 +304,12 @@ mod tests {
 
         let mine = list("history-a", None);
         assert!(mine.iter().all(|entry| entry.connection_id == "history-a"));
-        assert!(mine.iter().any(|entry| entry.sql == "SELECT 1" && entry.rows == Some(1)));
-        assert!(mine.iter().any(|entry| !entry.success && entry.error == "syntax error"));
+        assert!(mine
+            .iter()
+            .any(|entry| entry.sql == "SELECT 1" && entry.rows == Some(1)));
+        assert!(mine
+            .iter()
+            .any(|entry| !entry.success && entry.error == "syntax error"));
 
         init(path, None);
         assert!(!list("history-a", None).is_empty());
@@ -312,8 +319,12 @@ mod tests {
         assert!(!paused("history-b"));
         record(sample("history-a", "SELECT 2", Ok(None)));
         record(sample("history-b", "SELECT 4", Ok(None)));
-        assert!(!list("history-a", None).iter().any(|entry| entry.sql == "SELECT 2"));
-        assert!(list("history-b", None).iter().any(|entry| entry.sql == "SELECT 4"));
+        assert!(!list("history-a", None)
+            .iter()
+            .any(|entry| entry.sql == "SELECT 2"));
+        assert!(list("history-b", None)
+            .iter()
+            .any(|entry| entry.sql == "SELECT 4"));
         set_paused("history-a", false).unwrap();
 
         clear("history-a", None).unwrap();

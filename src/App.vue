@@ -9,6 +9,7 @@ import TabBar from "./components/TabBar.vue";
 import Toast from "./components/Toast.vue";
 import Modal from "./components/Modal.vue";
 import ConnectionForm from "./components/ConnectionForm.vue";
+import AuthPromptDialog from "./components/AuthPromptDialog.vue";
 import ConnectionsView from "./views/ConnectionsView.vue";
 
 const ConnectionPane = defineAsyncComponent(() => import("./components/ConnectionPane.vue"));
@@ -24,6 +25,7 @@ const SettingsView = defineAsyncComponent({
 const ChangelogView = defineAsyncComponent(() => import("./views/ChangelogView.vue"));
 import { useApp } from "./composables/useApp";
 import { DEFAULT_LIST_FONT, UI_FONT_FALLBACK, resolveFontStack } from "./fonts";
+import { watchWindowFocus } from "./notifications";
 import { useUpdater } from "./composables/useUpdater";
 import { useConnectionForm } from "./composables/useConnectionForm";
 import { CHANGELOG_TAB_ID, CONNECTIONS_TAB_ID, SETTINGS_TAB_ID, useTabs } from "./composables/useTabs";
@@ -38,6 +40,8 @@ const {
   toastMessage,
   toastKind,
   dismissToast,
+  pauseToast,
+  resumeToast,
   showToast,
   editorFontFamily,
   editorFontSize,
@@ -71,7 +75,7 @@ const {
 const GITHUB_URL = "https://github.com/fylzero/recon";
 const appVersion = ref("0.2.0");
 const {
-  connectionTabs,
+  connectionPanes,
   settingsTabOpen,
   changelogTabOpen,
   activeId,
@@ -133,6 +137,7 @@ function syncRoute() {
 }
 
 onMounted(() => {
+  watchWindowFocus();
   void load().then(syncRoute);
   void getVersion()
     .then((value) => {
@@ -185,7 +190,7 @@ watch([groups, standaloneConnections], () => {
         <ConnectionsView />
       </div>
       <div
-        v-for="tab in connectionTabs"
+        v-for="tab in connectionPanes"
         :key="tab.id"
         class="main-pane"
         v-show="activeId === tab.id"
@@ -235,6 +240,8 @@ watch([groups, standaloneConnections], () => {
         :message="toastMessage"
         :kind="toastKind"
         @dismiss="dismissToast"
+        @pause="pauseToast"
+        @resume="resumeToast"
       />
     </Transition>
     <ConnectionForm
@@ -266,5 +273,6 @@ watch([groups, standaloneConnections], () => {
         </button>
       </template>
     </Modal>
+    <AuthPromptDialog />
   </div>
 </template>

@@ -6,8 +6,11 @@
   "permissions": [
     "core:default",
     "core:window:allow-close",
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text",
     "opener:default",
     "dialog:default",
+    "notification:default",
     "updater:default",
     "process:default"
   ]

@@ -1,17 +1,85 @@
 <script setup lang="ts">
+import { onBeforeUnmount, ref } from "vue";
 import { useApp } from "../composables/useApp";
 import { CHANGELOG_TAB_ID, CONNECTIONS_TAB_ID, SETTINGS_TAB_ID, useTabs } from "../composables/useTabs";
+import { useTransfers } from "../composables/useTransfers";
 import { useUpdater } from "../composables/useUpdater";
 import DriverIcon from "./DriverIcon.vue";
 
-const { tabs, activeId, activate, closeTab, openSettings } = useTabs();
+const { tabs, activeId, activate, closeTab, openSettings, isReorderable, moveTab } = useTabs();
 const { findConnection } = useApp();
 const { updateReady, availableVersion, showPrompt } = useUpdater();
+const { jobsFor, reveal } = useTransfers();
+
+const DRAG_THRESHOLD = 5;
+const tabList = ref<HTMLElement | null>(null);
+const draggingId = ref<string | null>(null);
+let pressed: { id: string; x: number } | null = null;
+
+function showJob(tabId: string, jobId: string) {
+  activate(tabId);
+  reveal(jobId);
+}
+
+function startReorder(event: PointerEvent, id: string) {
+  if (event.button !== 0 || !isReorderable(id) || (event.target as Element).closest("button")) {
+    return;
+  }
+  event.preventDefault();
+  pressed = { id, x: event.clientX };
+  window.addEventListener("pointermove", onReorderMove);
+  window.addEventListener("pointerup", endReorder);
+  window.addEventListener("pointercancel", endReorder);
+}
+
+function onReorderMove(event: PointerEvent) {
+  if (!pressed) {
+    return;
+  }
+  if (!draggingId.value) {
+    if (Math.abs(event.clientX - pressed.x) < DRAG_THRESHOLD) {
+      return;
+    }
+    draggingId.value = pressed.id;
+    activate(pressed.id);
+  }
+  const dragging = draggingId.value;
+  const elements = Array.from(tabList.value?.querySelectorAll<HTMLElement>("[data-reorder-id]") ?? []);
+  const target = elements.find((element) => {
+    const rect = element.getBoundingClientRect();
+    return event.clientX >= rect.left && event.clientX < rect.right;
+  });
+  const targetId = target?.dataset.reorderId;
+  if (!target || !targetId || targetId === dragging) {
+    return;
+  }
+  /**
+   * Only swap once the pointer crosses the target's midpoint, so tabs of
+   * different widths don't flip back and forth under the cursor.
+   */
+  const rect = target.getBoundingClientRect();
+  const midpoint = rect.left + rect.width / 2;
+  const ids = tabs.value.map((tab) => tab.id);
+  const movingRight = ids.indexOf(targetId) > ids.indexOf(dragging);
+  if (movingRight ? event.clientX > midpoint : event.clientX < midpoint) {
+    moveTab(dragging, targetId);
+  }
+}
+
+function endReorder() {
+  pressed = null;
+  draggingId.value = null;
+  window.removeEventListener("pointermove", onReorderMove);
+  window.removeEventListener("pointerup", endReorder);
+  window.removeEventListener("pointercancel", endReorder);
+}
+
+onBeforeUnmount(endReorder);
 </script>
 
 <template>
   <div class="tab-bar" role="tablist" aria-label="Open views">
-    <div class="tab-list">
+    <div ref="tabList" class="tab-list" :class="{ reordering: draggingId }">
       <div
         v-for="tab in tabs"
         :key="tab.id"
@@ -19,12 +87,15 @@ const { updateReady, availableVersion, showPrompt } = useUpdater();
         :class="{
           active: activeId === tab.id,
           pinned: !tab.closable,
+          dragging: draggingId === tab.id,
           'has-group-color': Boolean(tab.accentColor),
         }"
         :style="tab.accentColor ? { '--tab-accent': tab.accentColor } : undefined"
+        :data-reorder-id="isReorderable(tab.id) ? tab.id : undefined"
         role="tab"
         :aria-selected="activeId === tab.id"
         @click="activate(tab.id)"
+        @pointerdown="startReorder($event, tab.id)"
       >
         <svg
           v-if="tab.id === CONNECTIONS_TAB_ID"
@@ -59,6 +130,20 @@ const { updateReady, availableVersion, showPrompt } = useUpdater();
         </svg>
         <DriverIcon v-else class="tab-icon" :driver="findConnection(tab.id)?.connection.driver" />
         <span class="tab-title">{{ tab.title }}</span>
+        <span v-if="tab.badge" class="repo-label tab-badge" :title="tab.badge">{{ tab.badge }}</span>
+        <button
+          v-for="job in jobsFor(tab.id)"
+          :key="job.id"
+          class="tab-transfer"
+          :class="{ attention: job.status === 'attention' }"
+          type="button"
+          :title="job.status === 'attention' ? `${job.label} stopped. Show details` : `${job.label} · ${job.percent}%`"
+          :aria-label="job.status === 'attention' ? `${job.label} stopped. Show details` : `${job.label}, ${job.percent}%. Show progress`"
+          @click.stop="showJob(tab.id, job.id)"
+        >
+          <span v-if="job.status === 'running'" class="spinner" aria-hidden="true" />
+          {{ job.status === "attention" ? "!" : `${job.percent}%` }}
+        </button>
         <button
           v-if="tab.closable"
           class="tab-close"

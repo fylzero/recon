@@ -1,9 +1,11 @@
-import { ref } from "vue";
+import { computed, ref, watch } from "vue";
 import * as api from "../api";
+import { dashboardIds as orderDashboard } from "../dashboard";
 import type {
   AppData,
   ConnectionEntry,
   ConnectionGroup,
+  NotificationMode,
   PreferencesPatch,
   SavedQuery,
   WindowState,
@@ -17,6 +19,13 @@ import {
   clampFontSize,
   sanitizeFontFamily,
 } from "../fonts";
+import {
+  ensureNotificationPermission,
+  prefersSystemNotification,
+  sanitizeNotificationMode,
+  sendSystemNotification,
+  windowFocused,
+} from "../notifications";
 
 export const DEFAULT_PAGE_SIZE = 300;
 export const DEFAULT_QUERY_ROW_LIMIT = 10_000;
@@ -26,6 +35,14 @@ export const DEFAULT_MAX_AUTO_COLUMN_WIDTH = 480;
 
 const groups = ref<ConnectionGroup[]>([]);
 const standaloneConnections = ref<ConnectionEntry[]>([]);
+const dashboardOrder = ref<string[]>([]);
+const dashboardIds = computed(() =>
+  orderDashboard(
+    dashboardOrder.value,
+    standaloneConnections.value.map((entry) => entry.id),
+    groups.value.map((group) => group.id),
+  ),
+);
 const savedQueries = ref<SavedQuery[]>([]);
 const error = ref("");
 const loaded = ref(false);
@@ -40,14 +57,48 @@ const queryRowLimit = ref(DEFAULT_QUERY_ROW_LIMIT);
 const sidebarWidth = ref(260);
 const maxAutoColumnWidth = ref(DEFAULT_MAX_AUTO_COLUMN_WIDTH);
 const autoApplyFilters = ref(true);
+const notifications = ref<NotificationMode>("background");
 const windowState = ref<WindowState | null>(null);
 const toastMessage = ref("");
 const toastKind = ref<"success" | "error">("success");
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
+let toastRemaining = 0;
+let toastStartedAt = 0;
+let toastHovered = false;
+
+const TOAST_RESUME_MIN_MS = 1200;
 
 function clampSidebar(width: number) {
   return Math.round(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, width)));
 }
+
+function startToastTimer() {
+  if (toastTimer || !toastMessage.value || toastHovered || !windowFocused.value) {
+    return;
+  }
+  toastStartedAt = Date.now();
+  toastTimer = setTimeout(() => {
+    toastMessage.value = "";
+    toastTimer = null;
+  }, toastRemaining);
+}
+
+function stopToastTimer() {
+  if (!toastTimer) {
+    return;
+  }
+  clearTimeout(toastTimer);
+  toastTimer = null;
+  toastRemaining = Math.max(TOAST_RESUME_MIN_MS, toastRemaining - (Date.now() - toastStartedAt));
+}
+
+watch(windowFocused, (focused) => {
+  if (focused) {
+    startToastTimer();
+  } else {
+    stopToastTimer();
+  }
+});
 
 export function useApp() {
   async function load() {
@@ -63,6 +114,7 @@ export function useApp() {
   function applyState(data: AppData) {
     groups.value = data.groups;
     standaloneConnections.value = data.connections ?? [];
+    dashboardOrder.value = data.dashboardOrder ?? [];
     savedQueries.value = data.savedQueries ?? [];
     editorFontFamily.value = sanitizeFontFamily(data.editorFontFamily ?? DEFAULT_CODE_FONT);
     editorFontSize.value = clampFontSize(
@@ -87,6 +139,7 @@ export function useApp() {
     sidebarWidth.value = clampSidebar(data.sidebarWidth ?? 260);
     maxAutoColumnWidth.value = data.maxAutoColumnWidth ?? DEFAULT_MAX_AUTO_COLUMN_WIDTH;
     autoApplyFilters.value = data.autoApplyFilters ?? true;
+    notifications.value = sanitizeNotificationMode(data.notifications);
     windowState.value = data.window ?? null;
   }
 
@@ -95,25 +148,54 @@ export function useApp() {
       clearTimeout(toastTimer);
       toastTimer = null;
     }
+    toastHovered = false;
     toastMessage.value = "";
   }
 
-  function showToast(message: string, kind: "success" | "error" = "success") {
+  function showInAppToast(message: string, kind: "success" | "error") {
     dismissToast();
     toastKind.value = kind;
     toastMessage.value = message;
-    toastTimer = setTimeout(
-      () => {
-        toastMessage.value = "";
-        toastTimer = null;
-      },
-      kind === "error" ? 5600 : 3200,
-    );
+    toastRemaining = kind === "error" ? 5600 : 3200;
+    startToastTimer();
+  }
+
+  /**
+   * In the background mode the in-app toast still appears, but its timer waits
+   * for the window to regain focus so it is there when you come back.
+   */
+  function showToast(message: string, kind: "success" | "error" = "success") {
+    if (!message || !prefersSystemNotification(notifications.value)) {
+      showInAppToast(message, kind);
+      return;
+    }
+    const mode = notifications.value;
+    if (mode === "background") {
+      showInAppToast(message, kind);
+    }
+    void sendSystemNotification(message, kind).then((sent) => {
+      if (!sent && mode === "always") {
+        showInAppToast(message, kind);
+      }
+    });
+  }
+
+  function pauseToast() {
+    toastHovered = true;
+    stopToastTimer();
+  }
+
+  function resumeToast() {
+    toastHovered = false;
+    startToastTimer();
   }
 
   async function savePreferences(patch: PreferencesPatch) {
     const next = await api.updatePreferences(patch);
     applyState(next);
+    if (patch.notifications && notifications.value !== "off") {
+      void ensureNotificationPermission();
+    }
   }
 
   function previewPreferences(patch: PreferencesPatch) {
@@ -151,6 +233,7 @@ export function useApp() {
   async function createGroup(name: string, headerColor?: string) {
     const group = await api.createGroup(name, headerColor);
     groups.value = [group, ...groups.value];
+    dashboardOrder.value = [group.id, ...dashboardIds.value];
     return group;
   }
 
@@ -198,17 +281,43 @@ export function useApp() {
     });
   }
 
-  async function reorderGroups(groupIds: string[]) {
-    const byId = new Map(groups.value.map((group) => [group.id, group]));
-    if (groupIds.length !== groups.value.length || groupIds.some((id) => !byId.has(id))) {
-      throw new Error("Group list does not match saved groups.");
+  /** Grouped connections listed in `ids` move out of their group. */
+  async function reorderDashboard(ids: string[]) {
+    const previous = {
+      groups: groups.value,
+      standalone: standaloneConnections.value,
+      order: dashboardOrder.value,
+    };
+    const groupIds = new Set(groups.value.map((group) => group.id));
+    const standalone = new Map(standaloneConnections.value.map((entry) => [entry.id, entry]));
+    let nextGroups = groups.value;
+    for (const id of ids) {
+      if (groupIds.has(id) || standalone.has(id)) {
+        continue;
+      }
+      const found = findConnection(id);
+      if (!found?.group) {
+        throw new Error("Connection not found.");
+      }
+      standalone.set(id, found.connection);
+      nextGroups = nextGroups.map((group) =>
+        group.id === found.group!.id
+          ? { ...group, connections: group.connections.filter((item) => item.id !== id) }
+          : group,
+      );
     }
-    const previous = groups.value;
-    groups.value = groupIds.map((id) => byId.get(id)!);
+    const position = new Map(ids.map((id, index) => [id, index]));
+    const byPosition = (left: { id: string }, right: { id: string }) =>
+      (position.get(left.id) ?? 0) - (position.get(right.id) ?? 0);
+    groups.value = [...nextGroups].sort(byPosition);
+    standaloneConnections.value = [...standalone.values()].sort(byPosition);
+    dashboardOrder.value = ids;
     try {
-      await api.reorderGroups(groupIds);
+      await api.reorderDashboard(ids);
     } catch (err) {
-      groups.value = previous;
+      groups.value = previous.groups;
+      standaloneConnections.value = previous.standalone;
+      dashboardOrder.value = previous.order;
       throw err;
     }
   }
@@ -243,8 +352,9 @@ export function useApp() {
     connection: ConnectionEntry,
     password: string | null,
     sshSecret: string | null = null,
+    sshPassword: string | null = null,
   ) {
-    const saved = await api.saveConnection(groupId, connection, password, sshSecret);
+    const saved = await api.saveConnection(groupId, connection, password, sshSecret, sshPassword);
     const current = findConnection(saved.id);
     const sameGroup = current && (current.group?.id ?? null) === groupId;
     if (current && sameGroup) {
@@ -361,6 +471,8 @@ export function useApp() {
   return {
     groups,
     standaloneConnections,
+    dashboardOrder,
+    dashboardIds,
     savedQueries,
     error,
     loaded,
@@ -375,12 +487,15 @@ export function useApp() {
     sidebarWidth,
     maxAutoColumnWidth,
     autoApplyFilters,
+    notifications,
     windowState,
     toastMessage,
     toastKind,
     load,
     showToast,
     dismissToast,
+    pauseToast,
+    resumeToast,
     savePreferences,
     previewPreferences,
     replaceSettings,
@@ -390,7 +505,7 @@ export function useApp() {
     deleteGroup,
     toggleGroup,
     setAllGroupsExpanded,
-    reorderGroups,
+    reorderDashboard,
     findConnection,
     saveConnection,
     removeConnection,

@@ -1,11 +1,15 @@
+pub mod askpass;
 mod commands;
+mod console;
 mod db;
 mod db_commands;
 mod menu;
 mod models;
 mod persist;
+mod prompts;
 mod query_log;
 mod secrets;
+mod tabular_commands;
 mod transfer_commands;
 mod window_state;
 
@@ -18,8 +22,10 @@ use transfer_commands::TransferStore;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .menu(menu::build)
@@ -39,6 +45,7 @@ pub fn run() {
             app.manage(SessionStore::default());
             app.manage(ResultStore::default());
             app.manage(TransferStore::default());
+            app.manage(prompts::PromptStore::default());
             if let (Some(window), Some(bounds)) = (app.get_webview_window("main"), bounds) {
                 window_state::apply(&window, &bounds);
             }
@@ -54,7 +61,7 @@ pub fn run() {
             commands::delete_group,
             commands::toggle_group,
             commands::set_all_groups_expanded,
-            commands::reorder_groups,
+            commands::reorder_dashboard,
             commands::save_connection,
             commands::remove_connection,
             commands::reorder_connections,
@@ -63,7 +70,11 @@ pub fn run() {
             commands::delete_saved_query,
             commands::has_saved_password,
             commands::has_saved_ssh_secret,
+            commands::has_saved_ssh_password,
             commands::list_ssh_keys,
+            commands::list_ssh_hosts,
+            commands::resolve_ssh_host,
+            commands::list_aws_profiles,
             commands::update_preferences,
             commands::replace_app_data,
             commands::write_text_file,
@@ -77,6 +88,7 @@ pub fn run() {
             commands::clear_query_history,
             window_state::get_window_state,
             window_state::update_window_state,
+            prompts::answer_prompt,
             db_commands::test_connection,
             db_commands::create_sqlite_database,
             db_commands::connect,
@@ -88,13 +100,20 @@ pub fn run() {
             db_commands::drop_database,
             db_commands::rename_database,
             db_commands::list_tables,
+            db_commands::create_table,
+            db_commands::truncate_tables,
+            db_commands::drop_tables,
             db_commands::table_structure,
             db_commands::schema_columns,
+            db_commands::schema_diagram,
+            db_commands::morph_types,
             db_commands::browse_table,
             db_commands::count_rows,
             db_commands::cancel_browse,
             db_commands::preview_browse_sql,
             db_commands::distinct_values,
+            db_commands::preview_replace,
+            db_commands::replace_values,
             db_commands::save_table_changes,
             db_commands::run_query,
             db_commands::fetch_rows,
@@ -106,6 +125,10 @@ pub fn run() {
             transfer_commands::read_backup_info,
             transfer_commands::restore_database,
             transfer_commands::cancel_transfer,
+            tabular_commands::export_browse,
+            tabular_commands::export_result,
+            tabular_commands::preview_import,
+            tabular_commands::import_rows,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

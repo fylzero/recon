@@ -1,12 +1,20 @@
+pub mod credentials;
 pub mod dump;
 pub mod filter;
 pub mod mssql;
 pub mod mysql;
 pub mod postgres;
+pub mod replace;
 pub mod restore;
+pub mod resume;
 pub mod sql_split;
 pub mod sqlite;
 pub mod ssh;
+pub mod ssh_config;
+pub mod ssh_proxy;
+pub mod table_ops;
+pub mod tabular;
+pub mod tls;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,7 +30,8 @@ use crate::models::{ConnectionEntry, Driver};
 
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 pub const CONNECTION_LOST: &str = "The connection to the database server was lost";
-pub const SESSION_LOST: &str = "The connection to the database server was lost. Reconnect to continue.";
+pub const SESSION_LOST: &str =
+    "The connection to the database server was lost. Reconnect to continue.";
 const MAX_SAFE_JS_INT: i64 = 9_007_199_254_740_991;
 const BYTES_PREVIEW: usize = 48;
 
@@ -96,7 +105,9 @@ impl Serialize for CellValue {
         match self {
             CellValue::Null => serializer.serialize_none(),
             CellValue::Bool(value) => serializer.serialize_bool(*value),
-            CellValue::Int(value) if value.abs() <= MAX_SAFE_JS_INT => serializer.serialize_i64(*value),
+            CellValue::Int(value) if value.abs() <= MAX_SAFE_JS_INT => {
+                serializer.serialize_i64(*value)
+            }
             CellValue::Int(value) => serializer.serialize_str(&value.to_string()),
             CellValue::Float(value) => serializer.serialize_f64(*value),
             CellValue::Text(value) | CellValue::Json(value) | CellValue::DateTime(value) => {
@@ -197,7 +208,88 @@ pub fn foreign_keys(output: &RawOutput) -> Vec<ForeignKey> {
     keys
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagramColumn {
+    pub name: String,
+    pub data_type: String,
+    pub primary_key: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagramTable {
+    pub name: String,
+    pub columns: Vec<DiagramColumn>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaForeignKey {
+    pub table: String,
+    #[serde(flatten)]
+    pub key: ForeignKey,
+}
+
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaDiagram {
+    pub tables: Vec<DiagramTable>,
+    pub foreign_keys: Vec<SchemaForeignKey>,
+}
+
+/** Rows arrive ordered by table, then by column position. */
+pub fn diagram_tables(output: &RawOutput) -> Vec<DiagramTable> {
+    let mut tables: Vec<DiagramTable> = Vec::new();
+    for row in &output.rows {
+        let text = texts(row);
+        let (table, column) = (text_at(&text, 0), text_at(&text, 1));
+        let column = DiagramColumn {
+            name: column,
+            data_type: text_at(&text, 2),
+            primary_key: row.get(3).is_some_and(CellValue::is_truthy),
+        };
+        match tables.last_mut() {
+            Some(last) if last.name == table => last.columns.push(column),
+            _ => tables.push(DiagramTable {
+                name: table,
+                columns: vec![column],
+            }),
+        }
+    }
+    tables
+}
+
+/** Like `foreign_keys`, with the owning table as an extra leading column. */
+pub fn schema_foreign_keys(output: &RawOutput) -> Vec<SchemaForeignKey> {
+    let mut keys: Vec<SchemaForeignKey> = Vec::new();
+    for row in output.text_rows() {
+        let (table, name) = (text_at(&row, 0), text_at(&row, 1));
+        let (column, ref_column) = (text_at(&row, 2), text_at(&row, 5));
+        if column.is_empty() || ref_column.is_empty() {
+            continue;
+        }
+        match keys.last_mut() {
+            Some(last) if last.table == table && last.key.name == name => {
+                last.key.columns.push(column);
+                last.key.ref_columns.push(ref_column);
+            }
+            _ => keys.push(SchemaForeignKey {
+                table,
+                key: ForeignKey {
+                    name,
+                    columns: vec![column],
+                    ref_namespace: text_at(&row, 3),
+                    ref_table: text_at(&row, 4),
+                    ref_columns: vec![ref_column],
+                },
+            }),
+        }
+    }
+    keys
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaColumn {
     pub table: String,
@@ -265,12 +357,39 @@ pub enum EditValue {
     Int(i64),
     Float(f64),
     Text(String),
+    /** The database's current date, time, or timestamp, written into the SQL instead of bound. */
+    Now(NowKind),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NowKind {
+    Date,
+    Time,
+    Datetime,
+}
+
+impl NowKind {
+    pub fn sql(self) -> &'static str {
+        match self {
+            NowKind::Date => "CURRENT_DATE",
+            NowKind::Time => "CURRENT_TIME",
+            NowKind::Datetime => "CURRENT_TIMESTAMP",
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for EditValue {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde_json::Value;
         match Value::deserialize(deserializer)? {
+            Value::Object(object) => match object.get("now").and_then(Value::as_str) {
+                Some("date") => Ok(EditValue::Now(NowKind::Date)),
+                Some("time") => Ok(EditValue::Now(NowKind::Time)),
+                Some("datetime") => Ok(EditValue::Now(NowKind::Datetime)),
+                _ => Err(serde::de::Error::custom(
+                    "expected {\"now\": \"date\" | \"time\" | \"datetime\"}",
+                )),
+            },
             Value::Null => Ok(EditValue::Null),
             Value::Bool(value) => Ok(EditValue::Bool(value)),
             Value::Number(number) => match number.as_i64() {
@@ -281,7 +400,9 @@ impl<'de> Deserialize<'de> for EditValue {
                     .ok_or_else(|| serde::de::Error::custom("number out of range")),
             },
             Value::String(value) => Ok(EditValue::Text(value)),
-            _ => Err(serde::de::Error::custom("expected null, a boolean, a number, or a string")),
+            _ => Err(serde::de::Error::custom(
+                "expected null, a boolean, a number, or a string",
+            )),
         }
     }
 }
@@ -294,11 +415,24 @@ impl EditValue {
             EditValue::Int(value) => Some(value.to_string()),
             EditValue::Float(value) => Some(value.to_string()),
             EditValue::Text(value) => Some(value.clone()),
+            EditValue::Now(_) => None,
+        }
+    }
+
+    /** SQL for values that are never bound as parameters. */
+    fn inline_sql(&self) -> Option<String> {
+        match self {
+            EditValue::Null => Some("NULL".into()),
+            EditValue::Now(kind) => Some(kind.sql().into()),
+            _ => None,
         }
     }
 
     /// Postgres infers the column type from an untyped literal, so every value is quoted.
     fn postgres_literal(&self) -> String {
+        if let Some(sql) = self.inline_sql() {
+            return sql;
+        }
         match self.text() {
             None => "NULL".into(),
             Some(text) => format!("E'{}'", text.replace('\\', "\\\\").replace('\'', "''")),
@@ -312,6 +446,7 @@ impl EditValue {
                 self.text().unwrap_or_default()
             }
             EditValue::Text(text) => quote_literal(text),
+            EditValue::Now(kind) => kind.sql().into(),
         }
     }
 }
@@ -330,7 +465,15 @@ pub struct RowUpdate {
     pub changes: Vec<CellEdit>,
 }
 
-fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Option<String>>, D::Error> {
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RowDelete {
+    pub key: Vec<CellEdit>,
+}
+
+fn present<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error> {
     Option::<String>::deserialize(deserializer).map(Some)
 }
 
@@ -399,6 +542,8 @@ pub struct SaveRequest {
     #[serde(default)]
     pub inserts: Vec<RowInsert>,
     #[serde(default)]
+    pub deletes: Vec<RowDelete>,
+    #[serde(default)]
     pub columns: Vec<ColumnChange>,
     #[serde(default)]
     pub new_columns: Vec<NewColumn>,
@@ -409,7 +554,12 @@ pub struct SaveRequest {
 }
 
 /** `overriding` lets explicit values into PostgreSQL GENERATED ALWAYS identity columns. */
-pub fn insert_statement(driver: Driver, table: &str, insert: &RowInsert, overriding: bool) -> EditStatement {
+pub fn insert_statement(
+    driver: Driver,
+    table: &str,
+    insert: &RowInsert,
+    overriding: bool,
+) -> EditStatement {
     let dialect = dialect(driver);
     let mut params = Vec::new();
     let mut columns = Vec::new();
@@ -417,12 +567,12 @@ pub fn insert_statement(driver: Driver, table: &str, insert: &RowInsert, overrid
     let mut display_values = Vec::new();
     for cell in &insert.values {
         columns.push(dialect.quote_ident(&cell.column));
-        values.push(match &cell.value {
-            EditValue::Null => "NULL".to_string(),
-            value if driver == Driver::Postgres => value.postgres_literal(),
-            value if driver == Driver::Mssql => mssql::edit_literal(value),
-            value => {
-                params.push(value.clone());
+        values.push(match cell.value.inline_sql() {
+            Some(sql) => sql,
+            None if driver == Driver::Postgres => cell.value.postgres_literal(),
+            None if driver == Driver::Mssql => mssql::edit_literal(&cell.value),
+            None => {
+                params.push(cell.value.clone());
                 "?".to_string()
             }
         });
@@ -436,10 +586,20 @@ pub fn insert_statement(driver: Driver, table: &str, insert: &RowInsert, overrid
         (sql.clone(), sql)
     } else {
         let columns = columns.join(", ");
-        let overriding = if overriding && driver == Driver::Postgres { " OVERRIDING SYSTEM VALUE" } else { "" };
+        let overriding = if overriding && driver == Driver::Postgres {
+            " OVERRIDING SYSTEM VALUE"
+        } else {
+            ""
+        };
         (
-            format!("INSERT INTO {table} ({columns}){overriding} VALUES ({})", values.join(", ")),
-            format!("INSERT INTO {table} ({columns}){overriding} VALUES ({})", display_values.join(", ")),
+            format!(
+                "INSERT INTO {table} ({columns}){overriding} VALUES ({})",
+                values.join(", ")
+            ),
+            format!(
+                "INSERT INTO {table} ({columns}){overriding} VALUES ({})",
+                display_values.join(", ")
+            ),
         )
     };
     EditStatement {
@@ -452,7 +612,11 @@ pub fn insert_statement(driver: Driver, table: &str, insert: &RowInsert, overrid
     }
 }
 
-pub fn add_column_statement(driver: Driver, table: &str, column: &NewColumn) -> Result<EditStatement, String> {
+pub fn add_column_statement(
+    driver: Driver,
+    table: &str,
+    column: &NewColumn,
+) -> Result<EditStatement, String> {
     let name = column.name.trim();
     if name.is_empty() {
         return Err(format!("A new column in {table} needs a name."));
@@ -461,11 +625,19 @@ pub fn add_column_statement(driver: Driver, table: &str, column: &NewColumn) -> 
     if data_type.is_empty() {
         return Err(format!("New column {name} needs a type."));
     }
-    let mut sql = format!("ALTER TABLE {table} ADD COLUMN {} {data_type}", dialect(driver).quote_ident(name));
+    let mut sql = format!(
+        "ALTER TABLE {table} ADD COLUMN {} {data_type}",
+        dialect(driver).quote_ident(name)
+    );
     if !column.nullable {
         sql.push_str(" NOT NULL");
     }
-    if let Some(expr) = column.default_value.as_deref().map(str::trim).filter(|expr| !expr.is_empty()) {
+    if let Some(expr) = column
+        .default_value
+        .as_deref()
+        .map(str::trim)
+        .filter(|expr| !expr.is_empty())
+    {
         sql.push_str(&format!(" DEFAULT {expr}"));
     }
     Ok(EditStatement::schema(table, name, sql))
@@ -490,10 +662,14 @@ pub fn create_index_statement(
     let dialect = dialect(driver);
     let unique = if index.unique { "UNIQUE " } else { "" };
     let sql = match driver {
-        Driver::Mysql => format!("ALTER TABLE {table} ADD {unique}INDEX {} ({columns})", dialect.quote_ident(name)),
-        Driver::Postgres | Driver::Mssql => {
-            format!("CREATE {unique}INDEX {} ON {table} ({columns})", dialect.quote_ident(name))
-        }
+        Driver::Mysql => format!(
+            "ALTER TABLE {table} ADD {unique}INDEX {} ({columns})",
+            dialect.quote_ident(name)
+        ),
+        Driver::Postgres | Driver::Mssql => format!(
+            "CREATE {unique}INDEX {} ON {table} ({columns})",
+            dialect.quote_ident(name)
+        ),
         Driver::Sqlite => format!(
             "CREATE {unique}INDEX {} ON {} ({columns})",
             dialect.qualified(namespace, name),
@@ -527,10 +703,18 @@ impl EditStatement {
 }
 
 fn validate_column_change(change: &ColumnChange) -> Result<(), String> {
-    if change.name.as_deref().is_some_and(|name| name.trim().is_empty()) {
+    if change
+        .name
+        .as_deref()
+        .is_some_and(|name| name.trim().is_empty())
+    {
         return Err(format!("Column {} needs a name.", change.column));
     }
-    if change.data_type.as_deref().is_some_and(|value| value.trim().is_empty()) {
+    if change
+        .data_type
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
         return Err(format!("Column {} needs a type.", change.column));
     }
     if matches!(&change.default_value, Some(Some(value)) if value.trim().is_empty()) {
@@ -560,9 +744,14 @@ pub fn alter_statements(
     match driver {
         Driver::Mysql => {
             let current = mysql_current.ok_or_else(|| {
-                format!("Column {} no longer exists in {table}. Reload and try again.", change.column)
+                format!(
+                    "Column {} no longer exists in {table}. Reload and try again.",
+                    change.column
+                )
             })?;
-            Ok(vec![statement(mysql::change_column_sql(table, change, current)?)])
+            Ok(vec![statement(mysql::change_column_sql(
+                table, change, current,
+            )?)])
         }
         Driver::Postgres => {
             let mut sql = Vec::new();
@@ -573,17 +762,24 @@ pub fn alter_statements(
             }
             if let Some(nullable) = change.nullable {
                 let action = if nullable { "DROP" } else { "SET" };
-                sql.push(format!("ALTER TABLE {table} ALTER COLUMN {column} {action} NOT NULL"));
+                sql.push(format!(
+                    "ALTER TABLE {table} ALTER COLUMN {column} {action} NOT NULL"
+                ));
             }
             match &change.default_value {
-                Some(Some(expr)) => {
-                    sql.push(format!("ALTER TABLE {table} ALTER COLUMN {column} SET DEFAULT {expr}"))
-                }
-                Some(None) => sql.push(format!("ALTER TABLE {table} ALTER COLUMN {column} DROP DEFAULT")),
+                Some(Some(expr)) => sql.push(format!(
+                    "ALTER TABLE {table} ALTER COLUMN {column} SET DEFAULT {expr}"
+                )),
+                Some(None) => sql.push(format!(
+                    "ALTER TABLE {table} ALTER COLUMN {column} DROP DEFAULT"
+                )),
                 None => {}
             }
             if let Some(name) = change.renamed() {
-                sql.push(format!("ALTER TABLE {table} RENAME COLUMN {column} TO {}", quote(name)));
+                sql.push(format!(
+                    "ALTER TABLE {table} RENAME COLUMN {column} TO {}",
+                    quote(name)
+                ));
             }
             Ok(sql.into_iter().map(statement).collect())
         }
@@ -602,14 +798,23 @@ pub fn alter_statements(
             }
             Ok(change
                 .renamed()
-                .map(|name| statement(format!("ALTER TABLE {table} RENAME COLUMN {column} TO {}", quote(name))))
+                .map(|name| {
+                    statement(format!(
+                        "ALTER TABLE {table} RENAME COLUMN {column} TO {}",
+                        quote(name)
+                    ))
+                })
                 .into_iter()
                 .collect())
         }
     }
 }
 
-pub fn update_statement(driver: Driver, table: &str, update: &RowUpdate) -> Result<EditStatement, String> {
+pub fn update_statement(
+    driver: Driver,
+    table: &str,
+    update: &RowUpdate,
+) -> Result<EditStatement, String> {
     if update.key.is_empty() {
         return Err("Rows can only be updated by primary key.".into());
     }
@@ -630,41 +835,89 @@ pub fn update_statement(driver: Driver, table: &str, update: &RowUpdate) -> Resu
     let mut set_display = Vec::new();
     for change in &update.changes {
         let column = dialect.quote_ident(&change.column);
-        let sql = match change.value {
-            EditValue::Null => "NULL".to_string(),
-            ref value => value_sql(value),
-        };
+        let sql = change
+            .value
+            .inline_sql()
+            .unwrap_or_else(|| value_sql(&change.value));
         set.push(format!("{column} = {sql}"));
         set_display.push(format!("{column} = {}", change.value.display_literal()));
     }
-    let mut filter = Vec::new();
-    let mut filter_display = Vec::new();
-    let mut label = Vec::new();
-    for key in &update.key {
-        let column = dialect.quote_ident(&key.column);
-        let (sql, display) = match key.value {
-            EditValue::Null => (format!("{column} IS NULL"), format!("{column} IS NULL")),
-            ref value => (
-                format!("{column} = {}", value_sql(value)),
-                format!("{column} = {}", value.display_literal()),
-            ),
-        };
-        filter.push(sql);
-        filter_display.push(display);
-        label.push(format!("{} = {}", key.column, key.value.display_literal()));
-    }
+    let filter = key_filter(driver, &update.key, &mut params);
     Ok(EditStatement {
-        sql: format!("UPDATE {table} SET {} WHERE {}", set.join(", "), filter.join(" AND ")),
+        sql: format!("UPDATE {table} SET {} WHERE {}", set.join(", "), filter.sql),
         params,
         display: format!(
             "UPDATE {table} SET {} WHERE {}",
             set_display.join(", "),
-            filter_display.join(" AND ")
+            filter.display
         ),
         table: table.to_string(),
-        label: label.join(", "),
+        label: filter.label,
         expect_one_row: true,
     })
+}
+
+pub fn delete_statement(
+    driver: Driver,
+    table: &str,
+    delete: &RowDelete,
+) -> Result<EditStatement, String> {
+    if delete.key.is_empty() {
+        return Err("Rows can only be deleted by primary key.".into());
+    }
+    let mut params = Vec::new();
+    let filter = key_filter(driver, &delete.key, &mut params);
+    Ok(EditStatement {
+        sql: format!("DELETE FROM {table} WHERE {}", filter.sql),
+        params,
+        display: format!("DELETE FROM {table} WHERE {}", filter.display),
+        table: table.to_string(),
+        label: filter.label,
+        expect_one_row: true,
+    })
+}
+
+struct KeyFilter {
+    sql: String,
+    display: String,
+    label: String,
+}
+
+/** PostgreSQL values are inlined; other drivers append theirs to `params`. */
+fn key_filter(driver: Driver, key: &[CellEdit], params: &mut Vec<EditValue>) -> KeyFilter {
+    let dialect = dialect(driver);
+    let mut sql = Vec::new();
+    let mut display = Vec::new();
+    let mut label = Vec::new();
+    for cell in key {
+        let column = dialect.quote_ident(&cell.column);
+        match cell.value {
+            EditValue::Null => {
+                sql.push(format!("{column} IS NULL"));
+                display.push(format!("{column} IS NULL"));
+            }
+            ref value => {
+                let placeholder = if driver == Driver::Postgres {
+                    value.postgres_literal()
+                } else {
+                    params.push(value.clone());
+                    "?".to_string()
+                };
+                sql.push(format!("{column} = {placeholder}"));
+                display.push(format!("{column} = {}", value.display_literal()));
+            }
+        }
+        label.push(format!(
+            "{} = {}",
+            cell.column,
+            cell.value.display_literal()
+        ));
+    }
+    KeyFilter {
+        sql: sql.join(" AND "),
+        display: display.join(" AND "),
+        label: label.join(", "),
+    }
 }
 
 fn check_matched(statement: &EditStatement, matched: u64) -> Result<(), String> {
@@ -675,7 +928,7 @@ fn check_matched(statement: &EditStatement, matched: u64) -> Result<(), String> 
             statement.table, statement.label
         )),
         count => Err(format!(
-            "The row in {} where {} matched {count} rows, so it cannot be updated safely. Nothing was saved.",
+            "The row in {} where {} matched {count} rows, so it cannot be changed safely. Nothing was saved.",
             statement.table, statement.label
         )),
     }
@@ -688,7 +941,7 @@ macro_rules! apply_in_transaction {
             let mut query = sqlx::query(&statement.sql);
             for param in &statement.params {
                 query = match param {
-                    EditValue::Null => query.bind(None::<String>),
+                    EditValue::Null | EditValue::Now(_) => query.bind(None::<String>),
                     EditValue::Bool(value) => query.bind(*value),
                     EditValue::Int(value) => query.bind(*value),
                     EditValue::Float(value) => query.bind(*value),
@@ -741,6 +994,10 @@ pub trait Dialect: Sync {
     fn schema_columns_sql(&self, namespace: &str) -> String;
     /// Rows of constraint, column, referenced namespace, table, and column, in key order.
     fn foreign_keys_sql(&self, namespace: &str, table: &str) -> String;
+    /// Rows of table, column, data type, and primary-key flag for every table, in column order.
+    fn diagram_columns_sql(&self, namespace: &str) -> String;
+    /// Rows of `foreign_keys_sql` for every table, each led by the owning table.
+    fn schema_foreign_keys_sql(&self, namespace: &str) -> String;
     fn quote_ident(&self, ident: &str) -> String;
     fn use_namespace_sql(&self, namespace: &str) -> Option<String>;
     fn create_namespace_sql(&self, namespace: &str) -> Option<String>;
@@ -765,7 +1022,11 @@ pub trait Dialect: Sync {
         if namespace.is_empty() {
             return self.quote_ident(table);
         }
-        format!("{}.{}", self.quote_ident(namespace), self.quote_ident(table))
+        format!(
+            "{}.{}",
+            self.quote_ident(namespace),
+            self.quote_ident(table)
+        )
     }
 }
 
@@ -778,6 +1039,7 @@ pub fn dialect(driver: Driver) -> &'static dyn Dialect {
     }
 }
 
+#[derive(Clone)]
 pub enum Pool {
     MySql(sqlx::MySqlPool),
     Postgres(sqlx::PgPool),
@@ -786,6 +1048,24 @@ pub enum Pool {
 }
 
 impl Pool {
+    /// Connections the pool opens from now on sign in with `password`.
+    pub fn refresh_password(
+        &self,
+        target: &ConnectionEntry,
+        password: &str,
+        tls: &tls::TlsMaterial,
+    ) {
+        match self {
+            Pool::MySql(pool) => {
+                pool.set_connect_options(mysql::options(target, Some(password), tls))
+            }
+            Pool::Postgres(pool) => {
+                pool.set_connect_options(postgres::options(target, Some(password), tls))
+            }
+            Pool::Sqlite(_) | Pool::Mssql(_) => {}
+        }
+    }
+
     /// Drops idle connections so a following statement can take an exclusive lock.
     pub async fn quiesce(&self) {
         if let Pool::Mssql(pool) = self {
@@ -835,9 +1115,15 @@ impl Pool {
      */
     pub async fn detached(&self) -> Result<Conn, String> {
         Ok(match self {
-            Pool::MySql(pool) => Conn::MySql(pool.acquire().await.map_err(describe_error)?.detach()),
-            Pool::Postgres(pool) => Conn::Postgres(pool.acquire().await.map_err(describe_error)?.detach()),
-            Pool::Sqlite(pool) => Conn::Sqlite(pool.acquire().await.map_err(describe_error)?.detach()),
+            Pool::MySql(pool) => {
+                Conn::MySql(pool.acquire().await.map_err(describe_error)?.detach())
+            }
+            Pool::Postgres(pool) => {
+                Conn::Postgres(pool.acquire().await.map_err(describe_error)?.detach())
+            }
+            Pool::Sqlite(pool) => {
+                Conn::Sqlite(pool.acquire().await.map_err(describe_error)?.detach())
+            }
             Pool::Mssql(pool) => Conn::Mssql(Box::new(pool.detached().await?)),
         })
     }
@@ -845,13 +1131,19 @@ impl Pool {
     pub async fn acquire(&self) -> Result<PooledConn, String> {
         Ok(match self {
             Pool::MySql(pool) => PooledConn::MySql(pool.acquire().await.map_err(describe_error)?),
-            Pool::Postgres(pool) => PooledConn::Postgres(pool.acquire().await.map_err(describe_error)?),
+            Pool::Postgres(pool) => {
+                PooledConn::Postgres(pool.acquire().await.map_err(describe_error)?)
+            }
             Pool::Sqlite(pool) => PooledConn::Sqlite(pool.acquire().await.map_err(describe_error)?),
             Pool::Mssql(pool) => PooledConn::Mssql(Box::new(pool.checkout().await?)),
         })
     }
 
-    pub async fn run_statement(&self, statement: &filter::Fragment, limit: usize) -> Result<RawOutput, String> {
+    pub async fn run_statement(
+        &self,
+        statement: &filter::Fragment,
+        limit: usize,
+    ) -> Result<RawOutput, String> {
         self.acquire().await?.run_statement(statement, limit).await
     }
 }
@@ -891,7 +1183,11 @@ impl PooledConn {
      * prepared-statement rows in a binary format the grid can't decode, so
      * their values are written as escaped literals and sent as plain text.
      */
-    pub async fn run_statement(&mut self, statement: &filter::Fragment, limit: usize) -> Result<RawOutput, String> {
+    pub async fn run_statement(
+        &mut self,
+        statement: &filter::Fragment,
+        limit: usize,
+    ) -> Result<RawOutput, String> {
         match self {
             PooledConn::Sqlite(conn) => {
                 let (sql, params) = statement.bound();
@@ -1000,10 +1296,20 @@ impl Conn {
     pub async fn execute(&mut self, sql: &str) -> Result<u64, String> {
         let query = sqlx::raw_sql(sql);
         match self {
-            Conn::MySql(conn) => Executor::execute(conn, query).await.map(|done| done.rows_affected()),
-            Conn::Postgres(conn) => Executor::execute(conn, query).await.map(|done| done.rows_affected()),
-            Conn::Sqlite(conn) => Executor::execute(conn, query).await.map(|done| done.rows_affected()),
-            Conn::Mssql(conn) => return mssql::run(conn.client(), sql, 1, None).await.map(|output| output.rows_affected),
+            Conn::MySql(conn) => Executor::execute(conn, query)
+                .await
+                .map(|done| done.rows_affected()),
+            Conn::Postgres(conn) => Executor::execute(conn, query)
+                .await
+                .map(|done| done.rows_affected()),
+            Conn::Sqlite(conn) => Executor::execute(conn, query)
+                .await
+                .map(|done| done.rows_affected()),
+            Conn::Mssql(conn) => {
+                return mssql::run(conn.client(), sql, 1, None)
+                    .await
+                    .map(|output| output.rows_affected)
+            }
         }
         .map_err(describe_error)
     }
@@ -1041,11 +1347,22 @@ pub struct Session {
     pub cancel: AtomicBool,
     pub lost: AtomicBool,
     pub namespace: Mutex<String>,
-    pub tunnel: Option<ssh::Tunnel>,
+    /// Shared with the session that replaces this one when a reconnect reuses it.
+    pub tunnel: Option<Arc<ssh::Tunnel>>,
     /// Column lists by namespace and table, so filters can be checked without a catalog query each time.
     pub columns: Mutex<ColumnCache>,
     /// Backend ids of browse queries that can be cancelled, by request id.
     pub running: tokio::sync::Mutex<HashMap<String, i64>>,
+    /// Keeps the pool's fetched password from expiring, for IAM and command sources.
+    pub refresher: Option<tauri::async_runtime::JoinHandle<()>>,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        if let Some(refresher) = &self.refresher {
+            refresher.abort();
+        }
+    }
 }
 
 impl Session {
@@ -1066,7 +1383,8 @@ impl Session {
     pub fn forget_columns(&self, namespace: Option<&str>, table: Option<&str>) {
         if let Ok(mut cache) = self.columns.lock() {
             cache.retain(|(ns, name), _| {
-                !(namespace.is_none_or(|wanted| wanted == ns) && table.is_none_or(|wanted| wanted == name))
+                !(namespace.is_none_or(|wanted| wanted == ns)
+                    && table.is_none_or(|wanted| wanted == name))
             });
         }
     }
@@ -1097,12 +1415,15 @@ impl Session {
     }
 
     pub async fn close(&self) {
+        if let Some(refresher) = &self.refresher {
+            refresher.abort();
+        }
         if let Some(conn) = self.query_conn.lock().await.take() {
             conn.close().await;
         }
         self.pool.close().await;
         if let Some(tunnel) = &self.tunnel {
-            tunnel.close().await;
+            ssh::release(tunnel).await;
         }
     }
 }
@@ -1172,7 +1493,7 @@ impl SessionStore {
 
 struct StoredResult {
     connection_id: String,
-    rows: Vec<RowValues>,
+    rows: Arc<Vec<RowValues>>,
 }
 
 #[derive(Default)]
@@ -1188,21 +1509,31 @@ impl ResultStore {
                 id.clone(),
                 StoredResult {
                     connection_id: connection_id.to_string(),
-                    rows,
+                    rows: Arc::new(rows),
                 },
             );
         }
         id
     }
 
-    pub fn window(&self, result_id: &str, offset: usize, limit: usize) -> Result<Vec<RowValues>, String> {
+    pub fn rows(&self, result_id: &str) -> Result<Arc<Vec<RowValues>>, String> {
         let results = self.results.lock().map_err(|err| err.to_string())?;
-        let stored = results
+        results
             .get(result_id)
-            .ok_or_else(|| "That result is no longer available. Run the query again.".to_string())?;
-        let start = offset.min(stored.rows.len());
-        let end = offset.saturating_add(limit).min(stored.rows.len());
-        Ok(stored.rows[start..end].to_vec())
+            .map(|stored| stored.rows.clone())
+            .ok_or_else(|| "That result is no longer available. Run the query again.".to_string())
+    }
+
+    pub fn window(
+        &self,
+        result_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<RowValues>, String> {
+        let rows = self.rows(result_id)?;
+        let start = offset.min(rows.len());
+        let end = offset.saturating_add(limit).min(rows.len());
+        Ok(rows[start..end].to_vec())
     }
 
     pub fn remove(&self, result_ids: &[String]) {
@@ -1230,7 +1561,7 @@ fn column_meta<DB: Database>(columns: &[DB::Column]) -> Vec<ColumnMeta> {
         .collect()
 }
 
-fn returns_rows(sql: &str) -> bool {
+pub(crate) fn returns_rows(sql: &str) -> bool {
     let keyword = sql
         .trim_start_matches(|c: char| c.is_whitespace() || c == '(')
         .split(|c: char| !c.is_ascii_alphabetic())
@@ -1239,7 +1570,15 @@ fn returns_rows(sql: &str) -> bool {
         .to_ascii_uppercase();
     matches!(
         keyword.as_str(),
-        "SELECT" | "WITH" | "SHOW" | "PRAGMA" | "EXPLAIN" | "DESCRIBE" | "DESC" | "VALUES" | "TABLE"
+        "SELECT"
+            | "WITH"
+            | "SHOW"
+            | "PRAGMA"
+            | "EXPLAIN"
+            | "DESCRIBE"
+            | "DESC"
+            | "VALUES"
+            | "TABLE"
     )
 }
 
@@ -1321,7 +1660,8 @@ fn is_lost_connection(err: &sqlx::Error) -> bool {
                 }
             }
             db.code().is_some_and(|code| {
-                code.starts_with("08") || matches!(code.as_ref(), "57P01" | "57P02" | "57P03" | "57P05")
+                code.starts_with("08")
+                    || matches!(code.as_ref(), "57P01" | "57P02" | "57P03" | "57P05")
             })
         }
         _ => false,
@@ -1377,7 +1717,9 @@ pub fn text_at(values: &[Option<String>], index: usize) -> String {
 }
 
 fn find_ignore_case(haystack: &str, needle: &str) -> Option<usize> {
-    haystack.to_ascii_lowercase().find(&needle.to_ascii_lowercase())
+    haystack
+        .to_ascii_lowercase()
+        .find(&needle.to_ascii_lowercase())
 }
 
 /**
@@ -1469,11 +1811,19 @@ pub fn index_definitions(driver: Driver, output: &RawOutput) -> Vec<IndexDefinit
 }
 
 /** Swaps the name, uniqueness, and column list in a CREATE INDEX statement, keeping the rest. */
-fn rebuild_index_sql(current: &IndexDefinition, name_sql: &str, unique: bool, columns: Option<&str>) -> Result<String, String> {
+fn rebuild_index_sql(
+    current: &IndexDefinition,
+    name_sql: &str,
+    unique: bool,
+    columns: Option<&str>,
+) -> Result<String, String> {
     let definition = current.definition.as_str();
     let on = find_ignore_case(definition, " ON ");
     let (Some(on), Some((start, end))) = (on, index_column_span(definition)) else {
-        return Err(format!("Recon couldn't read the definition of index {}. Change it with SQL instead.", current.name));
+        return Err(format!(
+            "Recon couldn't read the definition of index {}. Change it with SQL instead.",
+            current.name
+        ));
     };
     let columns = columns.unwrap_or(&definition[start..end]);
     Ok(format!(
@@ -1492,16 +1842,31 @@ pub fn index_statements(
     change: &IndexChange,
     current: Option<&IndexDefinition>,
 ) -> Result<Vec<EditStatement>, String> {
-    if change.name.as_deref().is_some_and(|name| name.trim().is_empty()) {
+    if change
+        .name
+        .as_deref()
+        .is_some_and(|name| name.trim().is_empty())
+    {
         return Err(format!("Index {} needs a name.", change.index));
     }
-    if change.columns.as_deref().is_some_and(|columns| columns.trim().is_empty()) {
+    if change
+        .columns
+        .as_deref()
+        .is_some_and(|columns| columns.trim().is_empty())
+    {
         return Err(format!("Index {} needs at least one column.", change.index));
     }
-    let current = current
-        .ok_or_else(|| format!("Index {} no longer exists on {table}. Reload and try again.", change.index))?;
+    let current = current.ok_or_else(|| {
+        format!(
+            "Index {} no longer exists on {table}. Reload and try again.",
+            change.index
+        )
+    })?;
     if current.primary {
-        return Err(format!("{} is the primary key, which Recon can't change yet.", change.index));
+        return Err(format!(
+            "{} is the primary key, which Recon can't change yet.",
+            change.index
+        ));
     }
     let dialect = dialect(driver);
     let statement = |sql: String| EditStatement::schema(table, &change.index, sql);
@@ -1512,11 +1877,16 @@ pub fn index_statements(
     match driver {
         Driver::Mysql => {
             if change.only_renames() {
-                return Ok(vec![statement(format!("ALTER TABLE {table} RENAME INDEX {old} TO {new}"))]);
+                return Ok(vec![statement(format!(
+                    "ALTER TABLE {table} RENAME INDEX {old} TO {new}"
+                ))]);
             }
             let columns = change.columns.as_deref().unwrap_or(&current.columns).trim();
             if columns.is_empty() {
-                return Err(format!("Index {} uses expressions, so change it with SQL instead.", current.name));
+                return Err(format!(
+                    "Index {} uses expressions, so change it with SQL instead.",
+                    current.name
+                ));
             }
             let kind = match current.index_type.to_ascii_uppercase().as_str() {
                 _ if unique => "UNIQUE INDEX",
@@ -1527,7 +1897,10 @@ pub fn index_statements(
             let comment = if current.comment.is_empty() {
                 String::new()
             } else {
-                format!(" COMMENT {}", quote_literal(&current.comment.replace('\\', "\\\\")))
+                format!(
+                    " COMMENT {}",
+                    quote_literal(&current.comment.replace('\\', "\\\\"))
+                )
             };
             Ok(vec![statement(format!(
                 "ALTER TABLE {table} DROP INDEX {old}, ADD {kind} {new} ({columns}){comment}"
@@ -1536,7 +1909,9 @@ pub fn index_statements(
         Driver::Postgres => {
             let qualified_old = dialect.qualified(namespace, &current.name);
             if change.only_renames() {
-                return Ok(vec![statement(format!("ALTER INDEX {qualified_old} RENAME TO {new}"))]);
+                return Ok(vec![statement(format!(
+                    "ALTER INDEX {qualified_old} RENAME TO {new}"
+                ))]);
             }
             if current.constraint {
                 return Err(format!(
@@ -1545,7 +1920,10 @@ pub fn index_statements(
                 ));
             }
             let create = rebuild_index_sql(current, &new, unique, change.columns.as_deref())?;
-            Ok(vec![statement(format!("DROP INDEX {qualified_old}")), statement(create)])
+            Ok(vec![
+                statement(format!("DROP INDEX {qualified_old}")),
+                statement(create),
+            ])
         }
         Driver::Sqlite => {
             if current.constraint || current.definition.is_empty() {
@@ -1554,9 +1932,17 @@ pub fn index_statements(
                     current.name
                 ));
             }
-            let create = rebuild_index_sql(current, &dialect.qualified(namespace, new_name), unique, change.columns.as_deref())?;
+            let create = rebuild_index_sql(
+                current,
+                &dialect.qualified(namespace, new_name),
+                unique,
+                change.columns.as_deref(),
+            )?;
             Ok(vec![
-                statement(format!("DROP INDEX {}", dialect.qualified(namespace, &current.name))),
+                statement(format!(
+                    "DROP INDEX {}",
+                    dialect.qualified(namespace, &current.name)
+                )),
                 statement(create),
             ])
         }
@@ -1621,13 +2007,20 @@ mod tests {
 
     #[test]
     fn flags_dropped_connections_but_not_statement_errors() {
-        let broken = sqlx::Error::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken pipe"));
+        let broken = sqlx::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "broken pipe",
+        ));
         let message = describe_error(broken);
         assert!(is_connection_lost(&message), "{message}");
         assert!(message.contains("broken pipe"));
         assert!(is_connection_lost(&describe_error(sqlx::Error::PoolClosed)));
-        assert!(!is_connection_lost(&describe_error(sqlx::Error::RowNotFound)));
-        assert!(!is_connection_lost(&describe_error(sqlx::Error::PoolTimedOut)));
+        assert!(!is_connection_lost(&describe_error(
+            sqlx::Error::RowNotFound
+        )));
+        assert!(!is_connection_lost(&describe_error(
+            sqlx::Error::PoolTimedOut
+        )));
     }
 
     #[test]
@@ -1640,7 +2033,9 @@ mod tests {
     #[test]
     fn extracts_index_columns() {
         assert_eq!(
-            index_columns_from_definition("CREATE UNIQUE INDEX users_email ON public.users USING btree (email, lower(name))"),
+            index_columns_from_definition(
+                "CREATE UNIQUE INDEX users_email ON public.users USING btree (email, lower(name))"
+            ),
             "email, lower(name)"
         );
     }
@@ -1693,6 +2088,34 @@ mod tests {
         assert!(update_statement(Driver::Sqlite, "\"users\"", &update).is_err());
     }
 
+    #[test]
+    fn builds_deletes_by_primary_key() {
+        let delete: RowDelete = serde_json::from_value(serde_json::json!({
+            "key": [{ "column": "tenant", "value": "o'b" }, { "column": "id", "value": 7 }],
+        }))
+        .unwrap();
+        let mysql = delete_statement(Driver::Mysql, "`app`.`users`", &delete).unwrap();
+        assert_eq!(
+            mysql.sql,
+            "DELETE FROM `app`.`users` WHERE `tenant` = ? AND `id` = ?"
+        );
+        assert_eq!(
+            mysql.params,
+            vec![EditValue::Text("o'b".into()), EditValue::Int(7)]
+        );
+        assert_eq!(mysql.label, "tenant = 'o''b', id = 7");
+        assert!(mysql.expect_one_row);
+        let postgres = delete_statement(Driver::Postgres, "\"users\"", &delete).unwrap();
+        assert_eq!(
+            postgres.sql,
+            "DELETE FROM \"users\" WHERE \"tenant\" = E'o''b' AND \"id\" = E'7'"
+        );
+        assert!(postgres.params.is_empty());
+        assert!(
+            delete_statement(Driver::Sqlite, "\"users\"", &RowDelete { key: Vec::new() }).is_err()
+        );
+    }
+
     fn column_change(value: serde_json::Value) -> ColumnChange {
         serde_json::from_value(value).unwrap()
     }
@@ -1739,7 +2162,10 @@ mod tests {
     fn only_renames_sqlite_columns() {
         let rename = column_change(serde_json::json!({ "column": "a", "name": "b" }));
         let statements = alter_statements(Driver::Sqlite, "\"t\"", &rename, None, None).unwrap();
-        assert_eq!(statements[0].sql, "ALTER TABLE \"t\" RENAME COLUMN \"a\" TO \"b\"");
+        assert_eq!(
+            statements[0].sql,
+            "ALTER TABLE \"t\" RENAME COLUMN \"a\" TO \"b\""
+        );
         assert!(!statements[0].expect_one_row);
         let retype = column_change(serde_json::json!({ "column": "a", "dataType": "INTEGER" }));
         assert!(alter_statements(Driver::Sqlite, "\"t\"", &retype, None, None).is_err());
@@ -1752,7 +2178,10 @@ mod tests {
             serde_json::json!({ "column": "a", "dataType": "" }),
             serde_json::json!({ "column": "a", "defaultValue": "" }),
         ] {
-            assert!(alter_statements(Driver::Postgres, "\"t\"", &column_change(value), None, None).is_err());
+            assert!(
+                alter_statements(Driver::Postgres, "\"t\"", &column_change(value), None, None)
+                    .is_err()
+            );
         }
     }
 
@@ -1769,7 +2198,8 @@ mod tests {
             generated: false,
         };
         let change = column_change(serde_json::json!({ "column": "title", "nullable": false }));
-        let sql = alter_statements(Driver::Mysql, "`app`.`posts`", &change, Some(&current), None).unwrap();
+        let sql = alter_statements(Driver::Mysql, "`app`.`posts`", &change, Some(&current), None)
+            .unwrap();
         assert_eq!(
             sql[0].sql,
             "ALTER TABLE `app`.`posts` CHANGE COLUMN `title` `title` varchar(191) COLLATE utf8mb4_unicode_ci \
@@ -1789,8 +2219,13 @@ mod tests {
              COMMENT 'shown in ''lists'''"
         );
 
-        let generated = mysql::ColumnDefinition { generated: true, ..current };
-        assert!(alter_statements(Driver::Mysql, "`posts`", &change, Some(&generated), None).is_err());
+        let generated = mysql::ColumnDefinition {
+            generated: true,
+            ..current
+        };
+        assert!(
+            alter_statements(Driver::Mysql, "`posts`", &change, Some(&generated), None).is_err()
+        );
         let rename = column_change(serde_json::json!({ "column": "title", "name": "t" }));
         assert_eq!(
             alter_statements(Driver::Mysql, "`posts`", &rename, Some(&generated), None).unwrap()[0].sql,
@@ -1826,8 +2261,17 @@ mod tests {
         serde_json::from_value(value).unwrap()
     }
 
-    fn index_sql(driver: Driver, table: &str, change: &IndexChange, current: &IndexDefinition) -> Vec<String> {
-        let namespace = if driver == Driver::Sqlite { "main" } else { "public" };
+    fn index_sql(
+        driver: Driver,
+        table: &str,
+        change: &IndexChange,
+        current: &IndexDefinition,
+    ) -> Vec<String> {
+        let namespace = if driver == Driver::Sqlite {
+            "main"
+        } else {
+            "public"
+        };
         index_statements(driver, namespace, table, change, Some(current))
             .unwrap()
             .into_iter()
@@ -1855,14 +2299,22 @@ mod tests {
                 "CREATE UNIQUE INDEX \"users_email_name\" ON public.users USING btree (email, name) WHERE (active)",
             ]
         );
-        let rename = index_change(serde_json::json!({ "index": "users_email", "name": "by_email" }));
+        let rename =
+            index_change(serde_json::json!({ "index": "users_email", "name": "by_email" }));
         assert_eq!(
             index_sql(Driver::Postgres, "\"public\".\"users\"", &rename, &current),
             vec!["ALTER INDEX \"public\".\"users_email\" RENAME TO \"by_email\""]
         );
         let constrained = index(&current.definition, true, true);
         let retype = index_change(serde_json::json!({ "index": "users_email", "unique": false }));
-        assert!(index_statements(Driver::Postgres, "public", "\"users\"", &retype, Some(&constrained)).is_err());
+        assert!(index_statements(
+            Driver::Postgres,
+            "public",
+            "\"users\"",
+            &retype,
+            Some(&constrained)
+        )
+        .is_err());
     }
 
     #[test]
@@ -1871,7 +2323,8 @@ mod tests {
         current.columns = "title(20), created_at DESC".into();
         current.index_type = "FULLTEXT".into();
         current.comment = "for 'search'".into();
-        let rename = index_change(serde_json::json!({ "index": "users_email", "name": "by_title" }));
+        let rename =
+            index_change(serde_json::json!({ "index": "users_email", "name": "by_title" }));
         assert_eq!(
             index_sql(Driver::Mysql, "`posts`", &rename, &current),
             vec!["ALTER TABLE `posts` RENAME INDEX `users_email` TO `by_title`"]
@@ -1884,7 +2337,10 @@ mod tests {
                  (title(20), created_at DESC) COMMENT 'for ''search'''"
             ]
         );
-        let primary = IndexDefinition { primary: true, ..current };
+        let primary = IndexDefinition {
+            primary: true,
+            ..current
+        };
         assert!(index_statements(Driver::Mysql, "", "`posts`", &rename, Some(&primary)).is_err());
     }
 
@@ -1932,8 +2388,17 @@ mod tests {
         let current = index_definitions(Driver::Sqlite, &pool.run(&sql, 100).await.unwrap());
         let find = |name: &str| current.iter().find(|index| index.name == name).unwrap();
         assert!(find("sqlite_autoindex_users_1").constraint);
-        let change = index_change(serde_json::json!({ "index": "users_name", "name": "by_name", "unique": true }));
-        let statements = index_statements(Driver::Sqlite, "main", "\"users\"", &change, Some(find("users_name"))).unwrap();
+        let change = index_change(
+            serde_json::json!({ "index": "users_name", "name": "by_name", "unique": true }),
+        );
+        let statements = index_statements(
+            Driver::Sqlite,
+            "main",
+            "\"users\"",
+            &change,
+            Some(find("users_name")),
+        )
+        .unwrap();
         assert_eq!(
             statements[1].sql,
             "CREATE UNIQUE INDEX \"main\".\"by_name\" on users (name collate nocase) where active = 1"
@@ -1943,8 +2408,16 @@ mod tests {
         let renamed = after.iter().find(|index| index.name == "by_name").unwrap();
         assert!(renamed.unique);
         assert!(!after.iter().any(|index| index.name == "users_name"));
-        let auto = index_change(serde_json::json!({ "index": "sqlite_autoindex_users_1", "name": "x" }));
-        assert!(index_statements(Driver::Sqlite, "main", "\"users\"", &auto, Some(find("sqlite_autoindex_users_1"))).is_err());
+        let auto =
+            index_change(serde_json::json!({ "index": "sqlite_autoindex_users_1", "name": "x" }));
+        assert!(index_statements(
+            Driver::Sqlite,
+            "main",
+            "\"users\"",
+            &auto,
+            Some(find("sqlite_autoindex_users_1"))
+        )
+        .is_err());
     }
 
     #[test]
@@ -1954,20 +2427,37 @@ mod tests {
         }))
         .unwrap();
         let mysql = insert_statement(Driver::Mysql, "`users`", &insert, false);
-        assert_eq!(mysql.sql, "INSERT INTO `users` (`name`, `note`) VALUES (?, NULL)");
-        assert_eq!(mysql.display, "INSERT INTO `users` (`name`, `note`) VALUES ('o''brien', NULL)");
+        assert_eq!(
+            mysql.sql,
+            "INSERT INTO `users` (`name`, `note`) VALUES (?, NULL)"
+        );
+        assert_eq!(
+            mysql.display,
+            "INSERT INTO `users` (`name`, `note`) VALUES ('o''brien', NULL)"
+        );
         assert!(mysql.expect_one_row);
         let postgres = insert_statement(Driver::Postgres, "\"users\"", &insert, false);
-        assert_eq!(postgres.sql, "INSERT INTO \"users\" (\"name\", \"note\") VALUES (E'o''brien', NULL)");
+        assert_eq!(
+            postgres.sql,
+            "INSERT INTO \"users\" (\"name\", \"note\") VALUES (E'o''brien', NULL)"
+        );
         let overriding = insert_statement(Driver::Postgres, "\"users\"", &insert, true);
         assert_eq!(
             overriding.sql,
             "INSERT INTO \"users\" (\"name\", \"note\") OVERRIDING SYSTEM VALUE VALUES (E'o''brien', NULL)"
         );
-        assert!(!insert_statement(Driver::Mysql, "`users`", &insert, true).sql.contains("OVERRIDING"));
+        assert!(!insert_statement(Driver::Mysql, "`users`", &insert, true)
+            .sql
+            .contains("OVERRIDING"));
         let empty = RowInsert { values: Vec::new() };
-        assert_eq!(insert_statement(Driver::Mysql, "`t`", &empty, false).sql, "INSERT INTO `t` () VALUES ()");
-        assert_eq!(insert_statement(Driver::Sqlite, "\"t\"", &empty, false).sql, "INSERT INTO \"t\" DEFAULT VALUES");
+        assert_eq!(
+            insert_statement(Driver::Mysql, "`t`", &empty, false).sql,
+            "INSERT INTO `t` () VALUES ()"
+        );
+        assert_eq!(
+            insert_statement(Driver::Sqlite, "\"t\"", &empty, false).sql,
+            "INSERT INTO \"t\" DEFAULT VALUES"
+        );
     }
 
     #[test]
@@ -1991,28 +2481,56 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(
-            add_column_statement(Driver::Mysql, "`posts`", &column).unwrap().sql,
+            add_column_statement(Driver::Mysql, "`posts`", &column)
+                .unwrap()
+                .sql,
             "ALTER TABLE `posts` ADD COLUMN `status` varchar(20) NOT NULL DEFAULT 'new'"
         );
-        let bare: NewColumn = serde_json::from_value(serde_json::json!({ "name": "x", "dataType": "int" })).unwrap();
+        let bare: NewColumn =
+            serde_json::from_value(serde_json::json!({ "name": "x", "dataType": "int" })).unwrap();
         assert_eq!(
-            add_column_statement(Driver::Postgres, "\"t\"", &bare).unwrap().sql,
+            add_column_statement(Driver::Postgres, "\"t\"", &bare)
+                .unwrap()
+                .sql,
             "ALTER TABLE \"t\" ADD COLUMN \"x\" int"
         );
-        let untyped: NewColumn = serde_json::from_value(serde_json::json!({ "name": "x", "dataType": " " })).unwrap();
+        let untyped: NewColumn =
+            serde_json::from_value(serde_json::json!({ "name": "x", "dataType": " " })).unwrap();
         assert!(add_column_statement(Driver::Sqlite, "\"t\"", &untyped).is_err());
 
-        let index = NewIndex { name: "by_status".into(), columns: "status, id".into(), unique: true };
+        let index = NewIndex {
+            name: "by_status".into(),
+            columns: "status, id".into(),
+            unique: true,
+        };
         assert_eq!(
-            create_index_statement(Driver::Mysql, "app", "`app`.`posts`", "posts", &index).unwrap().sql,
+            create_index_statement(Driver::Mysql, "app", "`app`.`posts`", "posts", &index)
+                .unwrap()
+                .sql,
             "ALTER TABLE `app`.`posts` ADD UNIQUE INDEX `by_status` (status, id)"
         );
         assert_eq!(
-            create_index_statement(Driver::Postgres, "public", "\"public\".\"posts\"", "posts", &index).unwrap().sql,
+            create_index_statement(
+                Driver::Postgres,
+                "public",
+                "\"public\".\"posts\"",
+                "posts",
+                &index
+            )
+            .unwrap()
+            .sql,
             "CREATE UNIQUE INDEX \"by_status\" ON \"public\".\"posts\" (status, id)"
         );
         assert_eq!(
-            create_index_statement(Driver::Sqlite, "main", "\"main\".\"posts\"", "posts", &index).unwrap().sql,
+            create_index_statement(
+                Driver::Sqlite,
+                "main",
+                "\"main\".\"posts\"",
+                "posts",
+                &index
+            )
+            .unwrap()
+            .sql,
             "CREATE UNIQUE INDEX \"main\".\"by_status\" ON \"posts\" (status, id)"
         );
     }
@@ -2025,9 +2543,14 @@ mod tests {
             .await
             .unwrap();
         let pool = Pool::Sqlite(pool);
-        pool.run("CREATE TABLE posts (id INTEGER PRIMARY KEY, title TEXT)", 0).await.unwrap();
+        pool.run("CREATE TABLE posts (id INTEGER PRIMARY KEY, title TEXT)", 0)
+            .await
+            .unwrap();
         let insert = RowInsert {
-            values: vec![CellEdit { column: "title".into(), value: EditValue::Text("hello".into()) }],
+            values: vec![CellEdit {
+                column: "title".into(),
+                value: EditValue::Text("hello".into()),
+            }],
         };
         let column = NewColumn {
             name: "status".into(),
@@ -2035,20 +2558,117 @@ mod tests {
             nullable: false,
             default_value: Some("'draft'".into()),
         };
-        let index = NewIndex { name: "by_status".into(), columns: "status".into(), unique: false };
+        let index = NewIndex {
+            name: "by_status".into(),
+            columns: "status".into(),
+            unique: false,
+        };
         let statements = vec![
             insert_statement(Driver::Sqlite, "\"main\".\"posts\"", &insert, false),
             add_column_statement(Driver::Sqlite, "\"main\".\"posts\"", &column).unwrap(),
-            create_index_statement(Driver::Sqlite, "main", "\"main\".\"posts\"", "posts", &index).unwrap(),
+            create_index_statement(
+                Driver::Sqlite,
+                "main",
+                "\"main\".\"posts\"",
+                "posts",
+                &index,
+            )
+            .unwrap(),
         ];
         pool.apply(&statements).await.unwrap();
-        let saved = pool.run("SELECT title, status FROM posts", 10).await.unwrap();
-        assert_eq!(saved.rows[0], vec![CellValue::Text("hello".into()), CellValue::Text("draft".into())]);
+        let saved = pool
+            .run("SELECT title, status FROM posts", 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            saved.rows[0],
+            vec![
+                CellValue::Text("hello".into()),
+                CellValue::Text("draft".into())
+            ]
+        );
         let indexes = pool
-            .run(&dialect(Driver::Sqlite).index_definitions_sql("main", "posts"), 10)
+            .run(
+                &dialect(Driver::Sqlite).index_definitions_sql("main", "posts"),
+                10,
+            )
             .await
             .unwrap();
         assert_eq!(indexes.text_rows()[0][0].as_deref(), Some("by_status"));
+    }
+
+    #[tokio::test]
+    async fn writes_the_current_time_inline() {
+        let value: EditValue = serde_json::from_str(r#"{"now":"datetime"}"#).unwrap();
+        assert_eq!(value, EditValue::Now(NowKind::Datetime));
+        assert!(serde_json::from_str::<EditValue>(r#"{"now":"later"}"#).is_err());
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let pool = Pool::Sqlite(pool);
+        pool.run(
+            "CREATE TABLE posts (id INTEGER PRIMARY KEY, day DATE, at DATETIME)",
+            0,
+        )
+        .await
+        .unwrap();
+        let insert = RowInsert {
+            values: vec![
+                CellEdit {
+                    column: "id".into(),
+                    value: EditValue::Int(1),
+                },
+                CellEdit {
+                    column: "day".into(),
+                    value: EditValue::Now(NowKind::Date),
+                },
+            ],
+        };
+        let insert = insert_statement(Driver::Sqlite, "\"posts\"", &insert, false);
+        assert_eq!(
+            insert.sql,
+            "INSERT INTO \"posts\" (\"id\", \"day\") VALUES (?, CURRENT_DATE)"
+        );
+        assert_eq!(insert.params, vec![EditValue::Int(1)]);
+        let update = RowUpdate {
+            key: vec![CellEdit {
+                column: "id".into(),
+                value: EditValue::Int(1),
+            }],
+            changes: vec![CellEdit {
+                column: "at".into(),
+                value: EditValue::Now(NowKind::Datetime),
+            }],
+        };
+        let update = update_statement(Driver::Postgres, "\"posts\"", &update).unwrap();
+        assert_eq!(
+            update.sql,
+            "UPDATE \"posts\" SET \"at\" = CURRENT_TIMESTAMP WHERE \"id\" = E'1'"
+        );
+        let update = RowUpdate {
+            key: vec![CellEdit {
+                column: "id".into(),
+                value: EditValue::Int(1),
+            }],
+            changes: vec![CellEdit {
+                column: "at".into(),
+                value: EditValue::Now(NowKind::Datetime),
+            }],
+        };
+        pool.apply(&[
+            insert,
+            update_statement(Driver::Sqlite, "\"posts\"", &update).unwrap(),
+        ])
+        .await
+        .unwrap();
+        let saved = pool
+            .run("SELECT length(day), length(at) FROM posts", 10)
+            .await
+            .unwrap();
+        assert_eq!(saved.rows[0], vec![CellValue::Int(10), CellValue::Int(19)]);
     }
 
     #[tokio::test]
@@ -2059,17 +2679,30 @@ mod tests {
             .await
             .unwrap();
         let pool = Pool::Sqlite(pool);
-        pool.run("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)", 0).await.unwrap();
-        pool.run("INSERT INTO users VALUES (1, 'ada')", 0).await.unwrap();
+        pool.run("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)", 0)
+            .await
+            .unwrap();
+        pool.run("INSERT INTO users VALUES (1, 'ada')", 0)
+            .await
+            .unwrap();
         let update = RowUpdate {
-            key: vec![CellEdit { column: "id".into(), value: EditValue::Int(1) }],
-            changes: vec![CellEdit { column: "name".into(), value: EditValue::Text("grace".into()) }],
+            key: vec![CellEdit {
+                column: "id".into(),
+                value: EditValue::Int(1),
+            }],
+            changes: vec![CellEdit {
+                column: "name".into(),
+                value: EditValue::Text("grace".into()),
+            }],
         };
         let mut statements = vec![update_statement(Driver::Sqlite, "\"users\"", &update).unwrap()];
         let rename = column_change(serde_json::json!({ "column": "name", "name": "full_name" }));
         statements.extend(alter_statements(Driver::Sqlite, "\"users\"", &rename, None, None).unwrap());
         pool.apply(&statements).await.unwrap();
-        let saved = pool.run("SELECT full_name FROM users WHERE id = 1", 1).await.unwrap();
+        let saved = pool
+            .run("SELECT full_name FROM users WHERE id = 1", 1)
+            .await
+            .unwrap();
         assert_eq!(saved.rows[0][0], CellValue::Text("grace".into()));
     }
 
@@ -2081,16 +2714,30 @@ mod tests {
             .await
             .unwrap();
         let pool = Pool::Sqlite(pool);
-        pool.run("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)", 0)
+        pool.run(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)",
+            0,
+        )
+        .await
+        .unwrap();
+        pool.run("INSERT INTO users VALUES (1, 'ada', 1), (2, 'bob', 2)", 0)
             .await
             .unwrap();
-        pool.run("INSERT INTO users VALUES (1, 'ada', 1), (2, 'bob', 2)", 0).await.unwrap();
 
         let update = |id: i64, name: &str| RowUpdate {
-            key: vec![CellEdit { column: "id".into(), value: EditValue::Int(id) }],
+            key: vec![CellEdit {
+                column: "id".into(),
+                value: EditValue::Int(id),
+            }],
             changes: vec![
-                CellEdit { column: "name".into(), value: EditValue::Text(name.into()) },
-                CellEdit { column: "score".into(), value: EditValue::Text("42".into()) },
+                CellEdit {
+                    column: "name".into(),
+                    value: EditValue::Text(name.into()),
+                },
+                CellEdit {
+                    column: "score".into(),
+                    value: EditValue::Text("42".into()),
+                },
             ],
         };
         let statements = [update(1, "ada'"), update(99, "ghost")]
@@ -2099,12 +2746,76 @@ mod tests {
             .collect::<Vec<_>>();
         let error = pool.apply(&statements).await.unwrap_err();
         assert!(error.contains("id = 99"), "{error}");
-        let unchanged = pool.run("SELECT name FROM users WHERE id = 1", 1).await.unwrap();
+        let unchanged = pool
+            .run("SELECT name FROM users WHERE id = 1", 1)
+            .await
+            .unwrap();
         assert_eq!(unchanged.rows[0][0], CellValue::Text("ada".into()));
 
         pool.apply(&statements[..1]).await.unwrap();
-        let saved = pool.run("SELECT name, score FROM users WHERE id = 1", 1).await.unwrap();
-        assert_eq!(saved.rows[0], vec![CellValue::Text("ada'".into()), CellValue::Int(42)]);
+        let saved = pool
+            .run("SELECT name, score FROM users WHERE id = 1", 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            saved.rows[0],
+            vec![CellValue::Text("ada'".into()), CellValue::Int(42)]
+        );
+    }
+
+    #[tokio::test]
+    async fn deletes_rows_before_updates_in_one_transaction() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let pool = Pool::Sqlite(pool);
+        pool.run(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT UNIQUE)",
+            0,
+        )
+        .await
+        .unwrap();
+        pool.run("INSERT INTO users VALUES (1, 'a@x'), (2, 'b@x')", 0)
+            .await
+            .unwrap();
+        let delete = |id: i64| RowDelete {
+            key: vec![CellEdit {
+                column: "id".into(),
+                value: EditValue::Int(id),
+            }],
+        };
+        let update = RowUpdate {
+            key: vec![CellEdit {
+                column: "id".into(),
+                value: EditValue::Int(2),
+            }],
+            changes: vec![CellEdit {
+                column: "email".into(),
+                value: EditValue::Text("a@x".into()),
+            }],
+        };
+
+        let missing = [
+            delete_statement(Driver::Sqlite, "\"users\"", &delete(1)).unwrap(),
+            delete_statement(Driver::Sqlite, "\"users\"", &delete(99)).unwrap(),
+        ];
+        let error = pool.apply(&missing).await.unwrap_err();
+        assert!(error.contains("id = 99"), "{error}");
+        let kept = pool.run("SELECT COUNT(*) FROM users", 1).await.unwrap();
+        assert_eq!(kept.rows[0][0], CellValue::Int(2));
+
+        let statements = [
+            delete_statement(Driver::Sqlite, "\"users\"", &delete(1)).unwrap(),
+            update_statement(Driver::Sqlite, "\"users\"", &update).unwrap(),
+        ];
+        pool.apply(&statements).await.unwrap();
+        let saved = pool.run("SELECT id, email FROM users", 10).await.unwrap();
+        assert_eq!(
+            saved.rows,
+            vec![vec![CellValue::Int(2), CellValue::Text("a@x".into())]]
+        );
     }
 
     #[tokio::test]
@@ -2123,28 +2834,49 @@ mod tests {
         ] {
             pool.run(sql, 0).await.unwrap();
         }
-        let classes: HashMap<_, _> = [("id", "INTEGER"), ("status", "TEXT"), ("amount", "REAL"), ("placed", "DATETIME"), ("note", "TEXT")]
-            .iter()
-            .map(|(name, data_type)| (name.to_string(), filter::classify(Driver::Sqlite, data_type)))
-            .collect();
+        let classes: HashMap<_, _> = [
+            ("id", "INTEGER"),
+            ("status", "TEXT"),
+            ("amount", "REAL"),
+            ("placed", "DATETIME"),
+            ("note", "TEXT"),
+        ]
+        .iter()
+        .map(|(name, data_type)| {
+            (
+                name.to_string(),
+                filter::classify(Driver::Sqlite, data_type),
+            )
+        })
+        .collect();
         let ids = |root: serde_json::Value| {
             let pool = &pool;
             let classes = &classes;
             async move {
                 let root: filter::FilterNode = serde_json::from_value(root).unwrap();
-                let ctx = filter::FilterContext { driver: Driver::Sqlite, columns: classes, utc_offset: None };
+                let ctx = filter::FilterContext {
+                    driver: Driver::Sqlite,
+                    columns: classes,
+                    utc_offset: None,
+                };
                 let mut statement = filter::Fragment::new("SELECT id FROM \"orders\" WHERE ");
                 statement.append(filter::compile(&ctx, &root).unwrap().unwrap());
                 statement.push_sql(" ORDER BY id");
                 let output = pool.run_statement(&statement, 100).await.unwrap();
-                output.rows.iter().map(|row| row[0].as_i64().unwrap()).collect::<Vec<_>>()
+                output
+                    .rows
+                    .iter()
+                    .map(|row| row[0].as_i64().unwrap())
+                    .collect::<Vec<_>>()
             }
         };
         assert_eq!(
-            ids(serde_json::json!({ "kind": "group", "match": "all", "children": [
-                { "kind": "condition", "column": "status", "op": "eq", "values": ["Active"] },
-                { "kind": "condition", "column": "amount", "op": "gt", "values": ["100"] }
-            ]}))
+            ids(
+                serde_json::json!({ "kind": "group", "match": "all", "children": [
+                    { "kind": "condition", "column": "status", "op": "eq", "values": ["Active"] },
+                    { "kind": "condition", "column": "amount", "op": "gt", "values": ["100"] }
+                ]})
+            )
             .await,
             vec![2]
         );
@@ -2184,27 +2916,49 @@ mod tests {
         ] {
             pool.run(sql, 0).await.unwrap();
         }
-        let classes: HashMap<_, _> = [("note".to_string(), filter::classify(Driver::Sqlite, "TEXT"))].into();
+        let classes: HashMap<_, _> =
+            [("note".to_string(), filter::classify(Driver::Sqlite, "TEXT"))].into();
         let ids = |root: serde_json::Value| {
             let (pool, classes) = (&pool, &classes);
             async move {
                 let root: filter::FilterNode = serde_json::from_value(root).unwrap();
-                let ctx = filter::FilterContext { driver: Driver::Sqlite, columns: classes, utc_offset: None };
+                let ctx = filter::FilterContext {
+                    driver: Driver::Sqlite,
+                    columns: classes,
+                    utc_offset: None,
+                };
                 let mut statement = filter::Fragment::new("SELECT id FROM notes WHERE ");
                 statement.append(filter::compile(&ctx, &root).unwrap().unwrap());
                 statement.push_sql(" ORDER BY id");
                 let output = pool.run_statement(&statement, 10).await.unwrap();
-                output.rows.iter().map(|row| row[0].as_i64().unwrap()).collect::<Vec<_>>()
+                output
+                    .rows
+                    .iter()
+                    .map(|row| row[0].as_i64().unwrap())
+                    .collect::<Vec<_>>()
             }
         };
-        let condition = |op: &str, values: serde_json::Value| {
-            serde_json::json!({ "kind": "condition", "column": "note", "op": op, "values": values })
-        };
-        assert_eq!(ids(condition("isEmpty", serde_json::json!([]))).await, vec![1]);
-        assert_eq!(ids(condition("isNotEmpty", serde_json::json!([]))).await, vec![2, 4]);
-        assert_eq!(ids(condition("eq", serde_json::json!([" "]))).await, vec![2]);
-        assert_eq!(ids(condition("contains", serde_json::json!([" "]))).await, vec![2, 4]);
-        assert_eq!(ids(condition("isNull", serde_json::json!([]))).await, vec![3]);
+        let condition = |op: &str, values: serde_json::Value| serde_json::json!({ "kind": "condition", "column": "note", "op": op, "values": values });
+        assert_eq!(
+            ids(condition("isEmpty", serde_json::json!([]))).await,
+            vec![1]
+        );
+        assert_eq!(
+            ids(condition("isNotEmpty", serde_json::json!([]))).await,
+            vec![2, 4]
+        );
+        assert_eq!(
+            ids(condition("eq", serde_json::json!([" "]))).await,
+            vec![2]
+        );
+        assert_eq!(
+            ids(condition("contains", serde_json::json!([" "]))).await,
+            vec![2, 4]
+        );
+        assert_eq!(
+            ids(condition("isNull", serde_json::json!([]))).await,
+            vec![3]
+        );
     }
 
     #[tokio::test]
@@ -2230,7 +2984,14 @@ mod tests {
         keys.sort_by(|a, b| a.columns.cmp(&b.columns));
         let summary: Vec<_> = keys
             .iter()
-            .map(|key| (key.columns.join(","), key.ref_namespace.as_str(), key.ref_table.as_str(), key.ref_columns.join(",")))
+            .map(|key| {
+                (
+                    key.columns.join(","),
+                    key.ref_namespace.as_str(),
+                    key.ref_table.as_str(),
+                    key.ref_columns.join(","),
+                )
+            })
             .collect();
         assert_eq!(
             summary,
@@ -2240,8 +3001,16 @@ mod tests {
                 ("editor".into(), "main", "users", "id".into()),
             ]
         );
-        let classes: HashMap<_, _> = [("id".to_string(), filter::classify(Driver::Sqlite, "INTEGER"))].into();
-        let ctx = filter::FilterContext { driver: Driver::Sqlite, columns: &classes, utc_offset: None };
+        let classes: HashMap<_, _> = [(
+            "id".to_string(),
+            filter::classify(Driver::Sqlite, "INTEGER"),
+        )]
+        .into();
+        let ctx = filter::FilterContext {
+            driver: Driver::Sqlite,
+            columns: &classes,
+            utc_offset: None,
+        };
         let follow = filter::FilterNode::all(vec![filter::FilterNode::condition(
             "id",
             filter::FilterOp::Eq,
@@ -2253,13 +3022,83 @@ mod tests {
         assert_eq!(found.rows, vec![vec![CellValue::Text("bob".into())]]);
     }
 
+    #[tokio::test]
+    async fn reads_sqlite_schema_diagram() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let pool = Pool::Sqlite(pool);
+        for sql in [
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)",
+            "CREATE TABLE slots (day TEXT, hour INT, PRIMARY KEY (day, hour))",
+            "CREATE TABLE posts (id INTEGER PRIMARY KEY, author INT REFERENCES users, \
+             day TEXT, hour INT, FOREIGN KEY (day, hour) REFERENCES slots (day, hour))",
+            "CREATE TABLE comments (id INTEGER PRIMARY KEY, post INT REFERENCES posts(id), \
+             author INT REFERENCES users(id))",
+        ] {
+            pool.run(sql, 0).await.unwrap();
+        }
+        let dialect = dialect(Driver::Sqlite);
+        let tables = diagram_tables(
+            &pool
+                .run(&dialect.diagram_columns_sql("main"), 1000)
+                .await
+                .unwrap(),
+        );
+        let names: Vec<_> = tables.iter().map(|table| table.name.as_str()).collect();
+        assert_eq!(names, vec!["comments", "posts", "slots", "users"]);
+        let slots = &tables[2];
+        assert_eq!(
+            slots
+                .columns
+                .iter()
+                .map(|column| (column.name.as_str(), column.primary_key))
+                .collect::<Vec<_>>(),
+            vec![("day", true), ("hour", true)]
+        );
+        assert_eq!(tables[3].columns[1].data_type, "TEXT");
+
+        let mut keys = schema_foreign_keys(
+            &pool
+                .run(&dialect.schema_foreign_keys_sql("main"), 1000)
+                .await
+                .unwrap(),
+        );
+        keys.sort_by(|a, b| (&a.table, &a.key.columns).cmp(&(&b.table, &b.key.columns)));
+        let summary: Vec<_> = keys
+            .iter()
+            .map(|key| {
+                (
+                    key.table.as_str(),
+                    key.key.columns.join(","),
+                    key.key.ref_table.as_str(),
+                    key.key.ref_columns.join(","),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("comments", "author".into(), "users", "id".into()),
+                ("comments", "post".into(), "posts", "id".into()),
+                ("posts", "author".into(), "users", "id".into()),
+                ("posts", "day,hour".into(), "slots", "day,hour".into()),
+            ]
+        );
+    }
+
     #[test]
     fn result_store_windows_and_drops_by_connection() {
         let store = ResultStore::default();
         let rows = (0..10).map(|n| vec![CellValue::Int(n)]).collect();
         let id = store.insert("c1", rows);
         let window = store.window(&id, 8, 5).unwrap();
-        assert_eq!(window, vec![vec![CellValue::Int(8)], vec![CellValue::Int(9)]]);
+        assert_eq!(
+            window,
+            vec![vec![CellValue::Int(8)], vec![CellValue::Int(9)]]
+        );
         store.remove_connection("c1");
         assert!(store.window(&id, 0, 1).is_err());
     }

@@ -3,6 +3,23 @@ export interface CellPosition {
   row: number;
   col: number;
 }
+
+export interface CellOption {
+  /** The text the cell gets. */
+  value: string;
+  /** Shown in the list instead of `value`. */
+  label?: string;
+}
+
+export interface CellOptions {
+  values: CellOption[];
+  /** Only these values make sense, so the current one starts highlighted. */
+  strict?: boolean;
+  /** The cell is a comma-separated list, and a pick fills in its last item. */
+  list?: boolean;
+  /** Listed only while the editor is empty, or when what's typed matches. */
+  whenEmpty?: boolean;
+}
 </script>
 
 <script setup lang="ts">
@@ -11,13 +28,17 @@ import { useVirtualizer } from "@tanstack/vue-virtual";
 import {
   cellCopyText,
   cellDisplay,
+  cellText,
   cellTitle,
+  copyText,
   initialColumnWidth,
   isBytes,
   isNumericColumn,
+  type CopyFormat,
 } from "../cells";
 import { useApp } from "../composables/useApp";
-import type { ColumnMeta, RowValues, SortDirection } from "../types";
+import { altKeyName } from "../platform";
+import type { Cell, ColumnMeta, RowValues, SortDirection } from "../types";
 
 const props = defineProps<{
   columns: ColumnMeta[];
@@ -30,16 +51,26 @@ const props = defineProps<{
   editableColumns?: boolean[];
   /** Overrides `editable` and `editableColumns` when set. */
   cellEditable?: (row: number, col: number) => boolean;
+  /** Values listed under a cell's editor while it's being edited. */
+  cellOptions?: (row: number, col: number) => CellOptions | null;
   /** Rows from this index on are new and numbered with a +. */
   newRowStart?: number;
   /** Per column, whether the database assigns the value in new rows. Tab skips these cells. */
   newRowAuto?: boolean[];
   creatable?: boolean;
   modified?: Map<number, Set<number>>;
+  /** Backspace on whole selected rows emits `deleteRows` instead of setting them to NULL. */
+  deletable?: boolean;
+  /** Rows marked for deletion on the next save. */
+  deletedRows?: Set<number>;
   /** Per column, the record a value points to (such as `users.id`), or null for plain columns. */
   links?: (string | null)[];
   /** Emits `cellMenu` and `headerMenu` on right-click instead of showing the default menu. */
   contextMenus?: boolean;
+  /** Cells that match the find bar, by row. */
+  matches?: Map<number, Set<number>>;
+  /** The match find is on. The grid selects it and scrolls it into view. */
+  currentMatch?: CellPosition | null;
 }>();
 
 const emit = defineEmits<{
@@ -47,9 +78,11 @@ const emit = defineEmits<{
   needRows: [start: number, end: number];
   edit: [row: number, col: number, text: string];
   setNull: [cells: CellPosition[]];
+  deleteRows: [rows: number[]];
   create: [];
   follow: [row: number, col: number, options?: { side?: boolean }];
   cellMenu: [row: number, col: number, event: MouseEvent];
+  rowMenu: [row: number, event: MouseEvent];
   headerMenu: [col: number, event: MouseEvent];
 }>();
 
@@ -58,6 +91,18 @@ function onCellContextMenu(event: MouseEvent, row: number, col: number) {
     event.preventDefault();
     emit("cellMenu", row, col, event);
   }
+}
+
+function onRowContextMenu(event: MouseEvent, row: number) {
+  if (props.contextMenus) {
+    event.preventDefault();
+    emit("rowMenu", row, event);
+  }
+}
+
+/** A right-click, including Control-click on macOS, opens a menu for the selection it lands in. */
+function isMenuClick(event: MouseEvent) {
+  return event.button === 2 || (event.button === 0 && event.ctrlKey);
 }
 
 function onHeaderContextMenu(event: MouseEvent, col: number) {
@@ -79,6 +124,166 @@ const focus = ref<CellPosition | null>(null);
 const editing = ref<CellPosition | null>(null);
 const draft = ref("");
 const initialDraft = ref("");
+const menuEl = ref<HTMLDivElement | null>(null);
+const menuOpen = ref(false);
+const menuFiltering = ref(false);
+const menuHighlight = ref(-1);
+const menuStyle = ref<Record<string, string> | null>(null);
+let editorEl: HTMLTextAreaElement | null = null;
+
+const MENU_MAX_HEIGHT = 240;
+
+const editOptions = computed(() => {
+  const position = editing.value;
+  return position ? (props.cellOptions?.(position.row, position.col) ?? null) : null;
+});
+
+function stripQuotes(text: string) {
+  return text.trim().replace(/^[`"[]|[`"\]]$/g, "").toLowerCase();
+}
+
+const menuItems = computed(() => {
+  const options = editOptions.value;
+  if (!options || !menuOpen.value || (options.whenEmpty && !menuFiltering.value && draft.value.trim())) {
+    return [];
+  }
+  const parts = options.list ? draft.value.split(",") : [draft.value];
+  const query = stripQuotes(parts[parts.length - 1] ?? "");
+  const chosen = new Set((menuFiltering.value ? parts.slice(0, -1) : parts).map(stripQuotes));
+  const label = (option: CellOption) => (option.label ?? option.value).toLowerCase();
+  const items = options.values.filter((option) => !chosen.has(label(option)) && !chosen.has(stripQuotes(option.value)));
+  if (!menuFiltering.value || !query) {
+    return items;
+  }
+  const rank = (option: CellOption) => {
+    const text = label(option);
+    return text === query ? 0 : text.startsWith(query) ? 1 : 2;
+  };
+  return items
+    .filter((option) => label(option).includes(query) || option.value.toLowerCase().includes(query))
+    .sort((a, b) => rank(a) - rank(b));
+});
+
+function openMenu(filtering: boolean) {
+  menuOpen.value = Boolean(editOptions.value);
+  menuFiltering.value = filtering;
+  resetHighlight();
+  void nextTick(placeMenu);
+}
+
+function resetHighlight() {
+  if (!editOptions.value?.strict) {
+    menuHighlight.value = -1;
+  } else if (menuFiltering.value) {
+    menuHighlight.value = menuItems.value.length ? 0 : -1;
+  } else {
+    menuHighlight.value = Math.max(
+      menuItems.value.findIndex((option) => option.value === initialDraft.value),
+      0,
+    );
+  }
+}
+
+function closeMenu() {
+  menuOpen.value = false;
+  menuHighlight.value = -1;
+  menuStyle.value = null;
+}
+
+function placeMenu() {
+  if (!menuOpen.value || !editorEl?.isConnected) {
+    menuStyle.value = null;
+    return;
+  }
+  const rect = editorEl.getBoundingClientRect();
+  const below = window.innerHeight - rect.bottom;
+  const font = getComputedStyle(editorEl);
+  const style: Record<string, string> = {
+    left: `${Math.round(rect.left)}px`,
+    minWidth: `${Math.round(rect.width)}px`,
+    fontFamily: font.fontFamily,
+    fontSize: font.fontSize,
+  };
+  if (below < MENU_MAX_HEIGHT && rect.top > below) {
+    style.bottom = `${Math.round(window.innerHeight - rect.top + 2)}px`;
+    style.maxHeight = `${Math.min(MENU_MAX_HEIGHT, Math.round(rect.top - 8))}px`;
+  } else {
+    style.top = `${Math.round(rect.bottom + 2)}px`;
+    style.maxHeight = `${Math.min(MENU_MAX_HEIGHT, Math.round(below - 8))}px`;
+  }
+  menuStyle.value = style;
+}
+
+watch(menuHighlight, (index) => {
+  void nextTick(() => {
+    menuEl.value?.children[index]?.scrollIntoView({ block: "nearest" });
+  });
+});
+
+function onEditorInput() {
+  menuOpen.value = Boolean(editOptions.value);
+  menuFiltering.value = true;
+  resetHighlight();
+  void nextTick(placeMenu);
+}
+
+/** Puts an option into the draft. Returns true when the edit should still go on. */
+function pickOption(option: CellOption) {
+  if (!editOptions.value?.list) {
+    draft.value = option.value;
+    return false;
+  }
+  const parts = draft.value.split(",");
+  if (!menuFiltering.value && parts[parts.length - 1].trim()) {
+    parts.push("");
+  }
+  parts[parts.length - 1] = parts.length > 1 ? ` ${option.value}` : option.value;
+  draft.value = parts.join(",");
+  closeMenu();
+  void nextTick(() => editorEl?.setSelectionRange(draft.value.length, draft.value.length));
+  return true;
+}
+
+function onMenuPick(option: CellOption) {
+  if (pickOption(option)) {
+    return;
+  }
+  commitEdit();
+  scroller.value?.focus({ preventScroll: true });
+}
+
+function onMenuKeydown(event: KeyboardEvent) {
+  if (!menuOpen.value && editOptions.value && event.key === "ArrowDown") {
+    event.preventDefault();
+    openMenu(false);
+    menuHighlight.value = menuItems.value.length ? 0 : -1;
+    return true;
+  }
+  const items = menuItems.value;
+  if (!items.length) {
+    return false;
+  }
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    const lowest = editOptions.value?.strict ? 0 : -1;
+    const step = event.key === "ArrowDown" ? 1 : -1;
+    menuHighlight.value = Math.min(Math.max(menuHighlight.value + step, lowest), items.length - 1);
+    return true;
+  }
+  if (event.key === "Escape" && !editOptions.value?.strict) {
+    event.preventDefault();
+    closeMenu();
+    return true;
+  }
+  const option = items[menuHighlight.value];
+  if (option && (event.key === "Enter" || event.key === "Tab") && !event.shiftKey && !event.altKey) {
+    if (pickOption(option)) {
+      event.preventDefault();
+      return true;
+    }
+  }
+  return false;
+}
 
 const rowHeight = computed(() => Math.round(gridFontSize.value * 1.85 + 2));
 const headerHeight = computed(() => rowHeight.value + 4);
@@ -176,9 +381,13 @@ onMounted(() => {
     viewportHeight.value = node.clientHeight;
   });
   resizeObserver.observe(node);
+  window.addEventListener("resize", placeMenu);
 });
 
-onBeforeUnmount(() => resizeObserver?.disconnect());
+onBeforeUnmount(() => {
+  resizeObserver?.disconnect();
+  window.removeEventListener("resize", placeMenu);
+});
 
 watch(
   () => {
@@ -238,9 +447,39 @@ function isEditing(row: number, col: number) {
   return editing.value?.row === row && editing.value?.col === col;
 }
 
+function selectedRows() {
+  const range = selection.value;
+  if (!range) {
+    return [];
+  }
+  return Array.from({ length: range.bottom - range.top + 1 }, (_, index) => range.top + index);
+}
+
 function isModified(row: number, col: number) {
   return Boolean(props.modified?.get(row)?.has(col));
 }
+
+function isMatch(row: number, col: number) {
+  return Boolean(props.matches?.get(row)?.has(col));
+}
+
+function isCurrentMatch(row: number, col: number) {
+  return props.currentMatch?.row === row && props.currentMatch?.col === col;
+}
+
+watch(
+  () => (props.currentMatch ? `${props.currentMatch.row}:${props.currentMatch.col}` : ""),
+  () => {
+    const match = props.currentMatch;
+    if (!match) {
+      return;
+    }
+    commitEdit();
+    anchor.value = { ...match };
+    focus.value = { ...match };
+    scrollCellIntoView(match);
+  },
+);
 
 function linkTarget(value: RowValues[number] | undefined, col: number) {
   return value === null || value === undefined || isBytes(value) ? null : (props.links?.[col] ?? null);
@@ -253,6 +492,11 @@ function follow(row: number, col: number, event?: MouseEvent) {
 
 function isAutoColumn(row: number, col: number) {
   return props.newRowStart !== undefined && row >= props.newRowStart && Boolean(props.newRowAuto?.[col]);
+}
+
+/** A new row with no committed edits. Escape drops it. */
+function isUneditedNewRow(row: number) {
+  return props.newRowStart !== undefined && row >= props.newRowStart && !props.modified?.get(row)?.size;
 }
 
 function isAutoCell(row: number, col: number) {
@@ -292,7 +536,7 @@ function editCell(row: number, col: number) {
 
 function onBlankDblclick(event: MouseEvent) {
   const target = event.target as Element;
-  if (props.creatable && (target.closest(".grid-filler, .grid-empty") || !target.closest(".grid-row, .grid-header"))) {
+  if (props.creatable && (target.closest(".grid-filler") || !target.closest(".grid-row, .grid-header"))) {
     emit("create");
   }
 }
@@ -308,6 +552,7 @@ function startEdit(row: number, col: number, initial?: string) {
   anchor.value = { row, col };
   focus.value = { row, col };
   scrollCellIntoView({ row, col });
+  openMenu(initial !== undefined);
 }
 
 function commitEdit() {
@@ -316,6 +561,7 @@ function commitEdit() {
     return;
   }
   editing.value = null;
+  closeMenu();
   if (draft.value !== initialDraft.value) {
     emit("edit", position.row, position.col, draft.value);
   }
@@ -323,10 +569,15 @@ function commitEdit() {
 
 function cancelEdit() {
   editing.value = null;
+  closeMenu();
 }
 
 function focusEditor(element: unknown) {
-  if (element instanceof HTMLTextAreaElement && document.activeElement !== element) {
+  if (!(element instanceof HTMLTextAreaElement)) {
+    return;
+  }
+  editorEl = element;
+  if (document.activeElement !== element) {
     element.focus({ preventScroll: true });
     element.setSelectionRange(element.value.length, element.value.length);
   }
@@ -334,13 +585,28 @@ function focusEditor(element: unknown) {
 
 function onEditorKeydown(event: KeyboardEvent) {
   event.stopPropagation();
+  const position = editing.value;
+  const dropNewRow = event.key === "Escape" && position !== null && isUneditedNewRow(position.row);
+  /*
+   * A blank new row opens with its suggestions showing. Escape cancels the
+   * row instead of only hiding that list, until the cell's text changes.
+   */
+  if (!(dropNewRow && draft.value === initialDraft.value) && onMenuKeydown(event)) {
+    return;
+  }
   if (event.key === "Enter" && !event.shiftKey && !event.altKey) {
     event.preventDefault();
     commitEdit();
     scroller.value?.focus({ preventScroll: true });
   } else if (event.key === "Escape") {
     event.preventDefault();
+    const row = position?.row;
     cancelEdit();
+    if (dropNewRow && row !== undefined) {
+      anchor.value = null;
+      focus.value = null;
+      emit("deleteRows", [row]);
+    }
     scroller.value?.focus({ preventScroll: true });
   } else if (event.key === "Tab") {
     event.preventDefault();
@@ -376,6 +642,10 @@ function setSelectionNull() {
 
 function selectCell(event: MouseEvent, row: number, col: number) {
   commitEdit();
+  if (isMenuClick(event) && isSelected(row, col)) {
+    scroller.value?.focus({ preventScroll: true });
+    return;
+  }
   const position = { row, col };
   if (event.shiftKey && anchor.value) {
     focus.value = position;
@@ -388,6 +658,10 @@ function selectCell(event: MouseEvent, row: number, col: number) {
 
 function selectRow(event: MouseEvent, row: number) {
   commitEdit();
+  if (isMenuClick(event) && isRowActive(row)) {
+    scroller.value?.focus({ preventScroll: true });
+    return;
+  }
   const last = Math.max(props.columns.length - 1, 0);
   if (event.shiftKey && anchor.value) {
     focus.value = { row, col: last };
@@ -433,9 +707,13 @@ function moveFocus(rowDelta: number, colDelta: number, extend: boolean) {
   scrollCellIntoView(next);
 }
 
-async function copySelection() {
+async function copySelection(format: CopyFormat = "tsv") {
   const range = selection.value;
   if (!range) {
+    return;
+  }
+  if (format !== "tsv") {
+    await copySelectionAs(format, range);
     return;
   }
   const lines: string[] = [];
@@ -468,6 +746,29 @@ async function copySelection() {
           ? "Copied value"
           : `Copied ${count.toLocaleString()} ${count === 1 ? "row" : "rows"}`,
     );
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+}
+
+/** CSV and JSON always name the columns and keep NULLs, newlines, and tabs as they are. */
+async function copySelectionAs(format: "csv" | "json", range: NonNullable<typeof selection.value>) {
+  const columns = props.columns.slice(range.left, range.right + 1);
+  const rows: Cell[][] = [];
+  let missing = 0;
+  for (let row = range.top; row <= range.bottom; row += 1) {
+    const values = props.rows[row];
+    if (!values) {
+      missing += 1;
+      continue;
+    }
+    rows.push(values.slice(range.left, range.right + 1).map((value) => value ?? null));
+  }
+  try {
+    await navigator.clipboard.writeText(copyText(format, columns, rows));
+    const count = rows.length;
+    const what = `${count.toLocaleString()} ${count === 1 ? "row" : "rows"} as ${format.toUpperCase()}`;
+    showToast(missing ? `Copied ${what}. ${missing.toLocaleString()} rows were not loaded yet.` : `Copied ${what}`);
   } catch (err) {
     showToast(String(err), "error");
   }
@@ -527,7 +828,12 @@ function onKeydown(event: KeyboardEvent) {
     startEdit(focus.value.row, focus.value.col);
   } else if (event.key === "Backspace" || event.key === "Delete") {
     event.preventDefault();
-    setSelectionNull();
+    const range = selection.value;
+    if (props.deletable && range && range.left === 0 && range.right === props.columns.length - 1) {
+      emit("deleteRows", selectedRows());
+    } else {
+      setSelectionNull();
+    }
   } else if (event.key.length === 1 && canEdit(focus.value.row, focus.value.col)) {
     event.preventDefault();
     startEdit(focus.value.row, focus.value.col, event.key);
@@ -613,12 +919,21 @@ function scrollToTop() {
   void nextTick(() => {
     if (scroller.value) {
       scroller.value.scrollTop = 0;
-      scroller.value.scrollLeft = 0;
     }
   });
 }
 
-defineExpose({ scrollToTop, commitEdit, editCell });
+/** The focused cell and its full text, or null when no loaded cell is focused. */
+function focusedCell(): { position: CellPosition; text: string } | null {
+  const position = focus.value;
+  const value = position ? props.rows[position.row]?.[position.col] : undefined;
+  if (!position || value === undefined) {
+    return null;
+  }
+  return { position: { ...position }, text: cellText(value) };
+}
+
+defineExpose({ scrollToTop, commitEdit, editCell, focusedCell, selectedRows, copySelection });
 </script>
 
 <template>
@@ -636,6 +951,7 @@ defineExpose({ scrollToTop, commitEdit, editCell });
     @keydown="onKeydown"
     @dblclick="onBlankDblclick"
     @wheel="onWheel"
+    @scroll.passive="menuOpen && placeMenu()"
   >
     <div class="grid-header" role="row">
       <div class="grid-gutter grid-corner" />
@@ -674,11 +990,16 @@ defineExpose({ scrollToTop, commitEdit, editCell });
           odd: item.index % 2 === 1,
           active: isRowActive(item.index),
           modified: modified?.has(item.index),
+          deleted: deletedRows?.has(item.index),
         }"
         role="row"
         :style="{ transform: `translateY(${item.start - headerHeight}px)` }"
       >
-        <div class="grid-gutter" @mousedown.prevent="selectRow($event, item.index)">
+        <div
+          class="grid-gutter"
+          @mousedown.prevent="selectRow($event, item.index)"
+          @contextmenu="onRowContextMenu($event, item.index)"
+        >
           {{ newRowStart !== undefined && item.index >= newRowStart ? "+" : (rowNumberOffset ?? 0) + item.index + 1 }}
         </div>
         <template v-if="rows[item.index]">
@@ -692,6 +1013,8 @@ defineExpose({ scrollToTop, commitEdit, editCell });
               selected: isSelected(item.index, col),
               focused: isFocused(item.index, col),
               modified: isModified(item.index, col),
+              match: isMatch(item.index, col),
+              'current-match': isCurrentMatch(item.index, col),
               editing: isEditing(item.index, col),
               linked: !isEditing(item.index, col) && Boolean(linkTarget(value, col)),
             }"
@@ -711,6 +1034,9 @@ defineExpose({ scrollToTop, commitEdit, editCell });
               autocomplete="off"
               autocapitalize="off"
               :placeholder="isAutoCell(item.index, col) ? 'auto' : value === null ? 'NULL' : ''"
+              :aria-expanded="menuItems.length > 0"
+              :aria-activedescendant="menuHighlight >= 0 ? `grid-option-${menuHighlight}` : undefined"
+              @input="onEditorInput"
               @keydown="onEditorKeydown"
               @blur="commitEdit"
               @mousedown.stop
@@ -722,7 +1048,7 @@ defineExpose({ scrollToTop, commitEdit, editCell });
                 class="grid-link"
                 type="button"
                 tabindex="-1"
-                :title="`Open ${linkTarget(value, col)} = ${cellDisplay(value)} · Option-click to open beside`"
+                :title="`Open ${linkTarget(value, col)} = ${cellDisplay(value)} · ${altKeyName}-click to open beside`"
                 :aria-label="`Open ${linkTarget(value, col)} = ${cellDisplay(value)}`"
                 @mousedown.stop.prevent
                 @dblclick.stop
@@ -756,6 +1082,30 @@ defineExpose({ scrollToTop, commitEdit, editCell });
         <div v-for="col in columns.length" :key="col" class="grid-cell" />
       </div>
     </div>
-    <div v-if="!rows.length" class="grid-empty muted tiny">No rows</div>
+    <Teleport to="body">
+      <div
+        v-if="editing && menuItems.length && menuStyle"
+        ref="menuEl"
+        class="overflow-menu-dropdown grid-options"
+        role="listbox"
+        :style="menuStyle"
+        @mousedown.prevent
+      >
+        <button
+          v-for="(option, index) in menuItems"
+          :id="`grid-option-${index}`"
+          :key="option.value"
+          class="overflow-menu-item"
+          :class="{ highlighted: index === menuHighlight, current: option.value === initialDraft }"
+          type="button"
+          role="option"
+          tabindex="-1"
+          :aria-selected="index === menuHighlight"
+          @click="onMenuPick(option)"
+        >
+          {{ option.label ?? option.value }}
+        </button>
+      </div>
+    </Teleport>
   </div>
 </template>

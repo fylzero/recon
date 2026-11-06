@@ -7,21 +7,33 @@ import { DEFAULT_HEADER_COLOR } from "../color";
 import { useApp } from "../composables/useApp";
 import { useConnectionForm } from "../composables/useConnectionForm";
 import { useTabs } from "../composables/useTabs";
+import { baseName, passwordCommandShell, secretStoreFullName, secretStoreName } from "../platform";
 import {
   DEFAULT_SSH_PORT,
   DRIVER_OPTIONS,
   defaultSshTunnel,
   type ConnectionEntry,
   type Driver,
+  type PasswordSource,
+  type ResolvedSshHost,
   type SshAuth,
   type SslMode,
 } from "../types";
+import AwsProfileField from "./AwsProfileField.vue";
 import Modal from "./Modal.vue";
 
 const SQLITE_FILTERS = [
   { name: "SQLite database", extensions: ["sqlite", "sqlite3", "db", "db3", "s3db", "sl3"] },
   { name: "All files", extensions: ["*"] },
 ];
+
+const CERT_FILTERS = [
+  { name: "Certificate or key", extensions: ["pem", "crt", "cer", "key"] },
+  { name: "All files", extensions: ["*"] },
+];
+
+const RDS_BUNDLE_URL = "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem";
+const RDS_HOST_REGION = /\.([a-z]{2}(?:-[a-z]+)+-\d+)\.rds\.amazonaws\.com$/i;
 
 const { groups, saveConnection, showToast } = useApp();
 const { openConnection } = useTabs();
@@ -40,9 +52,18 @@ const savePassword = ref(initial?.savePassword ?? true);
 const database = ref(initial?.database ?? "");
 const filePath = ref(initial?.filePath ?? "");
 const sslMode = ref<SslMode>(initial?.sslMode ?? "prefer");
+const cleartextAuth = ref(initial?.cleartextAuth ?? false);
+const passwordSource = ref<PasswordSource>(initial?.passwordSource ?? "password");
+const awsRegion = ref(initial?.awsRegion ?? "");
+const awsProfile = ref(initial?.awsProfile ?? "");
+const passwordCommand = ref(initial?.passwordCommand ?? "");
+const sslCaPath = ref(initial?.sslCaPath ?? "");
+const sslCertPath = ref(initial?.sslCertPath ?? "");
+const sslKeyPath = ref(initial?.sslKeyPath ?? "");
+const useClientCert = ref(Boolean(initial?.sslCertPath));
 const groupId = ref<string>(formState.value?.groupId ?? "");
 const colorPicked = ref(Boolean(initial?.headerColor));
-const headerColor = ref(initial?.headerColor || groupColor());
+const headerColor = ref(initial?.headerColor || DEFAULT_HEADER_COLOR);
 const hasSavedPassword = ref(false);
 
 const initialSsh = initial?.ssh ?? defaultSshTunnel();
@@ -54,7 +75,15 @@ const sshAuth = ref<SshAuth>(initialSsh.auth);
 const sshKeyPath = ref(initialSsh.keyPath);
 const sshSecret = ref("");
 const hasSavedSshSecret = ref(false);
+const sshAlsoPassword = ref(initialSsh.alsoPassword ?? false);
+const sshPassword = ref("");
+const hasSavedSshPassword = ref(false);
 const sshKeys = ref<string[]>([]);
+const sshHosts = ref<string[]>([]);
+const awsProfiles = ref<string[]>([]);
+const awsProfilesLoaded = ref(false);
+const sshResolved = ref<ResolvedSshHost | null>(null);
+let resolveToken = 0;
 
 const keyChoice = computed({
   get: () => (sshKeys.value.includes(sshKeyPath.value) ? sshKeyPath.value : ""),
@@ -68,6 +97,19 @@ const saving = ref(false);
 const testResult = ref<{ ok: boolean; text: string } | null>(null);
 const formError = ref("");
 const nameInput = ref<HTMLInputElement | null>(null);
+const testResultEl = ref<HTMLElement | null>(null);
+const formErrorEl = ref<HTMLElement | null>(null);
+
+watch(
+  [testResult, formError],
+  ([result, error], [prevResult, prevError]) => {
+    const errorAppeared = error && error !== prevError;
+    const resultAppeared = result && result !== prevResult;
+    const el = errorAppeared ? formErrorEl.value : resultAppeared ? testResultEl.value : null;
+    el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  },
+  { flush: "post" },
+);
 
 const isSqlite = computed(() => driver.value === "sqlite");
 const title = computed(() => (editing ? "Edit connection" : "New connection"));
@@ -84,17 +126,96 @@ const sshReady = computed(
     ),
 );
 
+const usesIam = computed(() => !isSqlite.value && passwordSource.value === "aws-iam");
+const usesCommand = computed(() => !isSqlite.value && passwordSource.value === "command");
+const typesPassword = computed(() => !isSqlite.value && passwordSource.value === "password");
+
+const usesCleartext = computed(() => driver.value === "mysql" && (cleartextAuth.value || usesIam.value));
+
+const requiresTls = computed(() => ["require", "verify-ca", "verify-full"].includes(sslMode.value));
+const verifiesCertificate = computed(() => sslMode.value === "verify-ca" || sslMode.value === "verify-full");
+
+const cleartextBlocked = computed(
+  () => usesCleartext.value && !usesIam.value && !useSsh.value && !requiresTls.value,
+);
+
+const iamBlocked = computed(() => usesIam.value && !requiresTls.value);
+
+const hostCheckBlocked = computed(() => useSsh.value && sslMode.value === "verify-full");
+
+const certLocations = computed(() =>
+  [
+    verifiesCertificate.value ? sslCaPath.value : "",
+    requiresTls.value && useClientCert.value ? sslCertPath.value : "",
+    requiresTls.value && useClientCert.value ? sslKeyPath.value : "",
+  ].map((location) => location.trim().toLowerCase()),
+);
+
+const readsFromS3 = computed(
+  () => !isSqlite.value && certLocations.value.some((location) => location.startsWith("s3://")),
+);
+
+const httpBlocked = computed(
+  () => !isSqlite.value && certLocations.value.some((location) => location.startsWith("http://")),
+);
+
+const usesAwsSettings = computed(() => usesIam.value || readsFromS3.value);
+
+const clientCertIncomplete = computed(
+  () => requiresTls.value && useClientCert.value && !(sslCertPath.value.trim() && sslKeyPath.value.trim()),
+);
+
+const sourceReady = computed(() => {
+  if (usesIam.value) {
+    return Boolean(awsRegion.value.trim());
+  }
+  if (usesCommand.value) {
+    return Boolean(passwordCommand.value.trim());
+  }
+  return true;
+});
+
 const canSubmit = computed(() =>
   isSqlite.value
     ? Boolean(filePath.value.trim())
-    : Boolean(host.value.trim() && user.value.trim() && sshReady.value),
+    : Boolean(
+        host.value.trim() &&
+          user.value.trim() &&
+          sshReady.value &&
+          sourceReady.value &&
+          !cleartextBlocked.value &&
+          !iamBlocked.value &&
+          !hostCheckBlocked.value &&
+          !clientCertIncomplete.value &&
+          !httpBlocked.value,
+      ),
 );
+
+const usesSshPassword = computed(
+  () => useSsh.value && sshAuth.value !== "password" && sshAlsoPassword.value,
+);
+
+const sshConfigHint = computed(() => {
+  const resolved = sshResolved.value;
+  if (!resolved || !useSsh.value) {
+    return "";
+  }
+  const renamed = resolved.hostname && resolved.hostname !== sshHost.value.trim() ? resolved.hostname : "";
+  const proxy = resolved.proxyCommand ? "its ProxyCommand" : resolved.proxyJump;
+  if (renamed && proxy) {
+    return `From ~/.ssh/config, connects to ${renamed} through ${proxy}.`;
+  }
+  if (renamed) {
+    return `From ~/.ssh/config, connects to ${renamed}.`;
+  }
+  return proxy ? `From ~/.ssh/config, connects through ${proxy}.` : "";
+});
 
 const sshSecretLabel = computed(() => (sshAuth.value === "key" ? "Key passphrase" : "SSH password"));
 
 const sshSecretPlaceholder = computed(() => {
   if (hasSavedSshSecret.value) {
-    return "Saved in Keychain";
+    return `Saved in ${secretStoreName}`;
   }
   return sshAuth.value === "key" ? "Leave empty if the key has none" : "Password";
 });
@@ -103,17 +224,7 @@ const passwordPlaceholder = computed(() => {
   if (!savePassword.value) {
     return "Asked for each time you connect";
   }
-  return hasSavedPassword.value ? "Saved in Keychain" : "Password";
-});
-
-function groupColor() {
-  return groups.value.find((group) => group.id === groupId.value)?.headerColor || DEFAULT_HEADER_COLOR;
-}
-
-watch(groupId, () => {
-  if (!colorPicked.value) {
-    headerColor.value = groupColor();
-  }
+  return hasSavedPassword.value ? `Saved in ${secretStoreName}` : "Password";
 });
 
 watch(driver, (next, previous) => {
@@ -122,6 +233,9 @@ watch(driver, (next, previous) => {
   const nextDefault = DRIVER_OPTIONS.find((option) => option.id === next)?.defaultPort ?? 0;
   if (next !== "sqlite" && (!port.value || port.value === previousDefault)) {
     port.value = nextDefault;
+  }
+  if (next === "mssql" && passwordSource.value === "aws-iam") {
+    passwordSource.value = "password";
   }
 });
 
@@ -134,6 +248,15 @@ watch(
     database,
     filePath,
     sslMode,
+    cleartextAuth,
+    passwordSource,
+    awsRegion,
+    awsProfile,
+    passwordCommand,
+    sslCaPath,
+    sslCertPath,
+    sslKeyPath,
+    useClientCert,
     sshEnabled,
     sshHost,
     sshPort,
@@ -141,6 +264,8 @@ watch(
     sshAuth,
     sshKeyPath,
     sshSecret,
+    sshAlsoPassword,
+    sshPassword,
   ],
   () => {
     testResult.value = null;
@@ -154,6 +279,105 @@ watch(sshAuth, (next) => {
     sshKeyPath.value = sshKeys.value[0];
   }
 });
+
+watch(cleartextAuth, (enabled) => {
+  if (enabled && !useSsh.value && !requiresTls.value) {
+    sslMode.value = "require";
+  }
+});
+
+function regionFromHost() {
+  return RDS_HOST_REGION.exec(host.value.trim())?.[1]?.toLowerCase() ?? "";
+}
+
+function useRdsBundle() {
+  sslCaPath.value = RDS_BUNDLE_URL;
+}
+
+watch(sslMode, (next) => {
+  if ((next === "verify-ca" || next === "verify-full") && !sslCaPath.value.trim() && regionFromHost()) {
+    useRdsBundle();
+  }
+});
+
+watch(passwordSource, (next) => {
+  if (next !== "aws-iam") {
+    return;
+  }
+  if (!requiresTls.value) {
+    sslMode.value = "require";
+  }
+  if (!awsRegion.value.trim()) {
+    awsRegion.value = regionFromHost();
+  }
+});
+
+watch(host, (_next, previous) => {
+  if (!usesIam.value) {
+    return;
+  }
+  const previousRegion = RDS_HOST_REGION.exec(previous.trim())?.[1]?.toLowerCase() ?? "";
+  if (!awsRegion.value.trim() || awsRegion.value.trim() === previousRegion) {
+    awsRegion.value = regionFromHost();
+  }
+});
+
+watch(sshHost, () => {
+  void resolveSshHost(true);
+});
+
+/**
+ * Looks up a ~/.ssh/config alias so the form shows where it really connects.
+ * With `fill`, the alias's port, user, and key are copied into the form.
+ */
+async function resolveSshHost(fill: boolean) {
+  const token = ++resolveToken;
+  const alias = sshHost.value.trim();
+  if (!sshHosts.value.includes(alias)) {
+    sshResolved.value = null;
+    return;
+  }
+  const resolved = await api.resolveSshHost(alias).catch(() => null);
+  if (token !== resolveToken) {
+    return;
+  }
+  sshResolved.value = resolved;
+  if (!resolved || !fill) {
+    return;
+  }
+  if (resolved.port) {
+    sshPort.value = resolved.port;
+  }
+  if (resolved.user && !sshUser.value.trim()) {
+    sshUser.value = resolved.user;
+  }
+  if (resolved.identityFiles.length) {
+    sshAuth.value = "key";
+    sshKeyPath.value = resolved.identityFiles[0];
+  } else if (resolved.identityAgent) {
+    sshAuth.value = "agent";
+  }
+}
+
+async function loadSshHosts() {
+  sshHosts.value = await api.listSshHosts().catch(() => []);
+  void resolveSshHost(false);
+}
+
+async function loadAwsProfiles() {
+  awsProfiles.value = await api.listAwsProfiles().catch(() => []);
+  awsProfilesLoaded.value = true;
+}
+
+watch(
+  usesAwsSettings,
+  (shown) => {
+    if (shown) {
+      void loadAwsProfiles();
+    }
+  },
+  { immediate: true },
+);
 
 async function loadSshKeys() {
   try {
@@ -170,6 +394,7 @@ onMounted(async () => {
   await nextTick();
   nameInput.value?.focus();
   void loadSshKeys();
+  void loadSshHosts();
   if (initial?.id && initial.driver !== "sqlite" && initial.savePassword) {
     try {
       hasSavedPassword.value = await api.hasSavedPassword(initial.id);
@@ -184,11 +409,10 @@ onMounted(async () => {
       hasSavedSshSecret.value = false;
     }
   }
+  if (initial?.id && initialSsh.enabled && initialSsh.alsoPassword) {
+    hasSavedSshPassword.value = await api.hasSavedSshPassword(initial.id).catch(() => false);
+  }
 });
-
-function fileName(path: string) {
-  return path.split("/").filter(Boolean).pop() ?? path;
-}
 
 function buildEntry(): ConnectionEntry {
   return {
@@ -201,8 +425,16 @@ function buildEntry(): ConnectionEntry {
     database: isSqlite.value ? "" : database.value.trim(),
     filePath: isSqlite.value ? filePath.value.trim() : "",
     sslMode: sslMode.value,
-    headerColor: colorPicked.value ? headerColor.value : "",
-    savePassword: isSqlite.value ? false : savePassword.value,
+    headerColor: !groupId.value && colorPicked.value ? headerColor.value : "",
+    savePassword: typesPassword.value && savePassword.value,
+    cleartextAuth: usesCleartext.value,
+    passwordSource: isSqlite.value ? "password" : passwordSource.value,
+    awsRegion: usesAwsSettings.value ? awsRegion.value.trim() : "",
+    awsProfile: usesAwsSettings.value ? awsProfile.value.trim() : "",
+    passwordCommand: usesCommand.value ? passwordCommand.value.trim() : "",
+    sslCaPath: verifiesCertificate.value ? sslCaPath.value.trim() : "",
+    sslCertPath: requiresTls.value && useClientCert.value ? sslCertPath.value.trim() : "",
+    sslKeyPath: requiresTls.value && useClientCert.value ? sslKeyPath.value.trim() : "",
     ssh: isSqlite.value
       ? defaultSshTunnel()
       : {
@@ -212,12 +444,13 @@ function buildEntry(): ConnectionEntry {
           user: sshUser.value.trim(),
           auth: sshAuth.value,
           keyPath: sshAuth.value === "key" ? sshKeyPath.value.trim() : "",
+          alsoPassword: sshAuth.value !== "password" && sshAlsoPassword.value,
         },
   };
 }
 
 function passwordArg() {
-  if (isSqlite.value) {
+  if (!typesPassword.value) {
     return null;
   }
   return password.value ? password.value : null;
@@ -228,6 +461,10 @@ function sshSecretArg() {
     return null;
   }
   return sshSecret.value ? sshSecret.value : null;
+}
+
+function sshPasswordArg() {
+  return usesSshPassword.value && sshPassword.value ? sshPassword.value : null;
 }
 
 async function browseKey() {
@@ -244,6 +481,21 @@ async function browseKey() {
   }
 }
 
+async function browseCertificate(field: "ca" | "cert" | "key", title: string) {
+  const target = { ca: sslCaPath, cert: sslCertPath, key: sslKeyPath }[field];
+  const home = await homeDir().catch(() => "");
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    title,
+    filters: CERT_FILTERS,
+    defaultPath: target.value.trim().replace(/^~(?=\/)/, home) || undefined,
+  });
+  if (typeof selected === "string") {
+    target.value = home && selected.startsWith(`${home}/`) ? `~${selected.slice(home.length)}` : selected;
+  }
+}
+
 async function browseFile() {
   const selected = await open({
     multiple: false,
@@ -254,7 +506,7 @@ async function browseFile() {
   if (typeof selected === "string") {
     filePath.value = selected;
     if (!name.value.trim()) {
-      name.value = fileName(selected);
+      name.value = baseName(selected);
     }
   }
 }
@@ -272,9 +524,9 @@ async function createFile() {
     await api.createSqliteDatabase(selected);
     filePath.value = selected;
     if (!name.value.trim()) {
-      name.value = fileName(selected);
+      name.value = baseName(selected);
     }
-    showToast(`Created ${fileName(selected)}`);
+    showToast(`Created ${baseName(selected)}`);
   } catch (err) {
     formError.value = String(err);
   }
@@ -288,7 +540,12 @@ async function testConnection() {
   testResult.value = null;
   formError.value = "";
   try {
-    const version = await api.testConnection(buildEntry(), passwordArg(), sshSecretArg());
+    const version = await api.testConnection(
+      buildEntry(),
+      passwordArg(),
+      sshSecretArg(),
+      sshPasswordArg(),
+    );
     const via = useSsh.value ? ` · via SSH ${sshHost.value.trim()}` : "";
     testResult.value = { ok: true, text: `Connected · ${version}${via}` };
   } catch (err) {
@@ -310,6 +567,7 @@ async function submit(connectAfter: boolean) {
       buildEntry(),
       passwordArg(),
       sshSecretArg(),
+      sshPasswordArg(),
     );
     closeConnectionForm();
     if (connectAfter) {
@@ -388,19 +646,54 @@ async function submit(connectAfter: boolean) {
             />
           </label>
           <label class="modal-label">
-            <span class="muted tiny">Password</span>
-            <input
-              v-model="password"
-              type="password"
-              autocomplete="new-password"
-              :placeholder="passwordPlaceholder"
-              :disabled="!savePassword"
-            />
+            <span class="muted tiny">Authentication</span>
+            <select v-model="passwordSource">
+              <option value="password">Password</option>
+              <option v-if="driver !== 'mssql'" value="aws-iam">AWS IAM</option>
+              <option value="command">Password command</option>
+            </select>
           </label>
-          <label class="checkbox-row span-2">
-            <input v-model="savePassword" type="checkbox" />
-            <span>Save password in the macOS Keychain</span>
-          </label>
+          <template v-if="passwordSource === 'password'">
+            <label class="modal-label span-2">
+              <span class="muted tiny">Password</span>
+              <input
+                v-model="password"
+                type="password"
+                autocomplete="new-password"
+                :placeholder="passwordPlaceholder"
+                :disabled="!savePassword"
+              />
+            </label>
+            <label class="checkbox-row span-2">
+              <input v-model="savePassword" type="checkbox" />
+              <span>Save password in the {{ secretStoreFullName }}</span>
+            </label>
+          </template>
+          <template v-else-if="passwordSource === 'aws-iam'">
+            <label class="modal-label">
+              <span class="muted tiny">AWS region</span>
+              <input v-model="awsRegion" type="text" spellcheck="false" autocomplete="off" placeholder="us-east-1" />
+            </label>
+            <AwsProfileField v-model="awsProfile" :profiles="awsProfiles" :loading="!awsProfilesLoaded" />
+            <p class="muted tiny span-2 ssh-hint">
+              Signs in with a token from the AWS CLI (aws rds generate-db-auth-token), fetched again each time
+              Recon connects. For SSO profiles, run aws sso login first. IAM logins need SSL.
+            </p>
+          </template>
+          <template v-else>
+            <label class="modal-label span-2">
+              <span class="muted tiny">Command</span>
+              <input
+                v-model="passwordCommand"
+                class="code-input"
+                type="text"
+                spellcheck="false"
+                autocomplete="off"
+                placeholder="op read op://Private/Database/password"
+              />
+            </label>
+            <p class="muted tiny span-2 ssh-hint">{{ passwordCommandShell }}</p>
+          </template>
           <label class="modal-label">
             <span class="muted tiny">Database</span>
             <input
@@ -415,9 +708,103 @@ async function submit(connectAfter: boolean) {
             <select v-model="sslMode">
               <option value="prefer">Prefer</option>
               <option value="require">Require</option>
+              <option value="verify-ca">Verify CA</option>
+              <option value="verify-full">Verify CA and host name</option>
               <option value="disable">Disable</option>
             </select>
           </label>
+          <p v-if="iamBlocked" class="settings-error span-2">AWS IAM logins need SSL set to Require or Verify.</p>
+          <p v-if="hostCheckBlocked" class="settings-error span-2">
+            The host name can't be checked through an SSH tunnel. Set SSL to Verify CA instead.
+          </p>
+          <template v-if="verifiesCertificate">
+            <label class="modal-label span-2">
+              <span class="muted tiny">CA certificate</span>
+              <div class="file-picker">
+                <input
+                  v-model="sslCaPath"
+                  type="text"
+                  spellcheck="false"
+                  placeholder="File, https:// URL, or s3:// URI"
+                />
+                <button class="ghost" type="button" @click="browseCertificate('ca', 'Choose CA certificate')">
+                  Browse…
+                </button>
+                <button class="ghost" type="button" @click="useRdsBundle">AWS RDS bundle</button>
+              </div>
+            </label>
+            <p class="muted tiny span-2 ssh-hint">
+              Leave empty to use the public certificate authorities. AWS RDS bundle uses AWS's global bundle for
+              RDS and Aurora, downloaded each time Recon connects so it stays current.
+            </p>
+          </template>
+          <template v-if="requiresTls">
+            <label class="checkbox-row span-2">
+              <input v-model="useClientCert" type="checkbox" />
+              <span>Sign in with a client certificate</span>
+            </label>
+            <template v-if="useClientCert">
+              <label class="modal-label span-2">
+                <span class="muted tiny">Client certificate</span>
+                <div class="file-picker">
+                  <input
+                    v-model="sslCertPath"
+                    type="text"
+                    spellcheck="false"
+                    placeholder="File, https:// URL, or s3:// URI"
+                  />
+                  <button
+                    class="ghost"
+                    type="button"
+                    @click="browseCertificate('cert', 'Choose client certificate')"
+                  >
+                    Browse…
+                  </button>
+                </div>
+              </label>
+              <label class="modal-label span-2">
+                <span class="muted tiny">Client key</span>
+                <div class="file-picker">
+                  <input
+                    v-model="sslKeyPath"
+                    type="text"
+                    spellcheck="false"
+                    placeholder="File, https:// URL, or s3:// URI"
+                  />
+                  <button class="ghost" type="button" @click="browseCertificate('key', 'Choose client key')">
+                    Browse…
+                  </button>
+                </div>
+              </label>
+            </template>
+          </template>
+          <p v-if="httpBlocked" class="settings-error span-2">
+            Certificates can't be downloaded over http://, since anyone on the network could swap them. Use
+            https://.
+          </p>
+          <template v-if="readsFromS3 && !usesIam">
+            <label class="modal-label">
+              <span class="muted tiny">AWS region</span>
+              <input v-model="awsRegion" type="text" spellcheck="false" autocomplete="off" placeholder="Optional" />
+            </label>
+            <AwsProfileField v-model="awsProfile" :profiles="awsProfiles" :loading="!awsProfilesLoaded" />
+            <p class="muted tiny span-2 ssh-hint">
+              The AWS CLI (aws s3 cp) reads files from S3 each time Recon connects, and keeps keys in memory
+              only. For SSO profiles, run aws sso login first.
+            </p>
+          </template>
+          <template v-if="driver === 'mysql' && passwordSource !== 'aws-iam'">
+            <label class="checkbox-row span-2">
+              <input v-model="cleartextAuth" type="checkbox" />
+              <span>Send password in clear text</span>
+            </label>
+            <p v-if="cleartextBlocked" class="settings-error span-2">
+              Set SSL to Require or Verify, or connect through an SSH tunnel, to send the password in clear text.
+            </p>
+            <p v-else-if="cleartextAuth" class="muted tiny span-2 ssh-hint">
+              For servers that check passwords with PAM, LDAP, or AWS IAM (mysql_clear_password).
+            </p>
+          </template>
 
           <label class="checkbox-row span-2 ssh-toggle">
             <input v-model="sshEnabled" type="checkbox" />
@@ -429,7 +816,17 @@ async function submit(connectAfter: boolean) {
             </p>
             <label class="modal-label">
               <span class="muted tiny">SSH host</span>
-              <input v-model="sshHost" type="text" spellcheck="false" placeholder="bastion.example.com" />
+              <input
+                v-model="sshHost"
+                type="text"
+                spellcheck="false"
+                autocomplete="off"
+                list="ssh-config-hosts"
+                :placeholder="sshHosts.length ? 'Host or ~/.ssh/config alias' : 'bastion.example.com'"
+              />
+              <datalist id="ssh-config-hosts">
+                <option v-for="alias in sshHosts" :key="alias" :value="alias" />
+              </datalist>
             </label>
             <label class="modal-label port-field">
               <span class="muted tiny">SSH port</span>
@@ -447,6 +844,7 @@ async function submit(connectAfter: boolean) {
                 <option value="agent">SSH agent</option>
               </select>
             </label>
+            <p v-if="sshConfigHint" class="muted tiny span-2 ssh-hint">{{ sshConfigHint }}</p>
             <label v-if="sshAuth === 'key'" class="modal-label span-2">
               <span class="muted tiny">Private key</span>
               <div class="file-picker">
@@ -476,6 +874,21 @@ async function submit(connectAfter: boolean) {
             <p v-else class="muted tiny span-2 ssh-hint">
               Uses the keys loaded in your SSH agent (ssh-add). Unknown hosts are added to ~/.ssh/known_hosts.
             </p>
+            <template v-if="sshAuth !== 'password'">
+              <label class="checkbox-row span-2">
+                <input v-model="sshAlsoPassword" type="checkbox" />
+                <span>Server also asks for a password</span>
+              </label>
+              <label v-if="sshAlsoPassword" class="modal-label span-2">
+                <span class="muted tiny">SSH password</span>
+                <input
+                  v-model="sshPassword"
+                  type="password"
+                  autocomplete="new-password"
+                  :placeholder="hasSavedSshPassword ? `Saved in ${secretStoreName}` : 'Password'"
+                />
+              </label>
+            </template>
           </template>
         </template>
 
@@ -488,7 +901,7 @@ async function submit(connectAfter: boolean) {
             </option>
           </select>
         </label>
-        <div class="modal-label">
+        <div v-if="!groupId" class="modal-label">
           <span class="muted tiny">Color</span>
           <div class="color-choice">
             <label class="color-picker">
@@ -502,13 +915,14 @@ async function submit(connectAfter: boolean) {
 
       <p
         v-if="testResult"
+        ref="testResultEl"
         class="test-result"
         :class="testResult.ok ? 'good' : 'bad'"
         role="status"
       >
         {{ testResult.text }}
       </p>
-      <p v-if="formError" class="settings-error">{{ formError }}</p>
+      <p v-if="formError" ref="formErrorEl" class="settings-error">{{ formError }}</p>
       <button type="submit" hidden />
     </form>
 

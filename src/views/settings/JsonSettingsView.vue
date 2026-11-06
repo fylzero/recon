@@ -14,6 +14,7 @@ import type { AppData } from "../../types";
 const {
   groups,
   standaloneConnections,
+  dashboardOrder,
   savedQueries,
   editorFontFamily,
   editorFontSize,
@@ -26,6 +27,7 @@ const {
   sidebarWidth,
   maxAutoColumnWidth,
   autoApplyFilters,
+  notifications,
   windowState,
   replaceSettings,
   showToast,
@@ -198,6 +200,7 @@ watch(
   [
     groups,
     standaloneConnections,
+    dashboardOrder,
     savedQueries,
     editorFontFamily,
     editorFontSize,
@@ -210,6 +213,7 @@ watch(
     sidebarWidth,
     maxAutoColumnWidth,
     autoApplyFilters,
+    notifications,
     windowState,
   ],
   () => {

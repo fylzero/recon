@@ -53,6 +53,64 @@ export function cellCopyText(value: Cell): string {
   return cellText(value).replace(/\t/g, " ").replace(/\r?\n/g, " ");
 }
 
+export type CopyFormat = "tsv" | "csv" | "json";
+
+const JSON_TYPE = /^JSONB?$/i;
+
+/** Bytes as `\x` and hex, like exports write them. The grid only holds the start of long values, so those end in …. */
+function bytesText(value: { bytes: number; hex: string }) {
+  const more = value.hex.length / 2 < value.bytes ? "…" : "";
+  return `\\x${value.hex.toLowerCase()}${more}`;
+}
+
+function csvField(value: Cell) {
+  if (value === null) {
+    return "";
+  }
+  const text = isBytes(value) ? bytesText(value) : String(value);
+  return text === "" || /[",\r\n]|^\s|\s$/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function jsonCell(value: Cell, column: ColumnMeta): unknown {
+  if (isBytes(value)) {
+    return bytesText(value);
+  }
+  if (typeof value === "string" && JSON_TYPE.test(column.typeName)) {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value;
+    }
+  }
+  return value;
+}
+
+/** Repeated column names get `_2`, `_3`, and so on, so every JSON key is distinct. */
+function uniqueNames(names: string[]) {
+  const seen = new Set<string>();
+  return names.map((name) => {
+    let candidate = name;
+    for (let next = 2; seen.has(candidate); next += 1) {
+      candidate = `${name}_${next}`;
+    }
+    seen.add(candidate);
+    return candidate;
+  });
+}
+
+/** Rows as CSV with a header, or as a JSON array of objects, for the clipboard. */
+export function copyText(format: "csv" | "json", columns: ColumnMeta[], rows: Cell[][]) {
+  if (format === "csv") {
+    const header = columns.map((column) => csvField(column.name)).join(",");
+    return [header, ...rows.map((row) => row.map(csvField).join(","))].join("\n");
+  }
+  const keys = uniqueNames(columns.map((column) => column.name));
+  const objects = rows.map((row) =>
+    Object.fromEntries(keys.map((key, index) => [key, jsonCell(row[index] ?? null, columns[index])])),
+  );
+  return JSON.stringify(objects, null, 2);
+}
+
 export function initialColumnWidth(column: ColumnMeta, charWidth: number) {
   const chars = Math.max(column.name.length + 2, isNumericColumn(column) ? 8 : 14);
   return Math.round(Math.min(Math.max(chars * charWidth + 24, 72), 320));

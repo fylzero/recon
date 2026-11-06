@@ -5,6 +5,7 @@ use sqlx::postgres::{
 };
 use sqlx::{Connection, Postgres, Row, TypeInfo, ValueRef};
 
+use super::tls::TlsMaterial;
 use super::{
     index_columns_from_definition, quote_double, quote_literal, run_raw, with_timeout, CellValue,
     Conn, Dialect, EditStatement, Opened, Pool, RawOutput, CONNECT_TIMEOUT,
@@ -15,17 +16,31 @@ fn ssl_mode(mode: &str) -> PgSslMode {
     match mode {
         "disable" => PgSslMode::Disable,
         "require" => PgSslMode::Require,
+        "verify-ca" => PgSslMode::VerifyCa,
+        "verify-full" => PgSslMode::VerifyFull,
         _ => PgSslMode::Prefer,
     }
 }
 
-fn options(entry: &ConnectionEntry, password: Option<&str>) -> PgConnectOptions {
+pub(super) fn options(
+    entry: &ConnectionEntry,
+    password: Option<&str>,
+    tls: &TlsMaterial,
+) -> PgConnectOptions {
     let mut options = PgConnectOptions::new()
         .host(&entry.host)
         .port(entry.port)
         .username(&entry.user)
         .ssl_mode(ssl_mode(&entry.ssl_mode))
         .application_name("Recon");
+    if let Some(ca) = &tls.ca {
+        options = options.ssl_root_cert_from_pem(ca.clone());
+    }
+    if let (Some(cert), Some(key)) = (&tls.cert, &tls.key) {
+        options = options
+            .ssl_client_cert_from_pem(cert)
+            .ssl_client_key_from_pem(key);
+    }
     if let Some(password) = password.filter(|value| !value.is_empty()) {
         options = options.password(password);
     }
@@ -35,8 +50,12 @@ fn options(entry: &ConnectionEntry, password: Option<&str>) -> PgConnectOptions 
     options
 }
 
-pub async fn open(entry: &ConnectionEntry, password: Option<&str>) -> Result<Opened, String> {
-    let options = options(entry, password);
+pub async fn open(
+    entry: &ConnectionEntry,
+    password: Option<&str>,
+    tls: &TlsMaterial,
+) -> Result<Opened, String> {
+    let options = options(entry, password, tls);
     let pool = with_timeout(
         PgPoolOptions::new()
             .max_connections(4)
@@ -57,8 +76,12 @@ pub async fn open(entry: &ConnectionEntry, password: Option<&str>) -> Result<Ope
     })
 }
 
-pub async fn test(entry: &ConnectionEntry, password: Option<&str>) -> Result<String, String> {
-    let mut conn = with_timeout(PgConnection::connect_with(&options(entry, password))).await?;
+pub async fn test(
+    entry: &ConnectionEntry,
+    password: Option<&str>,
+    tls: &TlsMaterial,
+) -> Result<String, String> {
+    let mut conn = with_timeout(PgConnection::connect_with(&options(entry, password, tls))).await?;
     let version = run(&mut conn, PostgresDialect.version_sql(), 1, None).await;
     let _ = conn.close().await;
     Ok(super::first_text(&version?))
@@ -90,7 +113,10 @@ pub fn cell(row: &PgRow, index: usize) -> CellValue {
         Err(_) => return CellValue::Text(String::new()),
     };
     let typed = match type_name.as_str() {
-        "BOOL" => row.try_get_unchecked::<bool, _>(index).ok().map(CellValue::Bool),
+        "BOOL" => row
+            .try_get_unchecked::<bool, _>(index)
+            .ok()
+            .map(CellValue::Bool),
         "INT2" => row
             .try_get_unchecked::<i16, _>(index)
             .ok()
@@ -99,7 +125,10 @@ pub fn cell(row: &PgRow, index: usize) -> CellValue {
             .try_get_unchecked::<i32, _>(index)
             .ok()
             .map(|value| CellValue::Int(value.into())),
-        "INT8" => row.try_get_unchecked::<i64, _>(index).ok().map(CellValue::Int),
+        "INT8" => row
+            .try_get_unchecked::<i64, _>(index)
+            .ok()
+            .map(CellValue::Int),
         "FLOAT4" => row
             .try_get_unchecked::<f32, _>(index)
             .ok()
@@ -234,6 +263,38 @@ impl Dialect for PostgresDialect {
         )
     }
 
+    fn diagram_columns_sql(&self, namespace: &str) -> String {
+        format!(
+            "SELECT c.relname, a.attname, format_type(a.atttypid, a.atttypmod), \
+             EXISTS (SELECT 1 FROM pg_catalog.pg_index i \
+                     WHERE i.indrelid = a.attrelid AND i.indisprimary AND a.attnum = ANY(i.indkey)) \
+             FROM pg_catalog.pg_attribute a \
+             JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = {} AND c.relkind IN ('r', 'p', 'v', 'm', 'f') \
+             AND a.attnum > 0 AND NOT a.attisdropped \
+             ORDER BY c.relname, a.attnum",
+            quote_literal(namespace)
+        )
+    }
+
+    fn schema_foreign_keys_sql(&self, namespace: &str) -> String {
+        format!(
+            "SELECT c.relname, con.conname, a.attname, rn.nspname, rc.relname, ra.attname \
+             FROM pg_catalog.pg_constraint con \
+             JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             JOIN pg_catalog.pg_class rc ON rc.oid = con.confrelid \
+             JOIN pg_catalog.pg_namespace rn ON rn.oid = rc.relnamespace \
+             CROSS JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY AS k(attnum, refnum, ord) \
+             JOIN pg_catalog.pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum \
+             JOIN pg_catalog.pg_attribute ra ON ra.attrelid = con.confrelid AND ra.attnum = k.refnum \
+             WHERE con.contype = 'f' AND n.nspname = {} \
+             ORDER BY c.relname, con.conname, k.ord",
+            quote_literal(namespace)
+        )
+    }
+
     fn quote_ident(&self, ident: &str) -> String {
         quote_double(ident)
     }
@@ -242,7 +303,10 @@ impl Dialect for PostgresDialect {
         if namespace == "public" {
             return Some("SET search_path TO public".into());
         }
-        Some(format!("SET search_path TO {}, public", quote_double(namespace)))
+        Some(format!(
+            "SET search_path TO {}, public",
+            quote_double(namespace)
+        ))
     }
 
     fn create_namespace_sql(&self, namespace: &str) -> Option<String> {
@@ -254,7 +318,11 @@ impl Dialect for PostgresDialect {
     }
 
     fn rename_namespace_sql(&self, from: &str, to: &str) -> Option<String> {
-        Some(format!("ALTER SCHEMA {} RENAME TO {}", quote_double(from), quote_double(to)))
+        Some(format!(
+            "ALTER SCHEMA {} RENAME TO {}",
+            quote_double(from),
+            quote_double(to)
+        ))
     }
 }
 

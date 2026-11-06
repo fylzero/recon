@@ -4,17 +4,24 @@ use std::sync::Mutex;
 
 use tauri::{AppHandle, State};
 
+use crate::db::tls;
 use crate::models::{
-    sanitize_color, sanitize_font_family, sanitize_font_size, sanitize_list_font_family, AppData,
-    ConnectionEntry, ConnectionGroup, Driver, PreferencesPatch, SavedQuery, SshAuth, SshTunnel,
-    DEFAULT_EDITOR_FONT_SIZE, DEFAULT_GRID_FONT_SIZE, DEFAULT_LIST_FONT_SIZE, DEFAULT_SSH_PORT,
-    MAX_AUTO_COLUMN_WIDTH_MAX, MAX_AUTO_COLUMN_WIDTH_MIN, PAGE_SIZE_MAX, PAGE_SIZE_MIN,
-    QUERY_ROW_LIMIT_MAX, QUERY_ROW_LIMIT_MIN, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
+    sanitize_color, sanitize_font_family, sanitize_font_size, sanitize_list_font_family,
+    sanitize_notifications, AppData, ConnectionEntry, ConnectionGroup, Driver, PasswordSource,
+    PreferencesPatch, SavedQuery, SshAuth, SshTunnel, DEFAULT_EDITOR_FONT_SIZE,
+    DEFAULT_GRID_FONT_SIZE, DEFAULT_LIST_FONT_SIZE, DEFAULT_SSH_PORT, MAX_AUTO_COLUMN_WIDTH_MAX,
+    MAX_AUTO_COLUMN_WIDTH_MIN, PAGE_SIZE_MAX, PAGE_SIZE_MIN, QUERY_ROW_LIMIT_MAX,
+    QUERY_ROW_LIMIT_MIN, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
 };
 use crate::{persist, query_log, secrets};
 
 const DEFAULT_GROUP_COLOR: &str = "#16323c";
-const SSL_MODES: [&str; 3] = ["disable", "prefer", "require"];
+const SSL_MODES: [&str; 5] = ["disable", "prefer", "require", "verify-ca", "verify-full"];
+const CLEARTEXT_NEEDS_ENCRYPTION: &str =
+    "Sending the password in clear text needs SSL set to Require or Verify, or an SSH tunnel.";
+const IAM_NEEDS_ENCRYPTION: &str = "AWS IAM logins need SSL set to Require or Verify.";
+const HOST_CHECK_THROUGH_TUNNEL: &str =
+    "The host name can't be checked through an SSH tunnel. Set SSL to Verify CA instead.";
 
 pub struct AppState {
     pub data: Mutex<AppData>,
@@ -45,7 +52,11 @@ fn connection_list_mut<'a>(
 }
 
 fn take_connection(data: &mut AppData, connection_id: &str) -> Option<ConnectionEntry> {
-    if let Some(index) = data.connections.iter().position(|entry| entry.id == connection_id) {
+    if let Some(index) = data
+        .connections
+        .iter()
+        .position(|entry| entry.id == connection_id)
+    {
         return Some(data.connections.remove(index));
     }
     for group in &mut data.groups {
@@ -61,7 +72,11 @@ fn take_connection(data: &mut AppData, connection_id: &str) -> Option<Connection
 }
 
 fn connection_location(data: &AppData, connection_id: &str) -> Option<(Option<String>, usize)> {
-    if let Some(index) = data.connections.iter().position(|entry| entry.id == connection_id) {
+    if let Some(index) = data
+        .connections
+        .iter()
+        .position(|entry| entry.id == connection_id)
+    {
         return Some((None, index));
     }
     data.groups.iter().find_map(|group| {
@@ -80,6 +95,9 @@ fn sanitize_ssh(ssh: &mut SshTunnel) -> Result<(), String> {
     if ssh.port == 0 {
         ssh.port = DEFAULT_SSH_PORT;
     }
+    if ssh.auth == SshAuth::Password {
+        ssh.also_password = false;
+    }
     if !ssh.enabled {
         return Ok(());
     }
@@ -91,6 +109,97 @@ fn sanitize_ssh(ssh: &mut SshTunnel) -> Result<(), String> {
     }
     if ssh.auth == SshAuth::Key && ssh.key_path.is_empty() {
         return Err("Choose an SSH private key file.".into());
+    }
+    Ok(())
+}
+
+fn clear_server_auth(entry: &mut ConnectionEntry) {
+    entry.password_source = PasswordSource::Password;
+    entry.aws_region.clear();
+    entry.aws_profile.clear();
+    entry.password_command.clear();
+    entry.ssl_ca_path.clear();
+    entry.ssl_cert_path.clear();
+    entry.ssl_key_path.clear();
+}
+
+fn sanitize_password_source(entry: &mut ConnectionEntry) -> Result<(), String> {
+    entry.aws_region = entry.aws_region.trim().to_ascii_lowercase();
+    entry.aws_profile = entry.aws_profile.trim().to_string();
+    entry.password_command = entry.password_command.trim().to_string();
+    let keeps_aws = reads_from_s3(entry);
+    match entry.password_source {
+        PasswordSource::Password => {
+            if !keeps_aws {
+                entry.aws_region.clear();
+                entry.aws_profile.clear();
+            }
+            entry.password_command.clear();
+        }
+        PasswordSource::AwsIam => {
+            entry.password_command.clear();
+            if entry.aws_region.is_empty() {
+                return Err("An AWS region is required for IAM logins.".into());
+            }
+            if !entry.requires_tls() {
+                return Err(IAM_NEEDS_ENCRYPTION.into());
+            }
+            if entry.driver == Driver::Mysql {
+                entry.cleartext_auth = true;
+            }
+        }
+        PasswordSource::Command => {
+            if !keeps_aws {
+                entry.aws_region.clear();
+                entry.aws_profile.clear();
+            }
+            if entry.password_command.is_empty() {
+                return Err("Enter the command that prints the password.".into());
+            }
+        }
+    }
+    if entry.password_source.is_fetched() {
+        entry.save_password = false;
+    }
+    Ok(())
+}
+
+/// The AWS profile and region also tell the AWS CLI how to read certificates from S3.
+fn reads_from_s3(entry: &ConnectionEntry) -> bool {
+    [
+        &entry.ssl_ca_path,
+        &entry.ssl_cert_path,
+        &entry.ssl_key_path,
+    ]
+    .into_iter()
+    .any(|location| tls::is_s3(location))
+}
+
+fn sanitize_tls(entry: &mut ConnectionEntry) -> Result<(), String> {
+    entry.ssl_ca_path = entry.ssl_ca_path.trim().to_string();
+    entry.ssl_cert_path = entry.ssl_cert_path.trim().to_string();
+    entry.ssl_key_path = entry.ssl_key_path.trim().to_string();
+    if !entry.verifies_certificate() {
+        entry.ssl_ca_path.clear();
+    }
+    if !entry.requires_tls() {
+        entry.ssl_cert_path.clear();
+        entry.ssl_key_path.clear();
+    }
+    for location in [
+        &entry.ssl_ca_path,
+        &entry.ssl_cert_path,
+        &entry.ssl_key_path,
+    ] {
+        if !location.is_empty() {
+            tls::Location::parse(location)?;
+        }
+    }
+    if entry.ssl_mode == "verify-full" && entry.ssh.enabled {
+        return Err(HOST_CHECK_THROUGH_TUNNEL.into());
+    }
+    if entry.ssl_cert_path.is_empty() != entry.ssl_key_path.is_empty() {
+        return Err("Choose both a client certificate and its key, or neither.".into());
     }
     Ok(())
 }
@@ -118,7 +227,9 @@ pub fn sanitize_connection(mut entry: ConnectionEntry) -> Result<ConnectionEntry
             entry.user.clear();
             entry.database.clear();
             entry.save_password = false;
+            entry.cleartext_auth = false;
             entry.ssh = SshTunnel::default();
+            clear_server_auth(&mut entry);
             if entry.name.is_empty() {
                 entry.name = Path::new(&entry.file_path)
                     .file_stem()
@@ -138,6 +249,14 @@ pub fn sanitize_connection(mut entry: ConnectionEntry) -> Result<ConnectionEntry
             }
             entry.file_path.clear();
             sanitize_ssh(&mut entry.ssh)?;
+            sanitize_tls(&mut entry)?;
+            sanitize_password_source(&mut entry)?;
+            if entry.driver != Driver::Mysql {
+                entry.cleartext_auth = false;
+            }
+            if entry.cleartext_auth && !entry.ssh.enabled && !entry.requires_tls() {
+                return Err(CLEARTEXT_NEEDS_ENCRYPTION.into());
+            }
             if entry.name.is_empty() {
                 entry.name = if entry.database.is_empty() {
                     entry.host.clone()
@@ -161,10 +280,13 @@ fn sanitize_app_data(mut data: AppData) -> Result<AppData, String> {
     data.query_row_limit = data
         .query_row_limit
         .clamp(QUERY_ROW_LIMIT_MIN, QUERY_ROW_LIMIT_MAX);
-    data.sidebar_width = data.sidebar_width.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
+    data.sidebar_width = data
+        .sidebar_width
+        .clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
     data.max_auto_column_width = data
         .max_auto_column_width
         .clamp(MAX_AUTO_COLUMN_WIDTH_MIN, MAX_AUTO_COLUMN_WIDTH_MAX);
+    data.notifications = sanitize_notifications(&data.notifications);
     if let Some(window) = &mut data.window {
         window.width = window.width.max(crate::models::MIN_WINDOW_WIDTH);
         window.height = window.height.max(crate::models::MIN_WINDOW_HEIGHT);
@@ -269,6 +391,7 @@ pub fn create_group(
     };
     let mut data = lock(&state)?;
     data.groups.insert(0, group.clone());
+    data.dashboard_order.insert(0, group.id.clone());
     persist::save(&app, &data)?;
     Ok(group)
 }
@@ -295,7 +418,11 @@ pub fn update_group(
 }
 
 #[tauri::command]
-pub fn delete_group(app: AppHandle, state: State<AppState>, group_id: String) -> Result<(), String> {
+pub fn delete_group(
+    app: AppHandle,
+    state: State<AppState>,
+    group_id: String,
+) -> Result<(), String> {
     let mut data = lock(&state)?;
     let index = data
         .groups
@@ -318,7 +445,11 @@ pub fn delete_group(app: AppHandle, state: State<AppState>, group_id: String) ->
 }
 
 #[tauri::command]
-pub fn toggle_group(app: AppHandle, state: State<AppState>, group_id: String) -> Result<bool, String> {
+pub fn toggle_group(
+    app: AppHandle,
+    state: State<AppState>,
+    group_id: String,
+) -> Result<bool, String> {
     let mut data = lock(&state)?;
     let group = find_group_mut(&mut data, &group_id)?;
     group.expanded = !group.expanded;
@@ -340,15 +471,53 @@ pub fn set_all_groups_expanded(
     persist::save(&app, &data)
 }
 
+/**
+ * Applies a dashboard order of group ids and ungrouped connection ids. A
+ * grouped connection listed here is moved out of its group.
+ */
+fn arrange_dashboard(data: &mut AppData, ids: Vec<String>) -> Result<(), String> {
+    for id in &ids {
+        let top_level = data.groups.iter().any(|group| &group.id == id)
+            || data.connections.iter().any(|entry| &entry.id == id);
+        if !top_level {
+            let entry =
+                take_connection(data, id).ok_or_else(|| "Connection not found".to_string())?;
+            data.connections.push(entry);
+        }
+    }
+    let expected = data.dashboard_ids();
+    let unique: std::collections::HashSet<&String> = ids.iter().collect();
+    if unique.len() != ids.len()
+        || ids.len() != expected.len()
+        || !expected.iter().all(|id| unique.contains(id))
+    {
+        return Err("Dashboard list does not match saved groups and connections.".into());
+    }
+    let position: HashMap<&str, usize> = ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id.as_str(), index))
+        .collect();
+    data.groups
+        .sort_by_key(|group| position.get(group.id.as_str()).copied());
+    data.connections
+        .sort_by_key(|entry| position.get(entry.id.as_str()).copied());
+    data.dashboard_order = ids;
+    Ok(())
+}
+
 #[tauri::command]
-pub fn reorder_groups(
+pub fn reorder_dashboard(
     app: AppHandle,
     state: State<AppState>,
-    group_ids: Vec<String>,
+    ids: Vec<String>,
 ) -> Result<(), String> {
     let mut data = lock(&state)?;
-    reorder_by_ids(&mut data.groups, group_ids, |group| &group.id, "Group")?;
-    persist::save(&app, &data)
+    let mut next = data.clone();
+    arrange_dashboard(&mut next, ids)?;
+    persist::save(&app, &next)?;
+    *data = next;
+    Ok(())
 }
 
 #[tauri::command]
@@ -359,6 +528,7 @@ pub fn save_connection(
     connection: ConnectionEntry,
     password: Option<String>,
     ssh_secret: Option<String>,
+    ssh_password: Option<String>,
 ) -> Result<ConnectionEntry, String> {
     let mut entry = sanitize_connection(connection)?;
     let is_new = entry.id.trim().is_empty();
@@ -398,6 +568,12 @@ pub fn save_connection(
     } else if let Some(secret) = ssh_secret.filter(|value| !value.is_empty()) {
         secrets::set(&ssh_account, &secret)?;
     }
+    let ssh_password_account = secrets::ssh_password_account(&entry.id);
+    if !entry.ssh.uses_second_password() {
+        secrets::delete(&ssh_password_account)?;
+    } else if let Some(password) = ssh_password.filter(|value| !value.is_empty()) {
+        secrets::set(&ssh_password_account, &password)?;
+    }
     Ok(entry)
 }
 
@@ -411,7 +587,8 @@ pub fn remove_connection(
         let mut data = lock(&state)?;
         let removed = take_connection(&mut data, &connection_id)
             .ok_or_else(|| "Connection not found".to_string())?;
-        data.saved_queries.retain(|query| query.connection_id != connection_id);
+        data.saved_queries
+            .retain(|query| query.connection_id != connection_id);
         persist::save(&app, &data)?;
         removed
     };
@@ -464,7 +641,11 @@ pub fn save_query(
     if data.find_connection(&query.connection_id).is_none() {
         return Err("Connection not found".into());
     }
-    match data.saved_queries.iter_mut().find(|item| item.id == query.id) {
+    match data
+        .saved_queries
+        .iter_mut()
+        .find(|item| item.id == query.id)
+    {
         Some(existing) => *existing = query.clone(),
         None => data.saved_queries.push(query.clone()),
     }
@@ -496,6 +677,26 @@ pub fn list_ssh_keys() -> Vec<String> {
 #[tauri::command]
 pub fn has_saved_ssh_secret(connection_id: String) -> Result<bool, String> {
     Ok(secrets::get(&secrets::ssh_account(&connection_id))?.is_some())
+}
+
+#[tauri::command]
+pub fn has_saved_ssh_password(connection_id: String) -> Result<bool, String> {
+    Ok(secrets::get(&secrets::ssh_password_account(&connection_id))?.is_some())
+}
+
+#[tauri::command]
+pub fn list_ssh_hosts() -> Vec<String> {
+    crate::db::ssh_config::list_hosts()
+}
+
+#[tauri::command]
+pub async fn list_aws_profiles() -> Vec<String> {
+    crate::db::credentials::list_aws_profiles().await
+}
+
+#[tauri::command]
+pub async fn resolve_ssh_host(host: String) -> Option<crate::db::ssh_config::ResolvedHost> {
+    crate::db::ssh_config::resolve(&host).await
 }
 
 #[tauri::command]
@@ -538,6 +739,9 @@ pub fn update_preferences(
     }
     if let Some(value) = patch.auto_apply_filters {
         data.auto_apply_filters = value;
+    }
+    if let Some(value) = patch.notifications {
+        data.notifications = sanitize_notifications(&value);
     }
     persist::save(&app, &data)?;
     Ok(data.clone())
@@ -600,6 +804,7 @@ pub fn reveal_path(path: String) -> Result<(), String> {
     reveal_in_finder(Path::new(&path), "file")
 }
 
+#[cfg(target_os = "macos")]
 fn reveal_in_finder(path: &Path, label: &str) -> Result<(), String> {
     let status = std::process::Command::new("open")
         .arg("-R")
@@ -611,6 +816,12 @@ fn reveal_in_finder(path: &Path, label: &str) -> Result<(), String> {
     } else {
         Err(format!("Could not reveal the {label}."))
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn reveal_in_finder(path: &Path, label: &str) -> Result<(), String> {
+    tauri_plugin_opener::reveal_item_in_dir(path)
+        .map_err(|err| format!("Could not reveal the {label}: {err}"))
 }
 
 fn connection_name(state: &AppState, connection_id: &str) -> Result<Option<String>, String> {
@@ -661,8 +872,131 @@ mod tests {
             ssl_mode: "bogus".into(),
             header_color: "nope".into(),
             save_password: true,
+            cleartext_auth: false,
+            password_source: PasswordSource::Password,
+            aws_region: String::new(),
+            aws_profile: String::new(),
+            password_command: String::new(),
+            ssl_ca_path: String::new(),
+            ssl_cert_path: String::new(),
+            ssl_key_path: String::new(),
             ssh: SshTunnel::default(),
         }
+    }
+
+    fn with_tunnel(mut entry: ConnectionEntry) -> ConnectionEntry {
+        entry.ssh.enabled = true;
+        entry.ssh.host = "bastion.example.com".into();
+        entry.ssh.user = "deploy".into();
+        entry
+    }
+
+    #[test]
+    fn aws_iam_needs_region_and_tls_and_turns_on_cleartext() {
+        let mut mysql = entry(Driver::Mysql);
+        mysql.password_source = PasswordSource::AwsIam;
+        mysql.ssl_mode = "require".into();
+        mysql.password_command = "echo leftover".into();
+        assert!(sanitize_connection(mysql.clone()).is_err());
+        mysql.aws_region = " US-EAST-1 ".into();
+        let saved = sanitize_connection(mysql.clone()).unwrap();
+        assert_eq!(saved.aws_region, "us-east-1");
+        assert!(saved.cleartext_auth);
+        assert!(!saved.save_password);
+        assert!(saved.password_command.is_empty());
+
+        mysql.ssl_mode = "prefer".into();
+        assert_eq!(
+            sanitize_connection(mysql.clone()).unwrap_err(),
+            IAM_NEEDS_ENCRYPTION
+        );
+        assert_eq!(
+            sanitize_connection(with_tunnel(mysql)).unwrap_err(),
+            IAM_NEEDS_ENCRYPTION
+        );
+
+        let mut postgres = entry(Driver::Postgres);
+        postgres.password_source = PasswordSource::AwsIam;
+        postgres.aws_region = "eu-west-1".into();
+        postgres.ssl_mode = "verify-ca".into();
+        assert!(!sanitize_connection(postgres).unwrap().cleartext_auth);
+    }
+
+    #[test]
+    fn password_command_must_be_set() {
+        let mut pg = entry(Driver::Postgres);
+        pg.password_source = PasswordSource::Command;
+        pg.aws_region = "us-east-1".into();
+        assert!(sanitize_connection(pg.clone()).is_err());
+        pg.password_command = "  op read op://db/password  ".into();
+        let saved = sanitize_connection(pg).unwrap();
+        assert_eq!(saved.password_command, "op read op://db/password");
+        assert!(saved.aws_region.is_empty());
+        assert!(!saved.save_password);
+    }
+
+    #[test]
+    fn validates_certificate_locations_and_keeps_aws_settings_for_s3() {
+        let mut pg = entry(Driver::Postgres);
+        pg.ssl_mode = "verify-ca".into();
+        pg.ssl_ca_path = "http://example.com/ca.pem".into();
+        assert_eq!(
+            sanitize_connection(pg.clone()).unwrap_err(),
+            tls::HTTP_NOT_ALLOWED
+        );
+        pg.ssl_ca_path = "s3://team-certs".into();
+        assert!(sanitize_connection(pg.clone()).is_err());
+
+        pg.ssl_ca_path = "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem".into();
+        pg.aws_profile = "prod".into();
+        let saved = sanitize_connection(pg.clone()).unwrap();
+        assert!(saved.ssl_ca_path.starts_with("https://"));
+        assert!(saved.aws_profile.is_empty());
+
+        pg.ssl_ca_path = "s3://team-certs/db/ca.pem".into();
+        pg.aws_region = " EU-WEST-1 ".into();
+        let saved = sanitize_connection(pg.clone()).unwrap();
+        assert_eq!(saved.aws_profile, "prod");
+        assert_eq!(saved.aws_region, "eu-west-1");
+
+        pg.password_source = PasswordSource::Command;
+        pg.password_command = "op read op://db/password".into();
+        assert_eq!(sanitize_connection(pg.clone()).unwrap().aws_profile, "prod");
+
+        pg.ssl_mode = "prefer".into();
+        let saved = sanitize_connection(pg).unwrap();
+        assert!(saved.ssl_ca_path.is_empty() && saved.aws_profile.is_empty());
+    }
+
+    #[test]
+    fn validates_certificate_settings() {
+        let mut pg = entry(Driver::Postgres);
+        pg.ssl_mode = "verify-full".into();
+        pg.ssl_ca_path = " ~/certs/global-bundle.pem ".into();
+        assert_eq!(
+            sanitize_connection(pg.clone()).unwrap().ssl_ca_path,
+            "~/certs/global-bundle.pem"
+        );
+        assert_eq!(
+            sanitize_connection(with_tunnel(pg.clone())).unwrap_err(),
+            HOST_CHECK_THROUGH_TUNNEL
+        );
+        pg.ssl_mode = "verify-ca".into();
+        assert!(sanitize_connection(with_tunnel(pg.clone())).is_ok());
+
+        pg.ssl_cert_path = "/tmp/client.pem".into();
+        assert!(sanitize_connection(pg.clone()).is_err());
+        pg.ssl_key_path = "/tmp/client.key".into();
+        assert!(sanitize_connection(pg.clone()).is_ok());
+
+        pg.ssl_mode = "require".into();
+        let saved = sanitize_connection(pg.clone()).unwrap();
+        assert!(saved.ssl_ca_path.is_empty());
+        assert_eq!(saved.ssl_cert_path, "/tmp/client.pem");
+
+        pg.ssl_mode = "prefer".into();
+        let saved = sanitize_connection(pg).unwrap();
+        assert!(saved.ssl_cert_path.is_empty() && saved.ssl_key_path.is_empty());
     }
 
     #[test]
@@ -679,12 +1013,41 @@ mod tests {
         mysql.ssh.auth = SshAuth::Key;
         assert!(sanitize_connection(mysql.clone()).is_err());
         mysql.ssh.key_path = "~/.ssh/id_ed25519".into();
-        assert!(sanitize_connection(mysql).is_ok());
+        mysql.ssh.also_password = true;
+        assert!(sanitize_connection(mysql.clone())
+            .unwrap()
+            .ssh
+            .uses_second_password());
+        mysql.ssh.auth = SshAuth::Password;
+        assert!(!sanitize_connection(mysql).unwrap().ssh.also_password);
 
         let mut lite = entry(Driver::Sqlite);
         lite.file_path = "/tmp/app.db".into();
         lite.ssh.enabled = true;
         assert!(!sanitize_connection(lite).unwrap().ssh.enabled);
+    }
+
+    #[test]
+    fn cleartext_auth_is_mysql_only_and_needs_encryption() {
+        let mut mysql = entry(Driver::Mysql);
+        mysql.cleartext_auth = true;
+        mysql.ssl_mode = "prefer".into();
+        assert_eq!(
+            sanitize_connection(mysql.clone()).unwrap_err(),
+            CLEARTEXT_NEEDS_ENCRYPTION
+        );
+        mysql.ssl_mode = "require".into();
+        assert!(sanitize_connection(mysql.clone()).unwrap().cleartext_auth);
+
+        mysql.ssl_mode = "disable".into();
+        mysql.ssh.enabled = true;
+        mysql.ssh.host = "bastion.example.com".into();
+        mysql.ssh.user = "deploy".into();
+        assert!(sanitize_connection(mysql).unwrap().cleartext_auth);
+
+        let mut postgres = entry(Driver::Postgres);
+        postgres.cleartext_auth = true;
+        assert!(!sanitize_connection(postgres).unwrap().cleartext_auth);
     }
 
     #[test]
@@ -715,10 +1078,15 @@ mod tests {
         assert!(sanitize_connection(entry(Driver::Sqlite)).is_err());
         let mut lite = entry(Driver::Sqlite);
         lite.file_path = "/tmp/app.db".into();
+        lite.password_source = PasswordSource::Command;
+        lite.password_command = "echo hi".into();
+        lite.ssl_ca_path = "/tmp/ca.pem".into();
         let lite = sanitize_connection(lite).unwrap();
         assert_eq!(lite.name, "app");
         assert!(lite.user.is_empty());
         assert!(!lite.save_password);
+        assert_eq!(lite.password_source, PasswordSource::Password);
+        assert!(lite.password_command.is_empty() && lite.ssl_ca_path.is_empty());
     }
 
     #[test]
@@ -736,9 +1104,47 @@ mod tests {
         data.connections.push(conn);
         assert_eq!(connection_location(&data, "c1"), Some((None, 0)));
         let taken = take_connection(&mut data, "c1").unwrap();
-        find_group_mut(&mut data, "g1").unwrap().connections.push(taken);
-        assert_eq!(connection_location(&data, "c1"), Some((Some("g1".into()), 0)));
+        find_group_mut(&mut data, "g1")
+            .unwrap()
+            .connections
+            .push(taken);
+        assert_eq!(
+            connection_location(&data, "c1"),
+            Some((Some("g1".into()), 0))
+        );
         assert!(data.connections.is_empty());
+    }
+
+    #[test]
+    fn arranges_groups_and_connections_together() {
+        let mut data = AppData::default();
+        for id in ["g1", "g2"] {
+            data.groups.push(ConnectionGroup {
+                id: id.into(),
+                name: id.into(),
+                expanded: true,
+                header_color: DEFAULT_GROUP_COLOR.into(),
+                connections: Vec::new(),
+            });
+        }
+        let conn = |id: &str| {
+            let mut conn = sanitize_connection(entry(Driver::Mysql)).unwrap();
+            conn.id = id.into();
+            conn
+        };
+        data.connections.push(conn("c1"));
+        data.groups[1].connections.push(conn("c2"));
+        assert_eq!(data.dashboard_ids(), ["c1", "g1", "g2"]);
+
+        let ids = |items: &[&str]| items.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        arrange_dashboard(&mut data, ids(&["g2", "c2", "c1", "g1"])).unwrap();
+        assert_eq!(data.dashboard_ids(), ["g2", "c2", "c1", "g1"]);
+        assert_eq!(connection_location(&data, "c2"), Some((None, 0)));
+        assert_eq!(data.groups[0].id, "g2");
+        assert!(data.groups[0].connections.is_empty());
+
+        assert!(arrange_dashboard(&mut data, ids(&["g2", "c1", "g1"])).is_err());
+        assert!(arrange_dashboard(&mut data, ids(&["g2", "c2", "c2", "c1", "g1"])).is_err());
     }
 
     #[test]

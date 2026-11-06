@@ -7,6 +7,7 @@ import * as api from "../api";
 import { SIDEBAR_MAX, SIDEBAR_MIN, useApp } from "../composables/useApp";
 import { useConnectionForm } from "../composables/useConnectionForm";
 import { registerInnerTabCloser, setLiveTitle, useTabs } from "../composables/useTabs";
+import { useTransfers } from "../composables/useTransfers";
 import type { FilterPreviewGroup } from "../filters/compile";
 import {
   cloneNode,
@@ -19,6 +20,8 @@ import {
   sanitizeFilter,
   type TableViewState,
 } from "../filters/model";
+import { baseName, shortcut } from "../platform";
+import { isTabularFile } from "../transfer";
 import {
   driverLabel,
   type BackupInfo,
@@ -35,12 +38,15 @@ import DriverIcon from "./DriverIcon.vue";
 import ExportDialog from "./ExportDialog.vue";
 import FilterPopover from "./FilterPopover.vue";
 import ImportDialog from "./ImportDialog.vue";
+import ImportRowsDialog from "./ImportRowsDialog.vue";
 import Modal from "./Modal.vue";
 import QueryEditor from "./QueryEditor.vue";
 import QueryHistory from "./QueryHistory.vue";
+import SchemaDiagram, { type DiagramScope } from "./SchemaDiagram.vue";
 import RestoreDialog from "./RestoreDialog.vue";
 import SavedQueries from "./SavedQueries.vue";
 import SplitWorkspace from "./SplitWorkspace.vue";
+import TableActionDialog from "./TableActionDialog.vue";
 import TablePaneFrame, { type PaneTabInfo } from "./TablePaneFrame.vue";
 import TableView from "./TableView.vue";
 import {
@@ -48,15 +54,17 @@ import {
   addTabToPane,
   canSplit,
   defaultSizesFor,
+  checkSplitPaneAt,
   DROP_EDGE_ZONE,
   dropEdge,
-  edgeToDirection,
   emptyPane,
   emptyWorkspace,
   findPane,
   focusedActiveTabId,
   focusPane,
   MAX_PANES,
+  MAX_PANES_ACROSS,
+  MAX_PANES_DOWN,
   mergeAllPanes,
   insertionIndex,
   moveTab,
@@ -67,6 +75,7 @@ import {
   removeTabFromWorkspace,
   restoreWorkspace,
   splitFocused,
+  splitPaneAt,
   tabStripDrop,
   updateSplitSizes,
   type DropEdge,
@@ -107,6 +116,7 @@ const {
 } = useApp();
 const { openEditConnection } = useConnectionForm();
 const { openConnectionTab } = useTabs();
+const { revealKind } = useTransfers();
 
 type ConnectionEvent = { connectionId: string; error: string | null };
 
@@ -124,9 +134,42 @@ const tables = ref<TableInfo[]>([]);
 const tablesLoading = ref(false);
 const tablesError = ref("");
 const filter = ref("");
+const tableFilterInput = ref<HTMLInputElement | null>(null);
+const tableListEl = ref<HTMLElement | null>(null);
+/** Set while a sidebar table name is the thing the user is acting on, even if the webview left keyboard focus on the grid. */
+let tableTyping = false;
 const schema = shallowRef<SQLNamespace>({});
 const tabs = ref<PaneTab[]>([]);
 const view = ref<ConnectionViewTab>("tables");
+const diagramOpened = ref(false);
+const diagramScope = ref<DiagramScope>("schema");
+type TableListView = "tables" | "diagram";
+const TABLE_LIST_KEY = "recon.tableListOpen";
+/** The table list beside the diagram picks tables for it rather than opening them. */
+const listForDiagram = computed(() => view.value === "diagram");
+const tableListOpen = ref<Record<TableListView, boolean>>(loadTableListOpen());
+const tableListView = computed<TableListView | null>(() =>
+  view.value === "tables" || view.value === "diagram" ? view.value : null,
+);
+const tableListVisible = computed(() => (tableListView.value ? tableListOpen.value[tableListView.value] : false));
+
+function loadTableListOpen(): Record<TableListView, boolean> {
+  try {
+    const saved = JSON.parse(localStorage.getItem(TABLE_LIST_KEY) ?? "{}") ?? {};
+    return { tables: saved.tables !== false, diagram: saved.diagram !== false };
+  } catch {
+    return { tables: true, diagram: true };
+  }
+}
+
+function toggleTableList() {
+  const current = tableListView.value;
+  if (!current) {
+    return;
+  }
+  tableListOpen.value = { ...tableListOpen.value, [current]: !tableListOpen.value[current] };
+  localStorage.setItem(TABLE_LIST_KEY, JSON.stringify(tableListOpen.value));
+}
 const workspace = ref<TableWorkspace>(emptyWorkspace());
 const activeQueryTabId = ref("");
 const tabsRestored = ref(false);
@@ -145,12 +188,13 @@ const popoverFilters = computed(() =>
 const tabActivity = new Map<string, number>();
 let tableTabsSaveTimer = 0;
 const saving = ref(false);
-const nameDialog = ref<{ mode: "create" } | { mode: "rename"; from: string } | null>(null);
+const nameDialog = ref<{ mode: "create" } | { mode: "rename"; from: string } | { mode: "table" } | null>(null);
 const nameValue = ref("");
 const nameError = ref("");
 const nameBusy = ref(false);
 const nameInput = ref<HTMLInputElement | null>(null);
 const sidebarEl = ref<HTMLElement | null>(null);
+const diagramEl = ref<InstanceType<typeof SchemaDiagram> | null>(null);
 const subtabBar = ref<HTMLElement | null>(null);
 
 const activeTableTabId = computed({
@@ -163,6 +207,9 @@ const activeTableTabId = computed({
   },
 });
 const selectedTables = ref(new Set<string>());
+const selectedTableNames = computed(() =>
+  tables.value.map((table) => table.name).filter((name) => selectedTables.value.has(name)),
+);
 const tableMenu = ref<{ x: number; y: number; tables: string[] } | null>(null);
 const tableMenuEl = ref<HTMLElement | null>(null);
 const tabMenu = ref<{ x: number; y: number; tabId: string } | null>(null);
@@ -172,15 +219,19 @@ const renameValue = ref("");
 const modifiedQueries = ref(new Set<string>());
 const selectedSavedId = ref("");
 const saveDialog = ref<{ tabId: string } | null>(null);
+const savedQueriesEl = ref<InstanceType<typeof SavedQueries> | null>(null);
 const saveName = ref("");
 const saveDescription = ref("");
 const saveBusy = ref(false);
 const saveError = ref("");
 const saveNameInput = ref<HTMLInputElement | null>(null);
-const exportDialog = ref<{ tables: string[] | null } | null>(null);
-const importPath = ref<string | null>(null);
-const backupOpen = ref(false);
-const restoreTarget = ref<{ path: string; info: BackupInfo } | null>(null);
+// Each keeps the database it was opened on, since its transfer can keep running while you switch away.
+const exportDialog = ref<{ namespace: string; tables: string[] | null; tableCount: number } | null>(null);
+const importTarget = ref<{ namespace: string; path: string } | null>(null);
+const importRowsTarget = ref<{ namespace: string; path: string; table: string | null } | null>(null);
+const backupTarget = ref<{ namespace: string; tableCount: number } | null>(null);
+const restoreTarget = ref<{ namespace: string; path: string; info: BackupInfo } | null>(null);
+const tableAction = ref<{ action: "truncate" | "drop"; namespace: string; tables: string[] } | null>(null);
 let selectionAnchor = "";
 const editors = new Map<string, InstanceType<typeof QueryEditor>>();
 const tableViews = new Map<string, InstanceType<typeof TableView>>();
@@ -198,8 +249,15 @@ const extraTab = computed(() => props.sessionId !== props.connectionId);
 const entry = computed(() => match.value?.connection ?? null);
 const driver = computed(() => entry.value?.driver ?? "mysql");
 const namespaceLabel = computed(() => session.value?.namespaceLabel ?? "Database");
+const systemNamespaces = computed(() => session.value?.systemNamespaces ?? []);
 const needsPassword = computed(
-  () => Boolean(entry.value && entry.value.driver !== "sqlite" && !entry.value.savePassword),
+  () =>
+    Boolean(
+      entry.value &&
+        entry.value.driver !== "sqlite" &&
+        (entry.value.passwordSource ?? "password") === "password" &&
+        !entry.value.savePassword,
+    ),
 );
 
 const databaseTitle = computed(() => {
@@ -208,7 +266,7 @@ const databaseTitle = computed(() => {
     return "";
   }
   if (connection.driver === "sqlite") {
-    return connection.filePath.split("/").pop() || connection.name;
+    return baseName(connection.filePath) || connection.name;
   }
   if (connection.driver === "postgres") {
     return connection.database || connection.name;
@@ -246,6 +304,9 @@ function tableKey(tableNamespace: string, table: string) {
 }
 
 const activeTableKey = computed(() => {
+  if (listForDiagram.value) {
+    return "";
+  }
   const tab = tabs.value.find((item) => item.id === activeTableTabId.value);
   return tab?.kind === "table" ? tableKey(tab.namespace, tab.table) : "";
 });
@@ -278,23 +339,81 @@ const tableTitleSuffix = computed(() => {
 
 const queryTabs = computed(() => tabs.value.filter((tab): tab is QueryTab => tab.kind === "query"));
 const viewTabs = computed(() => {
-  if (view.value === "history") {
+  if (view.value === "history" || view.value === "diagram") {
     return [];
   }
   return tabs.value.filter((tab) => (view.value === "sql" ? tab.kind === "query" : tab.kind === "table"));
 });
 const activeTabId = computed(() => {
-  if (view.value === "history") {
+  if (view.value === "history" || view.value === "diagram") {
     return "";
   }
   return view.value === "sql" ? activeQueryTabId.value : activeTableTabId.value;
 });
 
+const pinnedTables = ref(new Set<string>());
+const pinnedKey = (tableNamespace: string) => `recon.pinnedTables.${props.connectionId}.${tableNamespace}`;
+
+function loadPinned(tableNamespace: string) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(pinnedKey(tableNamespace)) ?? "[]");
+    return new Set<string>(Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : []);
+  } catch {
+    return new Set<string>();
+  }
+}
+
+function savePinned(tableNamespace: string, pinned: Set<string>) {
+  if (pinned.size) {
+    localStorage.setItem(pinnedKey(tableNamespace), JSON.stringify([...pinned]));
+  } else {
+    localStorage.removeItem(pinnedKey(tableNamespace));
+  }
+  if (tableNamespace === namespace.value) {
+    pinnedTables.value = pinned;
+  }
+}
+
+function setPinned(names: string[], value: boolean) {
+  const next = new Set(pinnedTables.value);
+  for (const name of names) {
+    if (value) {
+      next.add(name);
+    } else {
+      next.delete(name);
+    }
+  }
+  savePinned(namespace.value, next);
+}
+
+watch(namespace, (value) => (pinnedTables.value = loadPinned(value)), { immediate: true });
+
+/** Pinned tables come first, each group keeping the database's order. */
 const filteredTables = computed(() => {
   const needle = filter.value.trim().toLowerCase();
-  return needle
+  const matching = needle
     ? tables.value.filter((table) => table.name.toLowerCase().includes(needle))
     : tables.value;
+  const pinned = pinnedTables.value;
+  if (!pinned.size) {
+    return matching;
+  }
+  return [
+    ...matching.filter((table) => pinned.has(table.name)),
+    ...matching.filter((table) => !pinned.has(table.name)),
+  ];
+});
+const pinnedShownCount = computed(
+  () => filteredTables.value.filter((table) => pinnedTables.value.has(table.name)).length,
+);
+const menuAllPinned = computed(() => {
+  const chosen = tableMenu.value?.tables ?? [];
+  return chosen.length > 0 && chosen.every((name) => pinnedTables.value.has(name));
+});
+const tableMenuPinLabel = computed(() => {
+  const count = tableMenu.value?.tables.length ?? 0;
+  const verb = menuAllPinned.value ? "Unpin" : "Pin";
+  return count === 1 ? (menuAllPinned.value ? "Unpin" : "Pin to top") : `${verb} ${count.toLocaleString()} tables`;
 });
 
 const tableMenuExportLabel = computed(() => {
@@ -304,6 +423,15 @@ const tableMenuExportLabel = computed(() => {
   }
   const kind = tables.value.find((table) => table.name === chosen[0])?.kind;
   return kind === "view" ? "Export view…" : "Export table…";
+});
+
+const menuHasOnlyTables = computed(() => {
+  const chosen = tableMenu.value?.tables ?? [];
+  return (
+    !lost.value &&
+    chosen.length > 0 &&
+    chosen.every((name) => tables.value.find((table) => table.name === name)?.kind === "table")
+  );
 });
 
 const canTransfer = computed(() => Boolean(namespace.value || driver.value === "sqlite") && !lost.value);
@@ -317,7 +445,7 @@ const subtitle = computed(() => {
     return "";
   }
   if (connection.driver === "sqlite") {
-    return connection.filePath.split("/").pop() ?? connection.filePath;
+    return baseName(connection.filePath);
   }
   const address = `${connection.user}@${connection.host}:${connection.port}`;
   return connection.ssh?.enabled ? `${address} via ${connection.ssh.host}` : address;
@@ -807,6 +935,10 @@ function onTableDblclick(event: MouseEvent, table: TableInfo) {
   if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
     return;
   }
+  if (listForDiagram.value) {
+    openFromDiagram(table.name);
+    return;
+  }
   if (clickCreatedTab === table.name) {
     clickCreatedTab = "";
     return;
@@ -908,7 +1040,72 @@ watch(activeTableTabId, (id) => {
   scheduleSaveTableTabs();
 });
 
+function armTableTyping() {
+  tableTyping = true;
+}
+
+function onTableTypingPointerDown(event: PointerEvent) {
+  const target = event.target;
+  if (!(target instanceof Node) || !tableListEl.value?.contains(target)) {
+    tableTyping = false;
+    return;
+  }
+  if (target instanceof Element && target.closest(".db-table")) {
+    tableTyping = true;
+  }
+}
+
+/**
+ * A table name is a button, and clicking it often leaves keyboard focus on the
+ * grid. While the name is the active target, send typing to Filter tables.
+ */
+function onTableTypingKeydown(event: KeyboardEvent) {
+  if (!props.active || !tableTyping || !tableListVisible.value) {
+    return;
+  }
+  if (event.metaKey || event.ctrlKey || event.altKey || event.isComposing) {
+    return;
+  }
+  if (document.querySelector(".modal-layer, [role='menu']")) {
+    return;
+  }
+  const target = event.target;
+  if (target instanceof HTMLElement && target.closest("input, textarea, select, [contenteditable]")) {
+    return;
+  }
+  if (event.key === "Tab" || event.key === "Escape" || event.key === "Enter" || event.key.startsWith("Arrow")) {
+    if (!(target instanceof Node) || !tableListEl.value?.contains(target)) {
+      tableTyping = false;
+    }
+    return;
+  }
+  const character = event.key.length === 1;
+  const backspace = event.key === "Backspace" && filter.value.length > 0;
+  if (!character && !backspace) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  const next = backspace ? filter.value.slice(0, -1) : filter.value + event.key;
+  filter.value = next;
+  const input = tableFilterInput.value;
+  if (!input) {
+    return;
+  }
+  input.value = next;
+  void nextTick(() => {
+    if (!tableTyping || !tableListVisible.value) {
+      return;
+    }
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(input.value.length, input.value.length);
+  });
+}
+
 function activeTableName() {
+  if (listForDiagram.value) {
+    return null;
+  }
   const tab = tabs.value.find((item) => item.id === activeTableTabId.value);
   return tab?.kind === "table" && tab.namespace === namespace.value ? tab.table : null;
 }
@@ -917,12 +1114,17 @@ function activeTableName() {
  * Finder-style selection: a plain click opens the table and selects only it,
  * Cmd+click toggles a table without opening it, and Shift+click selects the
  * visible range from the last clicked table. Option+click and double-click
- * open another tab on the table.
+ * open another tab on the table. Beside the diagram, a plain click only
+ * selects (and centers the table when the whole schema is showing), and
+ * double-click leaves the diagram to open it.
  */
 function onTableClick(event: MouseEvent, table: TableInfo) {
   if (event.altKey) {
     selectedTables.value = new Set([table.name]);
     selectionAnchor = table.name;
+    if (listForDiagram.value) {
+      view.value = "tables";
+    }
     openTable(table, true);
     return;
   }
@@ -950,6 +1152,13 @@ function onTableClick(event: MouseEvent, table: TableInfo) {
   }
   selectedTables.value = new Set([table.name]);
   selectionAnchor = table.name;
+  if (listForDiagram.value) {
+    clickCreatedTab = "";
+    if (diagramScope.value === "schema") {
+      diagramEl.value?.reveal(table.name);
+    }
+    return;
+  }
   const created = openTable(table);
   if (event.detail <= 1) {
     clickCreatedTab = created ? table.name : "";
@@ -1023,14 +1232,48 @@ function openTabMenu(event: MouseEvent, tab: PaneTab) {
   fitMenu(tabMenu, tabMenuEl);
 }
 
-function runTableAction(action: "open" | "openNew" | "openSide" | "query" | "copy" | "export") {
+function runTableAction(
+  action:
+    | "open"
+    | "openNew"
+    | "openSide"
+    | "query"
+    | "copy"
+    | "pin"
+    | "diagram"
+    | "export"
+    | "importRows"
+    | "truncate"
+    | "drop",
+) {
   const chosen = tableMenu.value?.tables ?? [];
   const table = tables.value.find((item) => item.name === chosen[0]);
   if (action === "openSide" && table) {
     openTableToTheSide(table);
     return;
   }
+  const unpin = menuAllPinned.value;
   closeMenus();
+  if (action === "pin") {
+    setPinned(chosen, !unpin);
+    return;
+  }
+  if (action === "truncate") {
+    startTruncate(chosen);
+    return;
+  }
+  if (action === "drop") {
+    tableAction.value = { action, namespace: namespace.value, tables: chosen };
+    return;
+  }
+  if (action === "diagram") {
+    diagramScope.value = "selection";
+    selectView("diagram");
+    if (chosen.length === 1) {
+      void nextTick(() => diagramEl.value?.isolate(chosen[0]));
+    }
+    return;
+  }
   if (!table) {
     return;
   }
@@ -1040,24 +1283,52 @@ function runTableAction(action: "open" | "openNew" | "openSide" | "query" | "cop
     queryTable(table);
   } else if (action === "copy") {
     void copyNamespaceName(table.name);
+  } else if (action === "importRows") {
+    void startImport(table.name);
   } else {
-    exportDialog.value = { tables: chosen };
+    openExport(chosen);
   }
 }
 
-async function startImport() {
+function openExport(chosen: string[] | null) {
+  if (!revealKind(props.sessionId, "export")) {
+    exportDialog.value = { namespace: namespace.value, tables: chosen, tableCount: tables.value.length };
+  }
+}
+
+function openBackup() {
+  if (!revealKind(props.sessionId, "backup")) {
+    backupTarget.value = { namespace: namespace.value, tableCount: tables.value.length };
+  }
+}
+
+async function startImport(table: string | null = null) {
+  if (revealKind(props.sessionId, "import")) {
+    return;
+  }
+  const rows = { name: "CSV or JSON", extensions: ["csv", "tsv", "txt", "json", "ndjson", "jsonl", "gz"] };
+  const sql = { name: "SQL", extensions: ["sql", "gz"] };
+  const any = { name: "SQL, CSV, or JSON", extensions: ["sql", ...rows.extensions] };
   const path = await openFile({
-    title: `Import into “${namespace.value}”`,
+    title: table ? `Import rows into “${table}”` : `Import into “${namespace.value}”`,
     multiple: false,
     directory: false,
-    filters: [{ name: "SQL", extensions: ["sql", "gz"] }],
+    filters: table ? [rows] : [any, sql, rows],
   });
-  if (typeof path === "string") {
-    importPath.value = path;
+  if (typeof path !== "string") {
+    return;
+  }
+  if (table || isTabularFile(path)) {
+    importRowsTarget.value = { namespace: namespace.value, path, table };
+  } else {
+    importTarget.value = { namespace: namespace.value, path };
   }
 }
 
 async function startRestore() {
+  if (revealKind(props.sessionId, "restore")) {
+    return;
+  }
   const path = await openFile({
     title: `Restore “${namespace.value}” from a backup`,
     multiple: false,
@@ -1068,7 +1339,8 @@ async function startRestore() {
     return;
   }
   try {
-    restoreTarget.value = { path, info: await api.readBackupInfo(path) };
+    const target = namespace.value;
+    restoreTarget.value = { namespace: target, path, info: await api.readBackupInfo(path) };
   } catch (err) {
     showToast(String(err), "error");
   }
@@ -1083,6 +1355,48 @@ function refreshVisibleTables() {
 function onImported() {
   void refreshAll();
   refreshVisibleTables();
+}
+
+function tabsOnTables(target: string, names: string[]) {
+  return tabs.value.filter((tab) => tab.kind === "table" && tab.namespace === target && names.includes(tab.table));
+}
+
+function startTruncate(names: string[]) {
+  const dirty = tabsOnTables(namespace.value, names).find((tab) => dirtyTabs.value.has(tab.id));
+  if (dirty && dirty.kind === "table") {
+    showToast(`Save or discard your changes to “${dirty.table}” before truncating it.`, "error");
+    return;
+  }
+  tableAction.value = { action: "truncate", namespace: namespace.value, tables: names };
+}
+
+function onTableActionDone(names: string[]) {
+  const done = tableAction.value;
+  tableAction.value = null;
+  if (!done) {
+    return;
+  }
+  const subject = names.length === 1 ? `“${names[0]}”` : `${names.length} tables`;
+  if (done.action === "truncate") {
+    for (const tab of tabsOnTables(done.namespace, names)) {
+      tableViews.get(tab.id)?.refresh();
+    }
+    showToast(`Truncated ${subject}`);
+    return;
+  }
+  for (const tab of tabsOnTables(done.namespace, names)) {
+    setTabChanges(tab.id, 0);
+    removeTab(tab.id);
+  }
+  selectedTables.value = new Set([...selectedTables.value].filter((name) => !names.includes(name)));
+  const pinned = loadPinned(done.namespace);
+  if (names.some((name) => pinned.has(name))) {
+    savePinned(done.namespace, new Set([...pinned].filter((name) => !names.includes(name))));
+  }
+  if (done.namespace === namespace.value) {
+    void loadTables();
+  }
+  showToast(`Dropped ${subject}`);
 }
 
 watch(namespace, () => {
@@ -1154,12 +1468,34 @@ function selectTab(tab: PaneTab) {
   }
 }
 
-function splitToast(reason: "max" | "size") {
+function splitToast(reason: "max" | "size" | "span") {
   showToast(
     reason === "max"
       ? "The workspace can show 6 tables at once. Close a pane to split again."
-      : "This window is too small to add another table pane.",
+      : reason === "span"
+        ? `Panes can be up to ${MAX_PANES_ACROSS} across and ${MAX_PANES_DOWN} down.`
+        : "This window is too small to add another table pane.",
   );
+}
+
+/** Checks a split against the layout as it will be once `tabId` has left its pane. */
+function checkTabSplit(tabId: string, paneId: string, edge: DropEdge) {
+  const host = splitHost.value;
+  return checkSplitPaneAt(
+    removeTabFromWorkspace(workspace.value, tabId),
+    paneId,
+    edge,
+    host?.clientWidth ?? 0,
+    host?.clientHeight ?? 0,
+  );
+}
+
+function allowedEdge(tabId: string, paneId: string, edge: DropEdge | null) {
+  if (!edge) {
+    return null;
+  }
+  const check = checkTabSplit(tabId, paneId, edge);
+  return check.ok || check.reason !== "span" ? edge : null;
 }
 
 function ensureCanSplit(direction: SplitDirection): boolean {
@@ -1314,12 +1650,16 @@ function paneTabInfos(paneId: string): PaneTabInfo[] {
     return infos;
   }
   const ghost: PaneTabInfo = { ...tabInfo(preview, true), id: `${preview.id}:preview` };
+  const original = infos.findIndex((item) => item.id === preview.id);
+  if (original >= 0) {
+    infos.splice(original, 1);
+  }
   if (place.atStart) {
     infos.unshift(ghost);
   } else if (place.afterId) {
     const after = infos.findIndex((item) => item.id === place.afterId);
     infos.splice(after >= 0 ? after + 1 : infos.length, 0, ghost);
-  } else if (!infos.some((item) => item.id === preview.id)) {
+  } else {
     infos.push(ghost);
   }
   return infos;
@@ -1387,8 +1727,8 @@ function paneFromPoint(x: number, y: number): { paneId: string; edge?: DropEdge 
     return null;
   }
   const preview = node.closest<HTMLElement>("[data-drop-edge]");
-  if (preview?.dataset.paneId && preview.dataset.dropEdge) {
-    return { paneId: preview.dataset.paneId, edge: preview.dataset.dropEdge as DropEdge };
+  if (preview?.dataset.paneId) {
+    return { paneId: preview.dataset.paneId };
   }
   const frame = node.closest<HTMLElement>("[data-pane-id]");
   if (frame?.dataset.paneId) {
@@ -1505,7 +1845,7 @@ function paneFrame(paneId: string) {
 function paneOuterRect(frame: HTMLElement): DOMRect {
   const leaf = frame.closest(".split-leaf");
   const split = leaf?.parentElement?.parentElement;
-  if (split?.classList.contains("split-node") && split.querySelector(".split-leaf-preview")) {
+  if (split?.classList.contains("split-node") && split.querySelector(":scope > .split-child > .split-leaf-preview")) {
     return split.getBoundingClientRect();
   }
   return (leaf ?? frame).getBoundingClientRect();
@@ -1531,6 +1871,9 @@ function dropBesidePane(x: number, y: number, tabId: string) {
     }
     const edge: DropEdge = dx > dy ? (x < rect.left ? "left" : "right") : y < rect.top ? "up" : "down";
     const dist = Math.hypot(dx, dy);
+    if (!allowedEdge(tabId, paneId, edge)) {
+      continue;
+    }
     if (!best || dist < best.dist) {
       best = { paneId, edge, dist };
     }
@@ -1567,13 +1910,12 @@ function onTabPointerDown(event: PointerEvent, tabId: string) {
     }
     const { paneId } = hit;
     const frame = paneFrame(paneId);
-    const rect = frame?.getBoundingClientRect();
     let edge = hit.edge ?? null;
-    if (!edge && rect && canSplitPane(tabId, paneId)) {
-      const next = dropEdge(rect, move.clientX, move.clientY);
+    if (!edge && frame && canSplitPane(tabId, paneId)) {
       // The tab strip fills the pane's top edge, so splitting upward means dragging above the pane.
-      edge = next === "up" ? null : next;
+      edge = dropEdge(paneOuterRect(frame), move.clientX, move.clientY, ["left", "right", "down"]);
     }
+    edge = allowedEdge(tabId, paneId, edge);
     if (edge && canSplitPane(tabId, paneId)) {
       dropTarget.value = { paneId, edge };
       return;
@@ -1603,34 +1945,27 @@ function onTabPointerDown(event: PointerEvent, tabId: string) {
 
 function applyTabDrop(tabId: string, target: { paneId: string; afterId?: string; atStart?: boolean; edge?: DropEdge }) {
   if (target.edge) {
-    const direction = edgeToDirection(target.edge);
-    if (!ensureCanSplit(direction)) {
-      return;
-    }
     const source = paneForTab(workspace.value, tabId);
-    if (!source || (source.tabIds.length <= 1 && source.id === target.paneId && workspace.value.panes.length < 2)) {
+    if (!source || (source.tabIds.length <= 1 && source.id === target.paneId)) {
       return;
     }
-    let next = workspace.value;
-    if (source.id !== target.paneId || source.tabIds.length > 1) {
-      next = { ...next, focusedPaneId: target.paneId };
-      next = removeTabFromWorkspace(next, tabId);
-      if (!findPane(next, target.paneId)) {
-        next = focusPane(next, next.focusedPaneId);
-      } else {
-        next = focusPane(next, target.paneId);
-      }
-      const pane = emptyPane([tabId], tabId);
-      const result = splitFocused(next, pane, direction);
-      if ("error" in result) {
-        workspace.value = addTabToPane(workspace.value, workspace.value.focusedPaneId, tabId);
-      } else {
-        workspace.value = result;
-        flashPane(pane.id);
-      }
-      scheduleSaveTableTabs();
-      flashTab(tabId);
+    const check = checkTabSplit(tabId, target.paneId, target.edge);
+    if (!check.ok) {
+      splitToast(check.reason);
+      return;
     }
+    const pane = emptyPane([tabId], tabId);
+    const result = splitPaneAt(removeTabFromWorkspace(workspace.value, tabId), target.paneId, pane, target.edge);
+    if ("error" in result) {
+      if (result.error === "max") {
+        splitToast("max");
+      }
+      return;
+    }
+    workspace.value = result;
+    flashPane(pane.id);
+    scheduleSaveTableTabs();
+    flashTab(tabId);
     return;
   }
   workspace.value = moveTab(workspace.value, tabId, target.paneId, target.afterId, target.atStart);
@@ -1639,6 +1974,9 @@ function applyTabDrop(tabId: string, target: { paneId: string; afterId?: string;
 
 function selectView(next: ConnectionViewTab) {
   view.value = next;
+  if (next === "diagram") {
+    diagramOpened.value = true;
+  }
   if (next !== "sql" || tabs.value.some((tab) => tab.kind === "query")) {
     return;
   }
@@ -1721,6 +2059,7 @@ async function saveAll() {
     ({ request }) =>
       request.updates.length ||
       request.inserts.length ||
+      request.deletes.length ||
       request.columns.length ||
       request.newColumns.length ||
       request.indexes.length ||
@@ -1757,18 +2096,25 @@ function discardAll() {
 }
 
 function onWindowKeydown(event: KeyboardEvent) {
-  if (
-    !props.active ||
-    !(event.metaKey || event.ctrlKey) ||
-    event.altKey ||
-    event.shiftKey ||
-    event.key.toLowerCase() !== "s"
-  ) {
+  if (!props.active || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) {
+    return;
+  }
+  const key = event.key.toLowerCase();
+  if (key === "b" && tableListView.value && !document.querySelector(".modal-layer")) {
+    event.preventDefault();
+    toggleTableList();
+    return;
+  }
+  if (key !== "s") {
     return;
   }
   event.preventDefault();
   if (saveDialog.value) {
     void submitSaveDialog();
+    return;
+  }
+  if (view.value === "sql" && activeQueryTabId.value === SAVED_TAB_ID && savedQueriesEl.value?.isEditing) {
+    void savedQueriesEl.value.saveEdits();
     return;
   }
   const tab = tabs.value.find((item) => item.id === activeQueryTabId.value);
@@ -2016,6 +2362,8 @@ async function submitNameDialog() {
   try {
     if (dialog.mode === "create") {
       await createNamespace(name);
+    } else if (dialog.mode === "table") {
+      await createTable(name);
     } else {
       await renameNamespace(dialog.from, name);
     }
@@ -2032,6 +2380,23 @@ async function createNamespace(name: string) {
   await refreshNamespaces();
   await changeNamespace(name);
   showToast(`Created ${namespaceLabel.value.toLowerCase()} “${name}”`);
+}
+
+/** Opens the new table on its Structure tab, since it only has an id column to start. */
+async function createTable(name: string) {
+  const target = namespace.value;
+  await api.createTable(props.sessionId, target, name);
+  await loadTables();
+  if (namespace.value !== target) {
+    return;
+  }
+  const table = tables.value.find((item) => item.name === name) ?? { name, kind: "table" as const };
+  filter.value = "";
+  const tab = newTableTab(target, table.name, table.kind);
+  insertTableTab(tab);
+  await nextTick();
+  tableViews.get(tab.id)?.showStructure();
+  showToast(`Created table “${name}”`);
 }
 
 function startRename(name: string) {
@@ -2051,6 +2416,11 @@ async function renameNamespace(from: string, to: string) {
     tab.kind === "table" && tab.namespace === from ? { ...tab, namespace: to } : tab,
   );
   scheduleSaveTableTabs();
+  const pinned = loadPinned(from);
+  if (pinned.size) {
+    savePinned(to, pinned);
+    savePinned(from, new Set());
+  }
   const wasCurrent = namespace.value === from;
   await refreshNamespaces();
   if (wasCurrent) {
@@ -2185,8 +2555,14 @@ function onConnectionLost(event: ConnectionEvent) {
 }
 
 function onConnectionRestored(event: ConnectionEvent) {
-  if (event.connectionId === props.sessionId) {
-    showToast(`Reconnected to ${entry.value?.name ?? "the database"}`);
+  if (event.connectionId !== props.sessionId) {
+    return;
+  }
+  showToast(`Reconnected to ${entry.value?.name ?? "the database"}`);
+  if (lost.value) {
+    lost.value = false;
+    lostError.value = "";
+    void loadTables().then(refreshVisibleTables);
   }
 }
 
@@ -2217,6 +2593,17 @@ function onExecuted(statements: string[]) {
   if (changedSchema) {
     void refreshAll();
   }
+}
+
+function selectFromDiagram(names: string[]) {
+  selectedTables.value = new Set(names);
+  selectionAnchor = names[0] ?? "";
+}
+
+function openFromDiagram(name: string) {
+  const table = tables.value.find((item) => item.name === name) ?? { name, kind: "table" as const };
+  view.value = "tables";
+  openTable(table);
 }
 
 function queryTable(table: TableInfo) {
@@ -2279,8 +2666,9 @@ function autoFitSidebar() {
   const base = `${font.fontWeight} ${font.fontSize} ${font.fontFamily}`;
   const longest = tables.value.reduce((max, table) => {
     const dirty = dirtyTableKeys.value.has(tableKey(namespace.value, table.name));
+    const pinned = pinnedTables.value.has(table.name);
     context.font = dirty ? `italic ${base}` : base;
-    return Math.max(max, context.measureText(table.name).width + (dirty ? 12 : 0));
+    return Math.max(max, context.measureText(table.name).width + (dirty ? 12 : 0) + (pinned ? 22 : 0));
   }, 0);
 
   /**
@@ -2309,6 +2697,8 @@ function flushTableTabs() {
 
 onMounted(() => {
   window.addEventListener("keydown", onWindowKeydown, true);
+  window.addEventListener("keydown", onTableTypingKeydown, true);
+  document.addEventListener("pointerdown", onTableTypingPointerDown, true);
   window.addEventListener("focus", onWindowFocus);
   window.addEventListener("beforeunload", flushTableTabs);
   void listen<ConnectionEvent>("connection-lost", (event) => onConnectionLost(event.payload)).then(
@@ -2333,6 +2723,8 @@ const unregisterCloser = registerInnerTabCloser(props.sessionId, closeActivePane
 
 onUnmounted(() => {
   window.removeEventListener("keydown", onWindowKeydown, true);
+  window.removeEventListener("keydown", onTableTypingKeydown, true);
+  document.removeEventListener("pointerdown", onTableTypingPointerDown, true);
   window.removeEventListener("focus", onWindowFocus);
   window.removeEventListener("beforeunload", flushTableTabs);
   stopLost?.();
@@ -2417,6 +2809,7 @@ onUnmounted(() => {
             :items="namespaces"
             :label="namespaceLabel"
             :hidden-key="connectionId"
+            :system-items="systemNamespaces"
             :creatable="driver !== 'sqlite'"
             :droppable="driver !== 'sqlite'"
             :renamable="driver !== 'sqlite'"
@@ -2447,7 +2840,7 @@ onUnmounted(() => {
             <button
               class="primary tiny"
               type="button"
-              title="Save changes in every table (⌘S)"
+              :title="`Save changes in every table (${shortcut('⌘S')})`"
               :disabled="saving"
               @click="saveAll"
             >
@@ -2459,8 +2852,8 @@ onUnmounted(() => {
               class="ghost tiny"
               type="button"
               :disabled="!canTransfer"
-              :title="`Run a .sql or .sql.gz file against “${namespace}”`"
-              @click="startImport"
+              :title="`Run a .sql file against “${namespace}”, or load rows from a CSV or JSON file`"
+              @click="startImport()"
             >
               <svg viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M8 2.5v7.5M4.8 6.8 8 10l3.2-3.2M2.5 11.5v1a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-1" />
@@ -2471,8 +2864,8 @@ onUnmounted(() => {
               class="ghost tiny"
               type="button"
               :disabled="!canTransfer"
-              :title="`Export “${namespace}” to a .sql file`"
-              @click="exportDialog = { tables: null }"
+              :title="`Export “${namespace}” as SQL, CSV, or JSON`"
+              @click="openExport(null)"
             >
               <svg viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M8 10V2.5M4.8 5.7 8 2.5l3.2 3.2M2.5 11.5v1a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-1" />
@@ -2485,7 +2878,7 @@ onUnmounted(() => {
               type="button"
               :disabled="!canTransfer"
               :title="`Save a full backup of “${namespace}” that Restore can bring back`"
-              @click="backupOpen = true"
+              @click="openBackup"
             >
               <svg viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M3.5 2.5h7l2 2v8a1 1 0 0 1-1 1h-8a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1ZM5.5 2.5v3h5v-3M5 13.5v-4h6v4" />
@@ -2522,13 +2915,39 @@ onUnmounted(() => {
           {{ reconnecting ? "Reconnecting…" : "Reconnect" }}
         </button>
       </div>
-      <ConnectionViewTabs :active="view" :table-count="tables.length" @select="selectView" />
+      <ConnectionViewTabs
+        :active="view"
+        :table-count="tables.length"
+        :list-open="tableListView ? tableListVisible : null"
+        @select="selectView"
+        @toggle-list="toggleTableList"
+      />
       <div class="db-body">
-        <aside v-show="view === 'tables'" ref="sidebarEl" class="db-sidebar" :style="{ width: `${sidebarWidth}px` }">
+        <aside v-show="tableListVisible" ref="sidebarEl" class="db-sidebar" :style="{ width: `${sidebarWidth}px` }">
           <div class="db-filter">
-            <input v-model="filter" type="search" placeholder="Filter tables" spellcheck="false" />
+            <input
+              ref="tableFilterInput"
+              v-model="filter"
+              type="search"
+              placeholder="Filter tables"
+              spellcheck="false"
+            />
+            <button
+              v-if="!listForDiagram"
+              class="ghost tiny db-new-table"
+              type="button"
+              title="New table"
+              :disabled="!namespace && driver !== 'sqlite'"
+              @click="openNameDialog({ mode: 'table' })"
+            >
+              <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 4.5v15m7.5-7.5h-15" />
+              </svg>
+              <span class="db-new-table-label">New table</span>
+            </button>
           </div>
           <div
+            ref="tableListEl"
             class="db-table-list"
             role="listbox"
             aria-multiselectable="true"
@@ -2543,49 +2962,64 @@ onUnmounted(() => {
               {{ namespace || driver === "sqlite" ? "No tables." : `Choose a ${namespaceLabel.toLowerCase()}.` }}
             </p>
             <p v-else-if="!filteredTables.length" class="muted tiny db-list-hint">No matches.</p>
-            <button
-              v-for="table in filteredTables"
-              :key="table.name"
-              class="db-table"
-              type="button"
-              role="option"
-              :aria-selected="selectedTables.has(table.name) || activeTableKey === tableKey(namespace, table.name)"
-              :class="{
-                active: activeTableKey === tableKey(namespace, table.name),
-                selected: selectedTables.has(table.name),
-                view: table.kind === 'view',
-                dirty: dirtyTableKeys.has(tableKey(namespace, table.name)),
-              }"
-              :title="
-                dirtyTableKeys.has(tableKey(namespace, table.name))
-                  ? `${table.name} (unsaved changes)`
-                  : table.kind === 'view'
-                    ? `${table.name} (view) · double-click to open in a new tab`
-                    : `${table.name} · double-click to open in a new tab`
-              "
-              @click="onTableClick($event, table)"
-              @dblclick="onTableDblclick($event, table)"
-              @contextmenu="openTableMenu($event, table)"
-            >
-              <svg v-if="table.kind === 'view'" viewBox="0 0 16 16" aria-hidden="true">
-                <path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8 12.1 12.5 8 12.5 1.5 8 1.5 8Z" />
-                <circle cx="8" cy="8" r="1.8" />
-              </svg>
-              <svg v-else viewBox="0 0 16 16" aria-hidden="true">
-                <rect x="2" y="3" width="12" height="10" rx="1.5" />
-                <path d="M2 6.5h12M6.5 6.5V13" />
-              </svg>
-              <span class="db-table-name">{{ table.name }}</span>
-              <span
-                v-if="dirtyTableKeys.has(tableKey(namespace, table.name))"
-                class="dirty-dot"
-                aria-label="Unsaved changes"
+            <template v-for="(table, index) in filteredTables" :key="table.name">
+              <div
+                v-if="index === pinnedShownCount && index > 0"
+                class="db-table-divider"
+                role="separator"
               />
-            </button>
+              <button
+                class="db-table"
+                type="button"
+                role="option"
+                :aria-selected="selectedTables.has(table.name) || activeTableKey === tableKey(namespace, table.name)"
+                :class="{
+                  active: activeTableKey === tableKey(namespace, table.name),
+                  selected: selectedTables.has(table.name),
+                  view: table.kind === 'view',
+                  dirty: dirtyTableKeys.has(tableKey(namespace, table.name)),
+                }"
+                :title="
+                  dirtyTableKeys.has(tableKey(namespace, table.name))
+                    ? `${table.name} (unsaved changes)`
+                    : table.kind === 'view'
+                      ? `${table.name} (view) · double-click to open in a new tab`
+                      : `${table.name} · double-click to open in a new tab`
+                "
+                @mousedown="armTableTyping"
+                @focus="armTableTyping"
+                @click="onTableClick($event, table)"
+                @dblclick="onTableDblclick($event, table)"
+                @contextmenu="openTableMenu($event, table)"
+              >
+                <svg v-if="table.kind === 'view'" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8 12.1 12.5 8 12.5 1.5 8 1.5 8Z" />
+                  <circle cx="8" cy="8" r="1.8" />
+                </svg>
+                <svg v-else viewBox="0 0 16 16" aria-hidden="true">
+                  <rect x="2" y="3" width="12" height="10" rx="1.5" />
+                  <path d="M2 6.5h12M6.5 6.5V13" />
+                </svg>
+                <span class="db-table-name">{{ table.name }}</span>
+                <span
+                  v-if="dirtyTableKeys.has(tableKey(namespace, table.name))"
+                  class="dirty-dot"
+                  aria-label="Unsaved changes"
+                />
+                <svg
+                  v-if="index < pinnedShownCount"
+                  class="db-table-pin"
+                  viewBox="0 0 16 16"
+                  aria-label="Pinned"
+                >
+                  <path d="M6 2.5h4M6.75 2.5v4l-2.25 2.5h7L9.25 6.5v-4M8 9v4.5" />
+                </svg>
+              </button>
+            </template>
           </div>
         </aside>
         <div
-          v-show="view === 'tables'"
+          v-show="tableListVisible"
           class="db-sidebar-resize"
           role="separator"
           aria-orientation="vertical"
@@ -2598,7 +3032,19 @@ onUnmounted(() => {
           :connection-id="connectionId"
           :connection-name="entry?.name ?? ''"
         />
-        <section v-show="view !== 'history'" class="db-main">
+        <SchemaDiagram
+          v-if="diagramOpened"
+          ref="diagramEl"
+          v-show="view === 'diagram'"
+          v-model:scope="diagramScope"
+          :connection-id="sessionId"
+          :namespace="namespace"
+          :selected="selectedTableNames"
+          :active="active && view === 'diagram'"
+          @open="openFromDiagram"
+          @select="selectFromDiagram"
+        />
+        <section v-show="view !== 'history' && view !== 'diagram'" class="db-main">
           <div
             v-if="view === 'sql' && (viewTabs.length || showSavedTab)"
             ref="subtabBar"
@@ -2710,10 +3156,13 @@ onUnmounted(() => {
           </div>
           <SavedQueries
             v-if="connectionSaved.length"
+            ref="savedQueriesEl"
             v-show="showSavedTab && activeTabId === SAVED_TAB_ID"
             v-model:selected-id="selectedSavedId"
             :queries="connectionSaved"
             :open-ids="openSavedIds"
+            :driver="driver"
+            :schema="schema"
             @open="openSavedQuery($event)"
             @run="openSavedQuery($event, true)"
           />
@@ -2806,7 +3255,9 @@ onUnmounted(() => {
         :title="
           nameDialog.mode === 'create'
             ? `New ${namespaceLabel.toLowerCase()}`
-            : `Rename ${namespaceLabel.toLowerCase()} “${nameDialog.from}”`
+            : nameDialog.mode === 'table'
+              ? 'New table'
+              : `Rename ${namespaceLabel.toLowerCase()} “${nameDialog.from}”`
         "
         @close="closeNameDialog"
       >
@@ -2826,6 +3277,10 @@ onUnmounted(() => {
             MySQL renames a database by moving its tables into a new one. Privileges granted on the old
             name are not carried over.
           </p>
+          <p v-if="nameDialog.mode === 'table'" class="muted tiny">
+            The table starts with an auto-incrementing id primary key. Add more columns in the Structure tab
+            that opens next.
+          </p>
           <p v-if="nameError" class="settings-error">{{ nameError }}</p>
         </form>
         <template #actions>
@@ -2839,7 +3294,7 @@ onUnmounted(() => {
             @click="submitNameDialog"
           >
             <span v-if="nameBusy" class="spinner" aria-hidden="true" />
-            <template v-if="nameDialog.mode === 'create'">{{ nameBusy ? "Creating…" : "Create" }}</template>
+            <template v-if="nameDialog.mode !== 'rename'">{{ nameBusy ? "Creating…" : "Create" }}</template>
             <template v-else>{{ nameBusy ? "Renaming…" : "Rename" }}</template>
           </button>
         </template>
@@ -2878,9 +3333,34 @@ onUnmounted(() => {
             </button>
             <div class="overflow-menu-divider" role="separator" />
           </template>
+          <button class="overflow-menu-item" type="button" role="menuitem" @click="runTableAction('pin')">
+            {{ tableMenuPinLabel }}
+          </button>
+          <button class="overflow-menu-item" type="button" role="menuitem" @click="runTableAction('diagram')">
+            Show diagram
+          </button>
           <button class="overflow-menu-item" type="button" role="menuitem" @click="runTableAction('export')">
             {{ tableMenuExportLabel }}
           </button>
+          <button
+            v-if="tableMenu.tables.length === 1 && menuHasOnlyTables"
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            :disabled="!canTransfer"
+            @click="runTableAction('importRows')"
+          >
+            Import rows from CSV or JSON…
+          </button>
+          <template v-if="menuHasOnlyTables">
+            <div class="overflow-menu-divider" role="separator" />
+            <button class="overflow-menu-item danger" type="button" role="menuitem" @click="runTableAction('truncate')">
+              {{ tableMenu.tables.length === 1 ? "Truncate table…" : `Truncate ${tableMenu.tables.length.toLocaleString()} tables…` }}
+            </button>
+            <button class="overflow-menu-item danger" type="button" role="menuitem" @click="runTableAction('drop')">
+              {{ tableMenu.tables.length === 1 ? "Drop table…" : `Drop ${tableMenu.tables.length.toLocaleString()} tables…` }}
+            </button>
+          </template>
         </div>
         <div
           v-if="tabMenu && menuTab"
@@ -3075,40 +3555,62 @@ onUnmounted(() => {
       <ExportDialog
         v-if="exportDialog"
         :connection-id="sessionId"
-        :namespace="namespace"
+        :namespace="exportDialog.namespace"
         :namespace-label="namespaceLabel"
         :tables="exportDialog.tables"
-        :table-count="tables.length"
+        :table-count="exportDialog.tableCount"
         @close="exportDialog = null"
       />
       <ImportDialog
-        v-if="importPath"
+        v-if="importTarget"
         :connection-id="sessionId"
-        :namespace="namespace"
+        :namespace="importTarget.namespace"
         :namespace-label="namespaceLabel"
-        :path="importPath"
+        :path="importTarget.path"
         @imported="onImported"
-        @close="importPath = null"
+        @close="importTarget = null"
       />
-      <BackupDialog
-        v-if="backupOpen"
+      <ImportRowsDialog
+        v-if="importRowsTarget"
         :connection-id="sessionId"
         :driver="driver"
-        :namespace="namespace"
+        :namespace="importRowsTarget.namespace"
         :namespace-label="namespaceLabel"
-        :table-count="tables.length"
-        @close="backupOpen = false"
+        :path="importRowsTarget.path"
+        :tables="importRowsTarget.namespace === namespace ? tables : []"
+        :table="importRowsTarget.table"
+        @imported="onImported"
+        @close="importRowsTarget = null"
+      />
+      <BackupDialog
+        v-if="backupTarget"
+        :connection-id="sessionId"
+        :driver="driver"
+        :namespace="backupTarget.namespace"
+        :namespace-label="namespaceLabel"
+        :table-count="backupTarget.tableCount"
+        @close="backupTarget = null"
       />
       <RestoreDialog
         v-if="restoreTarget"
         :connection-id="sessionId"
         :driver="driver"
-        :namespace="namespace"
+        :namespace="restoreTarget.namespace"
         :namespace-label="namespaceLabel"
         :path="restoreTarget.path"
         :info="restoreTarget.info"
         @restored="onImported"
         @close="restoreTarget = null"
+      />
+      <TableActionDialog
+        v-if="tableAction"
+        :action="tableAction.action"
+        :connection-id="sessionId"
+        :driver="driver"
+        :namespace="tableAction.namespace"
+        :tables="tableAction.tables"
+        @done="onTableActionDone"
+        @close="tableAction = null"
       />
     </template>
   </div>

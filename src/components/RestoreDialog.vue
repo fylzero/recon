@@ -3,7 +3,10 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { computed, onUnmounted, ref } from "vue";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
-import type { BackupInfo, Driver, ImportProgress } from "../types";
+import { useTransferJob } from "../composables/useTransfers";
+import { baseName } from "../platform";
+import { resumeAt, resumeChoice, runPhase } from "../transfer";
+import type { BackupInfo, Driver, ImportProgress, ImportResume, ImportResumePoint } from "../types";
 import Modal from "./Modal.vue";
 
 const props = defineProps<{
@@ -21,18 +24,22 @@ const emit = defineEmits<{
 }>();
 
 const { showToast } = useApp();
+const job = useTransferJob(() => props.connectionId, "restore");
 
 const understood = ref(false);
 const running = ref(false);
 const cancelling = ref(false);
 const error = ref("");
+const resumePoint = ref<ImportResumePoint | null>(null);
+/** Resuming skips clearing, so the status starts at replaying rather than "Clearing…". */
+const resuming = ref(false);
 const progress = ref<ImportProgress | null>(null);
 let transferId = "";
 let stopProgress: UnlistenFn | null = null;
 
 const label = computed(() => props.namespaceLabel.toLowerCase());
 const atomic = computed(() => props.driver === "postgres" || props.driver === "mssql");
-const fileName = computed(() => props.path.split("/").pop() ?? props.path);
+const fileName = computed(() => baseName(props.path));
 const created = computed(() => {
   const date = new Date(props.info.createdAt);
   return Number.isNaN(date.getTime()) ? props.info.createdAt : date.toLocaleString();
@@ -53,36 +60,50 @@ const loss = computed(() => {
 const partial = computed(() =>
   atomic.value
     ? "If the restore fails or is cancelled, nothing changes."
-    : `If the restore fails or is cancelled partway, “${props.namespace}” will be left partly restored.`,
+    : `If the restore fails or is cancelled partway, “${props.namespace}” will be left partly restored. If the connection drops, Recon reconnects and picks up where it left off.`,
 );
 /** Clearing can't be stopped halfway outside Postgres, so cancelling waits until the replay starts. */
-const canCancel = computed(() => !running.value || atomic.value || progress.value !== null);
+const canCancel = computed(() => !running.value || atomic.value || resuming.value || progress.value !== null);
 const percent = computed(() => {
   const current = progress.value;
   return current?.totalBytes ? Math.min(100, Math.round((current.bytes / current.totalBytes) * 100)) : 0;
 });
+const phase = computed(() => runPhase(progress.value));
+const uncertain = computed(() => Boolean(resumePoint.value && resumePoint.value.to > resumePoint.value.from));
+const uncertainWord = computed(() => (resumePoint.value && resumePoint.value.to - resumePoint.value.from > 1 ? "them" : "it"));
+const statusLabel = computed(() => {
+  if (cancelling.value) {
+    return "Cancelling…";
+  }
+  return phase.value ?? (progress.value || resuming.value ? "Restoring…" : "Clearing…");
+});
 
 function close() {
-  if (!running.value) {
+  if (running.value) {
+    job.hide();
+  } else {
     emit("close");
   }
 }
 
-async function start() {
-  if (running.value || !understood.value) {
+async function start(resume: ImportResume | null = null) {
+  if (running.value || (!understood.value && !resume)) {
     return;
   }
   running.value = true;
+  resuming.value = Boolean(resume);
   error.value = "";
+  resumePoint.value = null;
   progress.value = null;
-  transferId = crypto.randomUUID();
+  transferId = job.begin(`Restoring “${props.namespace}” from ${fileName.value}`);
   stopProgress = await listen<ImportProgress>("import-progress", (event) => {
     if (event.payload.transferId === transferId) {
       progress.value = event.payload;
+      job.progress(percent.value);
     }
   });
   try {
-    const result = await api.restoreDatabase(props.connectionId, transferId, props.namespace, props.path);
+    const result = await api.restoreDatabase(props.connectionId, transferId, props.namespace, props.path, resume);
     const statements = `${result.statements.toLocaleString()} ${result.statements === 1 ? "statement" : "statements"}`;
     showToast(`Restored “${props.namespace}” from ${fileName.value} (${statements} in ${(result.durationMs / 1000).toFixed(1)}s)`);
     emit("restored");
@@ -93,13 +114,27 @@ async function start() {
       showToast("Restore cancelled. Nothing was changed.");
       emit("close");
     } else {
-      error.value = String(err);
+      const failure = api.importFailure(err);
+      error.value = failure.message;
+      resumePoint.value = failure.resume;
+      job.stopped();
+      if (job.hidden.value) {
+        const hint = failure.resume ? " Open the restore to resume it." : "";
+        showToast(`Restore of “${props.namespace}” stopped: ${error.value}${hint}`, "error");
+      }
     }
   } finally {
     running.value = false;
+    resuming.value = false;
     cancelling.value = false;
     stopProgress?.();
     stopProgress = null;
+  }
+}
+
+function resume(skip: number) {
+  if (resumePoint.value) {
+    void start(resumeAt(resumePoint.value, skip));
   }
 }
 
@@ -119,7 +154,7 @@ onUnmounted(() => stopProgress?.());
 </script>
 
 <template>
-  <Modal :title="`Restore ${label} “${namespace}”`" @close="close">
+  <Modal v-if="!job.hidden.value" :title="`Restore ${label} “${namespace}”`" @close="close">
     <p class="transfer-file" :title="path">{{ fileName }}</p>
     <p class="muted tiny">
       Backup of “{{ info.namespace || namespace }}”<template v-if="info.server"> from {{ info.server }}</template>,
@@ -144,24 +179,36 @@ onUnmounted(() => stopProgress?.());
       </template>
     </div>
     <label class="checkbox-row">
-      <input v-model="understood" type="checkbox" :disabled="running" />
+      <input v-model="understood" type="checkbox" :disabled="running || Boolean(resumePoint)" />
       I understand everything in “{{ namespace }}” will be deleted
     </label>
     <div v-if="running" class="transfer-progress" aria-live="polite">
       <div class="transfer-bar"><span :style="{ width: `${percent}%` }" /></div>
       <p class="muted tiny transfer-status">
-        <span class="transfer-status-label">
-          {{ cancelling ? "Cancelling…" : progress ? "Restoring…" : "Clearing…" }}
-        </span>
+        <span class="transfer-status-label">{{ statusLabel }}</span>
         <span v-if="progress">{{ progress.statements.toLocaleString() }} statements · {{ percent }}%</span>
+      </p>
+      <p v-if="progress?.phase === 'reconnecting' && progress.error" class="muted tiny transfer-error">
+        {{ progress.error }}
       </p>
     </div>
     <p v-if="error" class="settings-error transfer-error">{{ error }}</p>
+    <p v-if="resumePoint && !running" class="muted tiny">{{ resumeChoice(resumePoint) }}</p>
     <template #actions>
+      <button v-if="running" class="ghost transfer-hide" type="button" @click="job.hide">Run in background</button>
       <button class="ghost" type="button" :disabled="cancelling || !canCancel" @click="cancel">
         {{ error && !running ? "Close" : "Cancel" }}
       </button>
-      <button v-if="!error" class="danger" type="button" :disabled="running || !understood" @click="start">
+      <template v-if="resumePoint && !running">
+        <template v-if="uncertain">
+          <button class="ghost" type="button" @click="resume(resumePoint.from)">Run {{ uncertainWord }} again</button>
+          <button :class="resumePoint.likelySaved ? 'primary' : 'ghost'" type="button" @click="resume(resumePoint.to)">
+            Skip {{ uncertainWord }}
+          </button>
+        </template>
+        <button v-else class="primary" type="button" @click="resume(resumePoint.from)">Resume</button>
+      </template>
+      <button v-else-if="!error" class="danger" type="button" :disabled="running || !understood" @click="start()">
         <span v-if="running" class="spinner" aria-hidden="true" />
         {{ running ? "Restoring…" : "Erase and restore" }}
       </button>

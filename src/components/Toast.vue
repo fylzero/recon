@@ -3,12 +3,17 @@ defineProps<{
   message: string;
   kind?: "success" | "error";
 }>();
-const emit = defineEmits<{ dismiss: [] }>();
+const emit = defineEmits<{ dismiss: []; pause: []; resume: [] }>();
 </script>
 
 <template>
   <div class="toast-layer" role="status" aria-live="polite">
-    <button class="toast" :class="kind ?? 'success'" type="button" @click="emit('dismiss')">
+    <div
+      class="toast"
+      :class="kind ?? 'success'"
+      @mouseenter="emit('pause')"
+      @mouseleave="emit('resume')"
+    >
       <span class="toast-icon" aria-hidden="true">
         <svg v-if="kind === 'error'" viewBox="0 0 16 16" fill="currentColor">
           <path
@@ -22,6 +27,13 @@ const emit = defineEmits<{ dismiss: [] }>();
         </svg>
       </span>
       <span class="toast-copy">{{ message }}</span>
-    </button>
+      <button class="toast-close" type="button" aria-label="Dismiss" @click="emit('dismiss')">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+          <path
+            d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z"
+          />
+        </svg>
+      </button>
+    </div>
   </div>
 </template>

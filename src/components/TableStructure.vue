@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, shallowRef, watch } from "vue";
 import { useApp } from "../composables/useApp";
-import DataGrid, { type CellPosition } from "./DataGrid.vue";
+import DataGrid, { type CellOptions, type CellPosition } from "./DataGrid.vue";
+import { DATA_TYPES, DEFAULT_VALUES, quoteIdentifier } from "../structureOptions";
 import type {
   Cell,
   ColumnChange,
@@ -167,6 +168,27 @@ function cellEditable(row: number, col: number) {
   return field === "name" || props.driver !== "sqlite";
 }
 
+const plainOptions = (values: string[]) => values.map((value) => ({ value }));
+
+const fieldOptions = computed<Partial<Record<Field, CellOptions>>>(() => ({
+  dataType: { values: plainOptions(DATA_TYPES[props.driver]) },
+  nullable: { values: plainOptions(["YES", "NO"]), strict: true },
+  defaultValue: { values: plainOptions(DEFAULT_VALUES[props.driver]) },
+  columns: {
+    values: props.structure.columns.map((column) => ({
+      value: quoteIdentifier(props.driver, column.name),
+      label: column.name,
+    })),
+    list: true,
+  },
+  unique: { values: plainOptions(["UNIQUE", "INDEX"]), strict: true },
+}));
+
+function cellOptions(_row: number, col: number) {
+  const field = sheet.value.fields[col];
+  return (field && fieldOptions.value[field]) || null;
+}
+
 const changedCount = computed(
   () =>
     new Set(
@@ -294,6 +316,26 @@ function changeAt(row: number, col: number, value: Cell): FieldChange | null {
   }
   const original = baseRows.value[props.section][row]?.[col] ?? null;
   return { section: props.section, key, field, original, before, value };
+}
+
+function deleteRows(indexes: number[]) {
+  grid.value?.commitEdit();
+  const section = props.section;
+  const start = existingCount.value[section];
+  const keys = indexes
+    .filter((row) => row >= start)
+    .map((row) => sheetKeys.value[row])
+    .filter((key) => key !== undefined && isNewKey(key));
+  if (!keys.length) {
+    return;
+  }
+  const dropping = new Set(keys);
+  recordEntry({
+    changes: [...pending.value.values()]
+      .filter((edit) => edit.section === section && dropping.has(edit.key))
+      .map((edit) => ({ ...edit, before: edit.value, value: edit.original })),
+    removed: keys.map((key) => ({ section, key })),
+  });
 }
 
 function onEdit(row: number, col: number, text: string) {
@@ -447,11 +489,13 @@ defineExpose({ pendingChanges, markSaved, discard, undo, redo, create });
     :columns="columns"
     :rows="rows"
     :cell-editable="cellEditable"
+    :cell-options="cellOptions"
     :new-row-start="existingCount[section]"
     :creatable="editable"
     :modified="modified"
     @edit="onEdit"
     @set-null="onSetNull"
+    @delete-rows="deleteRows"
     @create="create"
   />
 </template>

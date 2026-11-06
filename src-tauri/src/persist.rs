@@ -13,7 +13,8 @@ fn app_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .path()
         .app_data_dir()
         .map_err(|err| format!("Could not resolve the app data directory: {err}"))?;
-    fs::create_dir_all(&dir).map_err(|err| format!("Could not create the app data directory: {err}"))?;
+    fs::create_dir_all(&dir)
+        .map_err(|err| format!("Could not create the app data directory: {err}"))?;
     Ok(dir)
 }
 
@@ -26,7 +27,8 @@ pub fn history_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn read_app_data(path: &Path) -> Result<AppData, String> {
-    let raw = fs::read_to_string(path).map_err(|err| format!("Could not read {SETTINGS_FILE}: {err}"))?;
+    let raw =
+        fs::read_to_string(path).map_err(|err| format!("Could not read {SETTINGS_FILE}: {err}"))?;
     serde_json::from_str(&raw).map_err(|err| format!("Could not parse {SETTINGS_FILE}: {err}"))
 }
 

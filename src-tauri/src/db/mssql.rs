@@ -16,6 +16,7 @@ const MAX_POOL: usize = 4;
 
 pub type MssqlClient = Client<Compat<TcpStream>>;
 
+#[derive(Clone)]
 pub struct MssqlPool {
     pool: Pool<MssqlManager>,
 }
@@ -122,11 +123,12 @@ fn config_for(entry: &ConnectionEntry, password: Option<&str>) -> Config {
             config.encryption(EncryptionLevel::NotSupported);
             config.trust_cert();
         }
-        "require" => config.encryption(EncryptionLevel::Required),
-        _ => {
+        "prefer" => {
             config.encryption(EncryptionLevel::On);
             config.trust_cert();
         }
+        // Require, verify-ca, and verify-full check the certificate against the OS trust store.
+        _ => config.encryption(EncryptionLevel::Required),
     }
     config
 }
@@ -478,6 +480,7 @@ pub fn edit_literal(value: &super::EditValue) -> String {
         super::EditValue::Int(value) => value.to_string(),
         super::EditValue::Float(value) => value.to_string(),
         super::EditValue::Text(value) => n_literal(value),
+        super::EditValue::Now(kind) => kind.sql().into(),
     }
 }
 
@@ -654,6 +657,42 @@ impl Dialect for MssqlDialect {
              ORDER BY fk.name, fkc.constraint_column_id",
             n_literal(schema),
             n_literal(name)
+        )
+    }
+
+    fn diagram_columns_sql(&self, namespace: &str) -> String {
+        let db = quote_bracket(namespace);
+        format!(
+            "SELECT s.name + N'.' + o.name, c.name, {TYPE_EXPR}, \
+             CASE WHEN pk.column_id IS NOT NULL THEN 1 ELSE 0 END \
+             FROM {db}.sys.columns c \
+             JOIN {db}.sys.objects o ON o.object_id = c.object_id \
+             JOIN {db}.sys.schemas s ON s.schema_id = o.schema_id \
+             JOIN {db}.sys.types ty ON ty.user_type_id = c.user_type_id \
+             LEFT JOIN ( \
+               SELECT ic.object_id, ic.column_id FROM {db}.sys.indexes i \
+               JOIN {db}.sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
+               WHERE i.is_primary_key = 1 \
+             ) pk ON pk.object_id = c.object_id AND pk.column_id = c.column_id \
+             WHERE o.type IN ('U', 'V') AND s.name NOT IN (N'sys', N'INFORMATION_SCHEMA') \
+             ORDER BY s.name, o.name, c.column_id"
+        )
+    }
+
+    fn schema_foreign_keys_sql(&self, namespace: &str) -> String {
+        let db = quote_bracket(namespace);
+        format!(
+            "SELECT ps.name + N'.' + pt.name, fk.name, pc.name, rs.name, rt.name, rc.name \
+             FROM {db}.sys.foreign_keys fk \
+             JOIN {db}.sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id \
+             JOIN {db}.sys.tables pt ON pt.object_id = fk.parent_object_id \
+             JOIN {db}.sys.schemas ps ON ps.schema_id = pt.schema_id \
+             JOIN {db}.sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id \
+             JOIN {db}.sys.tables rt ON rt.object_id = fk.referenced_object_id \
+             JOIN {db}.sys.schemas rs ON rs.schema_id = rt.schema_id \
+             JOIN {db}.sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id \
+             WHERE ps.name NOT IN (N'sys', N'INFORMATION_SCHEMA') \
+             ORDER BY ps.name, pt.name, fk.name, fkc.constraint_column_id"
         )
     }
 

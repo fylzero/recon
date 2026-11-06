@@ -40,6 +40,18 @@ fn default_auto_apply_filters() -> bool {
     true
 }
 
+fn default_notifications() -> String {
+    "background".into()
+}
+
+pub fn sanitize_notifications(value: &str) -> String {
+    match value.trim() {
+        "always" => "always".into(),
+        "off" => "off".into(),
+        _ => default_notifications(),
+    }
+}
+
 fn default_header_color() -> String {
     "#16323c".into()
 }
@@ -170,6 +182,24 @@ pub enum SshAuth {
     Agent,
 }
 
+/// Where the database password comes from each time a connection signs in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PasswordSource {
+    #[default]
+    Password,
+    /// A short-lived RDS token from `aws rds generate-db-auth-token`.
+    AwsIam,
+    /// Whatever a shell command prints.
+    Command,
+}
+
+impl PasswordSource {
+    pub fn is_fetched(self) -> bool {
+        self != PasswordSource::Password
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SshTunnel {
@@ -185,6 +215,9 @@ pub struct SshTunnel {
     pub auth: SshAuth,
     #[serde(default)]
     pub key_path: String,
+    /// The server asks for the SSH password after accepting the key or agent login.
+    #[serde(default)]
+    pub also_password: bool,
 }
 
 impl Default for SshTunnel {
@@ -196,6 +229,7 @@ impl Default for SshTunnel {
             user: String::new(),
             auth: SshAuth::default(),
             key_path: String::new(),
+            also_password: false,
         }
     }
 }
@@ -203,6 +237,10 @@ impl Default for SshTunnel {
 impl SshTunnel {
     pub fn uses_secret(&self) -> bool {
         self.enabled && self.auth != SshAuth::Agent
+    }
+
+    pub fn uses_second_password(&self) -> bool {
+        self.enabled && self.auth != SshAuth::Password && self.also_password
     }
 }
 
@@ -229,8 +267,36 @@ pub struct ConnectionEntry {
     pub header_color: String,
     #[serde(default = "default_true")]
     pub save_password: bool,
+    /// MySQL only: allow mysql_clear_password, for PAM, LDAP, and AWS IAM logins.
+    #[serde(default)]
+    pub cleartext_auth: bool,
+    #[serde(default)]
+    pub password_source: PasswordSource,
+    #[serde(default)]
+    pub aws_region: String,
+    #[serde(default)]
+    pub aws_profile: String,
+    #[serde(default)]
+    pub password_command: String,
+    /// CA certificate (PEM) to verify the server with, instead of the public roots.
+    #[serde(default)]
+    pub ssl_ca_path: String,
+    #[serde(default)]
+    pub ssl_cert_path: String,
+    #[serde(default)]
+    pub ssl_key_path: String,
     #[serde(default)]
     pub ssh: SshTunnel,
+}
+
+impl ConnectionEntry {
+    pub fn verifies_certificate(&self) -> bool {
+        self.ssl_mode.starts_with("verify-")
+    }
+
+    pub fn requires_tls(&self) -> bool {
+        self.ssl_mode == "require" || self.verifies_certificate()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -268,6 +334,9 @@ pub struct AppData {
     pub groups: Vec<ConnectionGroup>,
     #[serde(default)]
     pub connections: Vec<ConnectionEntry>,
+    /// Group ids and ungrouped connection ids, in dashboard order.
+    #[serde(default)]
+    pub dashboard_order: Vec<String>,
     #[serde(default)]
     pub saved_queries: Vec<SavedQuery>,
     #[serde(default = "default_code_font")]
@@ -293,6 +362,9 @@ pub struct AppData {
     /// Table filters reload the rows as they're edited, instead of waiting for Apply.
     #[serde(default = "default_auto_apply_filters")]
     pub auto_apply_filters: bool,
+    /// When to use system notifications: "background", "always", or "off".
+    #[serde(default = "default_notifications")]
+    pub notifications: String,
     #[serde(default)]
     pub window: Option<WindowState>,
 }
@@ -302,6 +374,7 @@ impl Default for AppData {
         Self {
             groups: Vec::new(),
             connections: Vec::new(),
+            dashboard_order: Vec::new(),
             saved_queries: Vec::new(),
             editor_font_family: default_code_font(),
             editor_font_size: default_editor_font_size(),
@@ -314,6 +387,7 @@ impl Default for AppData {
             sidebar_width: default_sidebar_width(),
             max_auto_column_width: default_max_auto_column_width(),
             auto_apply_filters: default_auto_apply_filters(),
+            notifications: default_notifications(),
             window: None,
         }
     }
@@ -323,8 +397,38 @@ impl AppData {
     pub fn find_connection(&self, connection_id: &str) -> Option<&ConnectionEntry> {
         self.connections
             .iter()
-            .chain(self.groups.iter().flat_map(|group| group.connections.iter()))
+            .chain(
+                self.groups
+                    .iter()
+                    .flat_map(|group| group.connections.iter()),
+            )
             .find(|entry| entry.id == connection_id)
+    }
+
+    /**
+     * The saved dashboard order without stale ids. Anything missing from it
+     * follows, ungrouped connections first, matching the layout before
+     * groups and connections could be interleaved.
+     */
+    pub fn dashboard_ids(&self) -> Vec<String> {
+        let known: Vec<&str> = self
+            .connections
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .chain(self.groups.iter().map(|group| group.id.as_str()))
+            .collect();
+        let mut ids: Vec<String> = Vec::with_capacity(known.len());
+        for id in self
+            .dashboard_order
+            .iter()
+            .map(String::as_str)
+            .chain(known.iter().copied())
+        {
+            if known.contains(&id) && !ids.iter().any(|item| item == id) {
+                ids.push(id.to_string());
+            }
+        }
+        ids
     }
 }
 
@@ -342,6 +446,7 @@ pub struct PreferencesPatch {
     pub sidebar_width: Option<u32>,
     pub max_auto_column_width: Option<u32>,
     pub auto_apply_filters: Option<bool>,
+    pub notifications: Option<String>,
 }
 
 #[cfg(test)]
@@ -368,6 +473,14 @@ mod tests {
                 ssl_mode: "prefer".into(),
                 header_color: String::new(),
                 save_password: true,
+                cleartext_auth: false,
+                password_source: PasswordSource::Password,
+                aws_region: String::new(),
+                aws_profile: String::new(),
+                password_command: String::new(),
+                ssl_ca_path: String::new(),
+                ssl_cert_path: String::new(),
+                ssl_key_path: String::new(),
                 ssh: SshTunnel::default(),
             }],
         });
@@ -390,12 +503,22 @@ mod tests {
         assert_eq!(parsed.grid_font_size, 13.0);
         assert_eq!(parsed.list_font_family, "ui");
         assert_eq!(parsed.list_font_size, 12.5);
+        assert_eq!(parsed.notifications, "background");
 
         let entry: ConnectionEntry =
             serde_json::from_str(r#"{"name":"old","driver":"mysql"}"#).unwrap();
         assert!(!entry.ssh.enabled);
         assert_eq!(entry.ssh.port, 22);
         assert_eq!(entry.ssh.auth, SshAuth::Password);
+        assert!(!entry.ssh.also_password);
+        assert!(!entry.cleartext_auth);
+        assert_eq!(entry.password_source, PasswordSource::Password);
+        assert!(entry.ssl_ca_path.is_empty());
+
+        let iam: ConnectionEntry =
+            serde_json::from_str(r#"{"name":"rds","driver":"mysql","passwordSource":"aws-iam"}"#)
+                .unwrap();
+        assert_eq!(iam.password_source, PasswordSource::AwsIam);
     }
 
     #[test]
@@ -404,7 +527,10 @@ mod tests {
         assert_eq!(sanitize_font_family("SF Mono"), "sf-mono");
         assert_eq!(sanitize_font_family("Fira Code"), "Fira Code");
         assert_eq!(sanitize_font_family(""), "jetbrains");
-        assert_eq!(sanitize_font_family("/System/Library/Fonts/Menlo.ttc"), "jetbrains");
+        assert_eq!(
+            sanitize_font_family("/System/Library/Fonts/Menlo.ttc"),
+            "jetbrains"
+        );
     }
 
     #[test]
@@ -413,5 +539,13 @@ mod tests {
         assert_eq!(sanitize_color(" #16323c "), Some("#16323c".into()));
         assert_eq!(sanitize_color("#zzzzzz"), None);
         assert_eq!(sanitize_color("red"), None);
+    }
+
+    #[test]
+    fn sanitizes_notifications_mode() {
+        assert_eq!(sanitize_notifications("always"), "always");
+        assert_eq!(sanitize_notifications(" off "), "off");
+        assert_eq!(sanitize_notifications("background"), "background");
+        assert_eq!(sanitize_notifications("loud"), "background");
     }
 }

@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
+import { readText as readClipboard, writeText as writeClipboard } from "@tauri-apps/plugin-clipboard-manager";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
+import { useGridFind } from "../composables/useGridFind";
 import { useOverflowMenu } from "../composables/useOverflowMenu";
 import { placeAtPoint, useDismiss, type PopoverPosition } from "../composables/usePopover";
-import { isBytes, isNumericColumn } from "../cells";
+import { isBytes, isNumericColumn, type CopyFormat } from "../cells";
 import {
   compileFilter,
   formatDate,
@@ -19,7 +21,10 @@ import {
   appendChild,
   dropBlankConditions,
   emptyGroup,
+  filterFromClipboard,
+  filterToClipboard,
   hasConditions,
+  mergeFilters,
   AUTO_REFRESH_PRESETS,
   MAX_CONDITIONS,
   MAX_TAB_PAGE_SIZE,
@@ -37,6 +42,7 @@ import {
   type TableViewState,
 } from "../filters/model";
 import { convertValue, DEFAULT_OPERATOR } from "../filters/operators";
+import { ariaModifier, shortcut } from "../platform";
 import type {
   BrowseRequest,
   BrowseResult,
@@ -53,11 +59,14 @@ import type {
   TableLink,
   TableStructure as Structure,
 } from "../types";
-import DataGrid, { type CellPosition } from "./DataGrid.vue";
+import DataGrid, { type CellOptions, type CellPosition } from "./DataGrid.vue";
+import ExportRowsDialog, { type ExportRowsSource } from "./ExportRowsDialog.vue";
 import FilterPanel from "./FilterPanel.vue";
 import FilterPopover from "./FilterPopover.vue";
 import FilterSummary from "./FilterSummary.vue";
+import GridFind from "./GridFind.vue";
 import Modal from "./Modal.vue";
+import ReplaceDialog from "./ReplaceDialog.vue";
 import TableStructure from "./TableStructure.vue";
 
 interface PendingCell {
@@ -75,6 +84,10 @@ interface UndoEntry {
   changes: CellChange[];
   created?: number[];
   removed?: number[];
+  /** Primary keys of saved rows marked for deletion. */
+  deleted?: Cell[][];
+  /** Primary keys of saved rows taken off the deletion list. */
+  restored?: Cell[][];
 }
 
 const props = defineProps<{
@@ -139,6 +152,7 @@ const pending = shallowRef(new Map<string, PendingCell>());
 const undoStack: UndoEntry[] = [];
 const redoStack: UndoEntry[] = [];
 const newRowIds = ref<number[]>([]);
+const deleted = shallowRef(new Map<string, Cell[]>());
 let nextNewRowId = 0;
 let requestId = 0;
 const panel = ref<InstanceType<typeof FilterPanel> | null>(null);
@@ -150,7 +164,9 @@ const counting = ref(false);
 const countTimedOut = ref(false);
 const sqlPreview = ref<{ sql: string; loading: boolean; error: string } | null>(null);
 const cellMenu = ref<{ x: number; y: number; row: number; col: number } | null>(null);
+const rowMenu = ref<{ x: number; y: number } | null>(null);
 const headerMenu = ref<{ x: number; y: number; col: number } | null>(null);
+const menuRows = ref<number[]>([]);
 const menuEl = ref<HTMLElement | null>(null);
 const menuPosition = ref<PopoverPosition>({ left: 0, top: 0 });
 let applyTimer = 0;
@@ -251,6 +267,32 @@ const keyIndexes = computed(() => {
 const nullable = computed(
   () => new Map((structure.value?.columns ?? []).map((column) => [column.name, column.nullable])),
 );
+const NOW_TEXT = "NOW()";
+const NOW_OPTIONS: CellOptions = { values: [{ value: NOW_TEXT }], whenEmpty: true };
+const temporalKinds = computed(() => {
+  const kinds = new Map<string, "date" | "time" | "datetime">();
+  for (const column of structure.value?.columns ?? []) {
+    const kind = column.filterKind;
+    if (kind === "date" || kind === "time" || kind === "datetime") {
+      kinds.set(column.name, kind);
+    }
+  }
+  return kinds;
+});
+
+/** Date and time cells offer NOW() while being edited empty. The database fills it in when the row is saved. */
+function cellOptions(_row: number, col: number) {
+  const name = columns.value[col]?.name;
+  return name && temporalKinds.value.has(name) ? NOW_OPTIONS : null;
+}
+
+function editValue(column: string, value: Cell): EditValue {
+  const kind = temporalKinds.value.get(column);
+  if (kind && typeof value === "string" && /^now(\(\))?$/i.test(value.trim())) {
+    return { now: kind };
+  }
+  return value as EditValue;
+}
 const autoColumns = computed(() => {
   const auto = new Set(
     (structure.value?.columns ?? []).filter(isAutoIncrement).map((column) => column.name),
@@ -333,6 +375,18 @@ const displayRows = computed(() =>
     return next;
   }),
 );
+const find = useGridFind(() => displayRows.value);
+const deletedRows = computed(() => {
+  const indexes = new Set<number>();
+  if (deleted.value.size) {
+    pageKeys.value.forEach((key, index) => {
+      if (key && deleted.value.has(JSON.stringify(key))) {
+        indexes.add(index);
+      }
+    });
+  }
+  return indexes;
+});
 const modified = computed(() => {
   const cells = new Map<number, Set<number>>();
   pageEdits.value.forEach((edits, index) => {
@@ -346,7 +400,11 @@ const modified = computed(() => {
   return cells;
 });
 const dirty = computed(
-  () => pending.value.size > 0 || newRowIds.value.length > 0 || structureChanges.value > 0,
+  () =>
+    pending.value.size > 0 ||
+    newRowIds.value.length > 0 ||
+    deleted.value.size > 0 ||
+    structureChanges.value > 0,
 );
 const refreshing = computed(() => (mode.value === "data" ? loading.value : loadingStructure.value));
 const autoRefreshMenuId = newId("ar");
@@ -393,7 +451,14 @@ const canInsert = computed(
 );
 
 function cellEditable(row: number) {
-  return row >= rows.value.length ? canInsert.value : editable.value;
+  if (row >= rows.value.length) {
+    return canInsert.value;
+  }
+  return editable.value && !deletedRows.value.has(row);
+}
+
+function rowDeletable(row: number) {
+  return row >= rows.value.length ? row < allRows.value.length : editable.value && Boolean(pageKeys.value[row]);
 }
 const pageSize = computed(() =>
   clampTabPageSize(props.view.pageSize ?? Math.min(defaultPageSize.value, MAX_TAB_PAGE_SIZE)),
@@ -802,19 +867,40 @@ function updateNewRows(add: number[], remove: number[]) {
   newRowIds.value = [...newRowIds.value.filter((id) => !removed.has(id)), ...add].sort((a, b) => a - b);
 }
 
+function updateDeleted(add: Cell[][], remove: Cell[][]) {
+  const next = new Map(deleted.value);
+  for (const key of remove) {
+    next.delete(JSON.stringify(key));
+  }
+  for (const key of add) {
+    next.set(JSON.stringify(key), key);
+  }
+  deleted.value = next;
+}
+
 function applyEntry(entry: UndoEntry, side: "before" | "value") {
   applyChanges(entry.changes, side);
   const created = entry.created ?? [];
   const removed = entry.removed ?? [];
+  const marked = entry.deleted ?? [];
+  const restored = entry.restored ?? [];
   if (side === "value") {
     updateNewRows(created, removed);
+    updateDeleted(marked, restored);
   } else {
     updateNewRows(removed, created);
+    updateDeleted(restored, marked);
   }
 }
 
 function recordEntry(entry: UndoEntry) {
-  if (!entry.changes.length && !entry.created?.length && !entry.removed?.length) {
+  if (
+    !entry.changes.length &&
+    !entry.created?.length &&
+    !entry.removed?.length &&
+    !entry.deleted?.length &&
+    !entry.restored?.length
+  ) {
     return;
   }
   applyEntry(entry, "value");
@@ -858,6 +944,45 @@ function onSetNull(cells: CellPosition[]) {
   recordChanges(allowed.flatMap((cell) => changeAt(cell.row, cell.col, null) ?? []));
 }
 
+/**
+ * Saved rows are marked and removed on the next save; unsaved new rows go
+ * away at once. When every chosen row is already marked, they're restored.
+ */
+function deleteRows(indexes: number[]) {
+  grid.value?.commitEdit();
+  const targets = indexes.filter(rowDeletable);
+  if (!targets.length) {
+    if (indexes.length) {
+      showToast(
+        kind.value === "table"
+          ? "Rows can only be deleted from tables with a primary key."
+          : "Rows can only be deleted from tables.",
+        "error",
+      );
+    }
+    return;
+  }
+  const saved = targets.filter((row) => row < rows.value.length);
+  const fresh = targets.filter((row) => row >= rows.value.length);
+  const keys = saved.map((row) => pageKeys.value[row] as Cell[]);
+  if (!fresh.length && saved.every((row) => deletedRows.value.has(row))) {
+    recordEntry({ changes: [], restored: keys });
+    return;
+  }
+  const freshIds = fresh.map((row) => newRowIds.value[row - rows.value.length]);
+  recordEntry({
+    changes: freshIds.flatMap((id) =>
+      (pendingByRow.value.get(JSON.stringify([NEW_ROW, id])) ?? []).map((cell) => ({
+        ...cell,
+        before: cell.value,
+        value: cell.original,
+      })),
+    ),
+    removed: freshIds,
+    deleted: keys.filter((key) => !deleted.value.has(JSON.stringify(key))),
+  });
+}
+
 function undo() {
   const entry = undoStack.pop();
   if (entry) {
@@ -883,6 +1008,7 @@ function discard() {
       value: cell.original,
     })),
     removed: [...newRowIds.value],
+    restored: [...deleted.value.values()],
   });
   structureView.value?.discard();
 }
@@ -913,22 +1039,20 @@ function pendingChanges() {
   const structurePending = structureView.value?.pendingChanges();
   const rowEdits = [...pendingByRow.value.values()];
   const cellEdits = (cells: PendingCell[]) =>
-    cells.map((cell) => ({ column: cell.column, value: cell.value as EditValue }));
+    cells.map((cell) => ({ column: cell.column, value: editValue(cell.column, cell.value) }));
   const request: SaveRequest = {
     namespace: namespace.value,
     table: table.value,
     updates: rowEdits
-      .filter((cells) => !isNewKey(cells[0].key))
+      .filter((cells) => !isNewKey(cells[0].key) && !deleted.value.has(JSON.stringify(cells[0].key)))
       .map((cells) => ({
-        key: keyColumns.value.map((column, index) => ({
-          column,
-          value: cells[0].key[index] as EditValue,
-        })),
+        key: keyEdits(cells[0].key),
         changes: cellEdits(cells),
       })),
     inserts: newRowIds.value.map((id) => ({
       values: cellEdits(pendingByRow.value.get(JSON.stringify([NEW_ROW, id])) ?? []),
     })),
+    deletes: [...deleted.value.values()].map((key) => ({ key: keyEdits(key) })),
     columns: structurePending?.columns ?? [],
     newColumns: structurePending?.newColumns ?? [],
     indexes: structurePending?.indexes ?? [],
@@ -939,15 +1063,21 @@ function pendingChanges() {
     snapshot: {
       rows: pending.value,
       insertedIds: [...newRowIds.value],
+      deletedIds: [...deleted.value.keys()],
       columns: structurePending?.snapshot,
     },
   };
+}
+
+function keyEdits(key: Cell[]) {
+  return keyColumns.value.map((column, index) => ({ column, value: key[index] as EditValue }));
 }
 
 type SavedSnapshot = ReturnType<typeof pendingChanges>["snapshot"];
 
 function markSaved(sent: SavedSnapshot) {
   const inserted = new Set<Cell>(sent.insertedIds);
+  const removed = new Set(sent.deletedIds);
   markRowsSaved(sent.rows);
   if (inserted.size) {
     newRowIds.value = newRowIds.value.filter((id) => !inserted.has(id));
@@ -955,8 +1085,23 @@ function markSaved(sent: SavedSnapshot) {
       [...pending.value].filter(([, cell]) => !(isNewKey(cell.key) && inserted.has(cell.key[1]))),
     );
   }
+  if (removed.size) {
+    const next = new Map(deleted.value);
+    for (const id of removed) {
+      next.delete(id);
+    }
+    deleted.value = next;
+    if (result.value) {
+      const kept = rows.value.filter((row) => {
+        const key = rowKey(row);
+        return !key || !removed.has(JSON.stringify(key));
+      });
+      result.value = { ...result.value, rows: kept };
+    }
+  }
+  const recount = inserted.size > 0 || removed.size > 0;
   if (!sent.columns || (!sent.columns.fields.size && !sent.columns.created.length)) {
-    void loadData(inserted.size > 0, false);
+    void loadData(recount, false);
     return;
   }
   structureView.value?.markSaved(sent.columns);
@@ -977,7 +1122,7 @@ function markSaved(sent: SavedSnapshot) {
     emit("update:view", { filter, sort });
   }
   void loadStructure();
-  void loadData(inserted.size > 0, false);
+  void loadData(recount, false);
 }
 
 function markRowsSaved(sent: Map<string, PendingCell>) {
@@ -1017,9 +1162,26 @@ function onWindowKeydown(event: KeyboardEvent) {
     refresh();
     return;
   }
-  if (key === "f" && !event.shiftKey) {
+  if (key === "f") {
     event.preventDefault();
-    openPanel(true);
+    if (event.shiftKey) {
+      openPanel(true);
+    } else {
+      openFind();
+    }
+    return;
+  }
+  if (key === "g" && find.open.value && mode.value === "data") {
+    event.preventDefault();
+    find.step(event.shiftKey ? -1 : 1);
+    return;
+  }
+  if (key === "e" && !event.shiftKey && mode.value === "data" && inGrid(event.target)) {
+    event.preventDefault();
+    const cell = grid.value?.focusedCell();
+    if (cell) {
+      find.search(cell.text, cell.position);
+    }
     return;
   }
   if (key !== "z" || kind.value !== "table") {
@@ -1125,6 +1287,24 @@ function openPanel(focus: boolean) {
   }
 }
 
+function gridElement() {
+  return grid.value?.$el as HTMLElement | undefined;
+}
+
+function inGrid(target: EventTarget | null) {
+  return target instanceof Element && !target.closest("textarea") && Boolean(gridElement()?.contains(target));
+}
+
+function openFind() {
+  mode.value = "data";
+  find.show(grid.value?.focusedCell()?.position);
+}
+
+function closeFind() {
+  find.close();
+  gridElement()?.focus({ preventScroll: true });
+}
+
 function collapsePanel() {
   const hasBlank = conditionCount.value !== allConditions(props.view.filter).length;
   emit("update:view", hasBlank ? { panelOpen: false, filter: dropBlankConditions(props.view.filter) } : { panelOpen: false });
@@ -1132,7 +1312,7 @@ function collapsePanel() {
     if (autoApplyFilters.value && !compiled.value.pending) {
       applyFilter();
     }
-    (grid.value?.$el as HTMLElement | undefined)?.focus({ preventScroll: true });
+    gridElement()?.focus({ preventScroll: true });
   });
 }
 
@@ -1146,6 +1326,77 @@ function togglePanel() {
 
 function clearFilters() {
   emit("update:view", { filter: emptyGroup(), origin: "user" });
+}
+
+const canPasteFilters = ref(false);
+
+/** The filter on the clipboard, or null when it holds anything else or can't be read. */
+async function clipboardFilter() {
+  try {
+    const pasted = filterFromClipboard(await readClipboard());
+    return pasted && allConditions(pasted).length ? pasted : null;
+  } catch {
+    return null;
+  }
+}
+
+async function checkClipboard() {
+  canPasteFilters.value = Boolean(await clipboardFilter());
+}
+
+function onWindowFocus() {
+  if (props.view.panelOpen) {
+    void checkClipboard();
+  }
+}
+
+watch(
+  () => props.view.panelOpen,
+  (open) => {
+    if (open) {
+      void checkClipboard();
+    }
+  },
+  { immediate: true },
+);
+
+onMounted(() => window.addEventListener("focus", onWindowFocus));
+onBeforeUnmount(() => window.removeEventListener("focus", onWindowFocus));
+
+async function copyFilters() {
+  const count = allConditions(dropBlankConditions(props.view.filter)).length;
+  try {
+    await writeClipboard(filterToClipboard(props.view.filter));
+    canPasteFilters.value = true;
+    showToast(`Copied ${count} ${count === 1 ? "filter" : "filters"}`);
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+}
+
+async function pasteFilters() {
+  const pasted = await clipboardFilter();
+  canPasteFilters.value = Boolean(pasted);
+  if (!pasted) {
+    showToast("The clipboard no longer has filters copied from Recon.", "error");
+    return;
+  }
+  const added = allConditions(pasted);
+  const next = mergeFilters(props.view.filter, pasted);
+  if (allConditions(next).length > MAX_CONDITIONS) {
+    showToast(`Filters can have at most ${MAX_CONDITIONS} conditions.`, "error");
+    return;
+  }
+  emit("update:view", { filter: next, origin: "user" });
+  const missing = new Set(added.filter((node) => columnMap.value && !columnMap.value.has(node.column)).map((node) => node.column));
+  const summary = `Pasted ${added.length} ${added.length === 1 ? "filter" : "filters"}`;
+  if (missing.size) {
+    const names = [...missing].map((name) => `“${name}”`).join(", ");
+    showToast(`${summary}. This table has no ${missing.size === 1 ? "column" : "columns"} ${names}, so those filters aren't applied.`, "error");
+  } else {
+    showToast(summary);
+  }
+  void nextTick(() => panel.value?.reveal(pasted.children[0]?.id ?? next.id));
 }
 
 function suggest(column: string, search: string) {
@@ -1204,10 +1455,47 @@ const menuValueFilterable = computed(() => {
 
 function closeGridMenus() {
   cellMenu.value = null;
+  rowMenu.value = null;
   headerMenu.value = null;
 }
 
-useDismiss(computed(() => Boolean(cellMenu.value || headerMenu.value)), () => [menuEl.value], closeGridMenus);
+useDismiss(
+  computed(() => Boolean(cellMenu.value || rowMenu.value || headerMenu.value)),
+  () => [menuEl.value],
+  closeGridMenus,
+);
+
+const menuDeletable = computed(() => menuRows.value.filter(rowDeletable));
+const menuRestores = computed(
+  () =>
+    menuDeletable.value.length > 0 &&
+    menuDeletable.value.every((row) => deletedRows.value.has(row)),
+);
+const menuDeleteLabel = computed(() => {
+  const count = menuDeletable.value.length || menuRows.value.length;
+  const verb = menuRestores.value ? "Restore" : "Delete";
+  return count === 1 ? `${verb} row` : `${verb} ${count.toLocaleString()} rows`;
+});
+
+function deleteFromMenu() {
+  const targets = menuRows.value;
+  closeGridMenus();
+  deleteRows(targets);
+}
+
+function copyFromMenu(format: CopyFormat) {
+  closeGridMenus();
+  void grid.value?.copySelection(format);
+}
+
+const exportOpen = ref(false);
+const exportSource = computed<ExportRowsSource>(() => ({
+  kind: "browse",
+  request: browseRequest(),
+  total: total.value,
+  pageRows: rows.value.length,
+  filtered: applied.value.count > 0,
+}));
 
 function placeGridMenu(x: number, y: number) {
   menuPosition.value = { left: x, top: y };
@@ -1217,13 +1505,24 @@ function placeGridMenu(x: number, y: number) {
 }
 
 function onCellMenu(row: number, col: number, event: MouseEvent) {
-  headerMenu.value = null;
+  closeGridMenus();
+  menuRows.value = grid.value?.selectedRows() ?? [row];
   cellMenu.value = { x: event.clientX, y: event.clientY, row, col };
   placeGridMenu(event.clientX, event.clientY);
 }
 
+function onRowMenu(row: number, event: MouseEvent) {
+  closeGridMenus();
+  if (kind.value !== "table") {
+    return;
+  }
+  menuRows.value = grid.value?.selectedRows() ?? [row];
+  rowMenu.value = { x: event.clientX, y: event.clientY };
+  placeGridMenu(event.clientX, event.clientY);
+}
+
 function onHeaderMenu(col: number, event: MouseEvent) {
-  cellMenu.value = null;
+  closeGridMenus();
   headerMenu.value = { x: event.clientX, y: event.clientY, col };
   placeGridMenu(event.clientX, event.clientY);
 }
@@ -1316,13 +1615,46 @@ function openSqlInTab() {
   }
 }
 
-watch(
+const unsavedCount = computed(
   () =>
-    [...pendingByRow.value.values()].filter((cells) => !isNewKey(cells[0].key)).length +
+    [...pendingByRow.value].filter(([id, cells]) => !isNewKey(cells[0].key) && !deleted.value.has(id)).length +
     newRowIds.value.length +
+    deleted.value.size +
     structureChanges.value,
-  (count) => emit("changes", count),
 );
+
+watch(unsavedCount, (count) => emit("changes", count));
+
+const replaceTarget = ref<{ column: string; wholeOnly: boolean } | null>(null);
+const menuReplaceable = computed(
+  () => kind.value === "table" && (menuColumn.value?.kind === "text" || menuColumn.value?.kind === "enum"),
+);
+const replaceBlocked = computed(() => {
+  if (!menuReplaceable.value) {
+    return "Find and replace works on text and enum columns.";
+  }
+  return unsavedCount.value ? "Save or discard your changes first." : "";
+});
+
+function replaceFromMenu() {
+  const column = menuColumn.value;
+  const blocked = replaceBlocked.value;
+  closeGridMenus();
+  if (column && !blocked) {
+    replaceTarget.value = { column: column.name, wholeOnly: column.kind === "enum" };
+  }
+}
+
+function onReplaced(count: number) {
+  replaceTarget.value = null;
+  showToast(count ? `Replaced in ${count.toLocaleString()} ${count === 1 ? "row" : "rows"}` : "No rows changed");
+  void loadData(true, false);
+}
+
+function openReplaceSql(sql: string) {
+  replaceTarget.value = null;
+  emit("openSql", `${sql};`);
+}
 
 onMounted(() => {
   // A saved or linked filter needs the column types first; the columnMap watcher applies it.
@@ -1356,7 +1688,11 @@ onBeforeUnmount(() => {
   }
 });
 
-defineExpose({ refresh, pendingChanges, markSaved, discard });
+function showStructure() {
+  mode.value = "structure";
+}
+
+defineExpose({ refresh, pendingChanges, markSaved, discard, showStructure });
 </script>
 
 <template>
@@ -1409,8 +1745,8 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         type="button"
         :aria-pressed="view.panelOpen && mode === 'data'"
         :aria-label="filterActive ? `Filter: ${filterSummaryText || 'rows'}` : 'Filter rows'"
-        aria-keyshortcuts="Meta+F"
-        :title="summaryVisible ? undefined : view.panelOpen && mode === 'data' ? 'Hide filters (⌘F)' : 'Filter rows (⌘F)'"
+        :aria-keyshortcuts="`${ariaModifier}+Shift+F`"
+        :title="summaryVisible ? undefined : `${view.panelOpen && mode === 'data' ? 'Hide filters' : 'Filter rows'} (${shortcut('⇧⌘F')})`"
         @click="togglePanel"
         @mouseenter="showSummaryPopover"
         @mouseleave="hideSummaryPopover"
@@ -1448,13 +1784,26 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         </button>
       </span>
       <div class="pane-toolbar-end">
+        <button
+          v-if="mode === 'data'"
+          class="ghost tiny"
+          type="button"
+          :disabled="!result"
+          title="Export these rows as CSV or JSON, with the current filters and sort"
+          @click="exportOpen = true"
+        >
+          <svg class="button-icon" viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M8 10V2.5M4.8 5.7 8 2.5l3.2 3.2M2.5 11.5v1a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-1" />
+          </svg>
+          Export
+        </button>
         <div class="overflow-menu auto-refresh-menu refresh-split">
           <button
             class="ghost tiny refresh-main"
             type="button"
-            :title="refreshing ? 'Loading…' : 'Refresh (⌘R)'"
+            :title="refreshing ? 'Loading…' : `Refresh (${shortcut('⌘R')})`"
             :aria-label="refreshing ? 'Loading' : 'Refresh'"
-            aria-keyshortcuts="Meta+R"
+            :aria-keyshortcuts="`${ariaModifier}+R`"
             :disabled="refreshing"
             @click="refresh"
           >
@@ -1547,10 +1896,20 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
       @collapse="collapsePanel"
       @clear="clearFilters"
       @show-sql="showSql"
+      :can-paste="canPasteFilters"
+      @copy="copyFilters"
+      @paste="pasteFilters"
+      @check-clipboard="checkClipboard"
     />
     <div v-else-if="view.panelOpen && mode === 'data' && loadingStructure" class="filter-panel-loading muted tiny">
       <span class="spinner" aria-hidden="true" /> Loading columns…
     </div>
+    <GridFind
+      v-if="find.open.value && mode === 'data'"
+      :find="find"
+      :scope="onlyOnePage ? undefined : 'on this page'"
+      @close="closeFind"
+    />
 
     <div
       v-show="mode === 'data'"
@@ -1573,18 +1932,25 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
           :sort-column="sortColumn"
           :sort-dir="sortDir"
           :cell-editable="cellEditable"
+          :cell-options="cellOptions"
           :new-row-start="rows.length"
           :new-row-auto="autoColumns"
           :creatable="canInsert"
           :modified="modified"
+          :deletable="kind === 'table'"
+          :deleted-rows="deletedRows"
           :links="links"
+          :matches="find.byRow.value"
+          :current-match="find.current.value"
           context-menus
           @sort="onSort"
           @edit="onEdit"
           @set-null="onSetNull"
+          @delete-rows="deleteRows"
           @create="createRecord"
           @follow="onFollow"
           @cell-menu="onCellMenu"
+          @row-menu="onRowMenu"
           @header-menu="onHeaderMenu"
         />
       </template>
@@ -1662,13 +2028,25 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
     </div>
     <Teleport to="body">
       <div
-        v-if="cellMenu || headerMenu"
+        v-if="cellMenu || rowMenu || headerMenu"
         ref="menuEl"
         class="overflow-menu-dropdown table-context-menu"
         role="menu"
         :style="{ left: `${menuPosition.left}px`, top: `${menuPosition.top}px` }"
         @contextmenu.prevent
       >
+        <template v-if="cellMenu || rowMenu">
+          <button class="overflow-menu-item" type="button" role="menuitem" :aria-keyshortcuts="`${ariaModifier}+C`" @click="copyFromMenu('tsv')">
+            Copy
+          </button>
+          <button class="overflow-menu-item" type="button" role="menuitem" @click="copyFromMenu('csv')">
+            Copy as CSV
+          </button>
+          <button class="overflow-menu-item" type="button" role="menuitem" @click="copyFromMenu('json')">
+            Copy as JSON
+          </button>
+          <div v-if="cellMenu || kind === 'table'" class="overflow-menu-divider" role="separator" />
+        </template>
         <template v-if="cellMenu">
           <button
             class="overflow-menu-item"
@@ -1717,9 +2095,35 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
             </button>
           </template>
         </template>
-        <template v-else>
+        <template v-if="(cellMenu || rowMenu) && kind === 'table'">
+          <div v-if="cellMenu" class="overflow-menu-divider" role="separator" />
+          <button
+            class="overflow-menu-item"
+            :class="{ danger: !menuRestores }"
+            type="button"
+            role="menuitem"
+            aria-keyshortcuts="Backspace"
+            :disabled="!menuDeletable.length"
+            :title="menuDeletable.length ? undefined : 'Rows can only be deleted from tables with a primary key.'"
+            @click="deleteFromMenu"
+          >
+            {{ menuDeleteLabel }}
+          </button>
+        </template>
+        <template v-else-if="headerMenu">
           <button class="overflow-menu-item" type="button" role="menuitem" :disabled="!menuColumn" @click="filterOnColumn">
             Filter on {{ menuColumn?.name ?? "column" }}…
+          </button>
+          <button
+            v-if="kind === 'table'"
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            :disabled="Boolean(replaceBlocked)"
+            :title="replaceBlocked || undefined"
+            @click="replaceFromMenu"
+          >
+            Find and replace…
           </button>
           <div class="overflow-menu-divider" role="separator" />
           <button class="overflow-menu-item" type="button" role="menuitem" @click="sortFromMenu('asc')">
@@ -1739,7 +2143,7 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
       :preview="filterPreview"
       :count="filterCount"
       :anchor="summaryAnchor"
-      :hint="filterError || 'Click to edit filters (⌘F)'"
+      :hint="filterError || `Click to edit filters (${shortcut('⇧⌘F')})`"
     />
     <Modal v-if="customRefresh" title="Auto refresh" @close="customRefresh = false">
       <form @submit.prevent="applyCustomRefresh" @keydown.enter.prevent="applyCustomRefresh">
@@ -1773,5 +2177,26 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         <button class="primary" type="button" :disabled="!sqlPreview.sql" @click="openSqlInTab">Open in SQL tab</button>
       </template>
     </Modal>
+    <ExportRowsDialog
+      v-if="exportOpen"
+      :connection-id="connectionId"
+      :title="`Export “${table}”`"
+      :name="table"
+      :source="exportSource"
+      @close="exportOpen = false"
+    />
+    <ReplaceDialog
+      v-if="replaceTarget"
+      :connection-id="connectionId"
+      :namespace="namespace"
+      :table="table"
+      :column="replaceTarget.column"
+      :whole-only="replaceTarget.wholeOnly"
+      :filter="applied.wire"
+      :filter-summary="applied.summary"
+      @close="replaceTarget = null"
+      @done="onReplaced"
+      @open-sql="openReplaceSql"
+    />
   </div>
 </template>

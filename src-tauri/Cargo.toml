@@ -1,9 +1,9 @@
 [package]
 name = "Recon"
-version = "1.0.1"
-description = "A local-first database client"
+version = "1.12.0"
+description = "A database client for MySQL, PostgreSQL, SQLite, and SQL Server"
 authors = ["RazorKode LLC"]
-license = "FSL-1.1-MIT"
+license = "MIT"
 edition = "2021"
 
 [lib]
@@ -22,7 +22,7 @@ tauri-plugin-opener = "2"
 tauri-plugin-process = "2"
 tauri-plugin-updater = "2"
 uuid = { version = "1", features = ["v4"] }
-tokio = { version = "1", features = ["io-util", "net", "rt", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "net", "process", "rt", "sync", "time"] }
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
     "tls-rustls",
@@ -30,13 +30,24 @@ sqlx = { version = "0.8", default-features = false, features = [
     "postgres",
     "sqlite",
 ] }
-keyring = { version = "3", features = ["apple-native"] }
 futures-util = { version = "0.3", features = ["io"] }
 flate2 = "1"
 russh = { version = "0.63", default-features = false, features = ["ring", "rsa", "flate2"] }
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-notification = "2"
 tiberius = { version = "0.13", default-features = false, features = ["tds73", "rustls"] }
 deadpool = "0.12"
 tokio-util = { version = "0.7.20", features = ["compat"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+dbus-secret-service = "4"
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

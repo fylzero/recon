@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useApp } from "../composables/useApp";
 import { useConnectionForm } from "../composables/useConnectionForm";
-import { STANDALONE_LIST, useConnectionDrag } from "../composables/useConnectionDrag";
-import { alphabeticalIds, useDragReorder } from "../composables/useDragReorder";
-import type { ConnectionGroup } from "../types";
+import { useDashboardDrag } from "../composables/useDashboardDrag";
+import { alphabeticalIds } from "../dashboard";
+import type { ConnectionEntry, ConnectionGroup } from "../types";
 import ConnectionGroupCard from "../components/ConnectionGroupCard.vue";
 import ConnectionRow from "../components/ConnectionRow.vue";
 
@@ -16,78 +16,184 @@ const DRAFT_GROUP: ConnectionGroup = {
   connections: [],
 };
 
+type DashboardEntry =
+  | { kind: "group"; id: string; group: ConnectionGroup }
+  | { kind: "connection"; id: string; connection: ConnectionEntry };
+
 const {
   groups,
   standaloneConnections,
+  dashboardIds,
   setAllGroupsExpanded,
-  reorderGroups,
-  reorderConnections,
+  reorderDashboard,
   moveConnection,
   showToast,
 } = useApp();
 const { openNewConnection } = useConnectionForm();
 const creating = ref(false);
 
-const groupIds = () => groups.value.map((group) => group.id);
-const standaloneIds = () => standaloneConnections.value.map((connection) => connection.id);
-
-const groupReorder = useDragReorder({
-  ids: groupIds,
-  selector: "[data-group-id]",
-  datasetKey: "groupId",
-  bodyClass: "reordering-groups",
-  commit: reorderGroups,
-  isBefore(element, event) {
-    const header = element.querySelector(".group-header");
-    const rect = (header instanceof HTMLElement ? header : element).getBoundingClientRect();
-    return event.clientY <= rect.bottom && event.clientY < rect.top + rect.height / 2;
-  },
+const groupById = computed(() => new Map(groups.value.map((group) => [group.id, group])));
+const connectionById = computed(() => {
+  const entries = [
+    ...standaloneConnections.value,
+    ...groups.value.flatMap((group) => group.connections),
+  ];
+  return new Map(entries.map((entry) => [entry.id, entry]));
 });
 
-const connectionDrag = useConnectionDrag({
-  groups,
-  standalone: standaloneConnections,
-  commit: moveConnection,
+const drag = useDashboardDrag({
+  layout: () => ({
+    root: [...dashboardIds.value],
+    groups: Object.fromEntries(
+      groups.value.map((group) => [group.id, group.connections.map((entry) => entry.id)]),
+    ),
+  }),
+  itemSelector: "[data-connection-id]",
+  itemKey: "connectionId",
+  isCollapsed: (groupId) => !groupById.value.get(groupId)?.expanded,
+  commitRoot: reorderDashboard,
+  commitGroup: moveConnection,
   onError: (err) => showToast(String(err), "error"),
 });
 
-const visibleGroups = computed(() => groupReorder.ordered(groups.value));
-const visibleStandalone = computed(() =>
-  connectionDrag.connectionsFor(STANDALONE_LIST, standaloneConnections.value),
-);
-const visibleStandaloneIds = computed(() => visibleStandalone.value.map((item) => item.id));
-const draggingConnectionId = computed(() => connectionDrag.draggingId.value);
-const showStandaloneList = computed(() => standaloneConnections.value.length > 0);
-const showUngroupZone = computed(
-  () => !showStandaloneList.value && Boolean(draggingConnectionId.value),
+const SEARCH_MIN_CONNECTIONS = 6;
+
+const query = ref("");
+const searchInput = ref<HTMLInputElement | null>(null);
+const showSearch = computed(() => connectionById.value.size >= SEARCH_MIN_CONNECTIONS);
+const searchTerms = computed(() =>
+  showSearch.value ? query.value.trim().toLowerCase().split(/\s+/).filter(Boolean) : [],
 );
 
-const isEmpty = computed(() => !groups.value.length && !standaloneConnections.value.length);
+watch(showSearch, (shown) => {
+  if (!shown) {
+    query.value = "";
+  }
+});
+const filtering = computed(() => searchTerms.value.length > 0);
+
+function matchesSearch(...fields: (string | undefined)[]) {
+  const haystack = fields.filter(Boolean).join(" ").toLowerCase();
+  return searchTerms.value.every((term) => haystack.includes(term));
+}
+
+function connectionMatches(connection: ConnectionEntry, groupName?: string) {
+  return matchesSearch(
+    groupName,
+    connection.name,
+    connection.host,
+    connection.database,
+    connection.filePath,
+  );
+}
+
+const entries = computed(() =>
+  drag.rootIds(dashboardIds.value).flatMap((id): DashboardEntry[] => {
+    const group = groupById.value.get(id);
+    if (group) {
+      if (filtering.value && !matchesSearch(group.name) && !groupConnections(group).length) {
+        return [];
+      }
+      return [{ kind: "group", id, group }];
+    }
+    const connection = connectionById.value.get(id);
+    if (!connection || (filtering.value && !connectionMatches(connection))) {
+      return [];
+    }
+    return [{ kind: "connection", id, connection }];
+  }),
+);
+const topLevelConnectionIds = computed(() =>
+  entries.value.filter((entry) => entry.kind === "connection").map((entry) => entry.id),
+);
+
+function groupConnections(group: ConnectionGroup) {
+  const ids = drag.groupItemIds(group.id);
+  const connections = ids
+    ? ids.flatMap((id) => {
+        const entry = connectionById.value.get(id);
+        return entry ? [entry] : [];
+      })
+    : group.connections;
+  return filtering.value
+    ? connections.filter((connection) => connectionMatches(connection, group.name))
+    : connections;
+}
+
+const totalConnectionCount = computed(() => connectionById.value.size);
+const visibleConnectionCount = computed(() =>
+  entries.value.reduce(
+    (count, entry) =>
+      count + (entry.kind === "connection" ? 1 : groupConnections(entry.group).length),
+    0,
+  ),
+);
+
+function clearSearch() {
+  query.value = "";
+  searchInput.value?.focus();
+}
+
+function onSearchKeydown(event: KeyboardEvent) {
+  if (event.key !== "Escape") {
+    return;
+  }
+  event.stopPropagation();
+  if (query.value) {
+    query.value = "";
+    return;
+  }
+  searchInput.value?.blur();
+}
+
+function typingElsewhere(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement) || target === searchInput.value) {
+    return false;
+  }
+  return target.isContentEditable || target.closest("input, textarea, select") !== null;
+}
+
+function onKeydown(event: KeyboardEvent) {
+  if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "f") {
+    return;
+  }
+  // The dashboard stays mounted behind connection tabs; only respond while it's visible.
+  if (!searchInput.value?.offsetParent || typingElsewhere(event.target)) {
+    return;
+  }
+  event.preventDefault();
+  searchInput.value?.focus();
+  searchInput.value?.select();
+}
+
+onMounted(() => {
+  window.addEventListener("keydown", onKeydown);
+});
+
+onUnmounted(() => {
+  window.removeEventListener("keydown", onKeydown);
+});
+
+const isEmpty = computed(() => !dashboardIds.value.length);
 const hasGroups = computed(() => groups.value.length > 0);
 const canExpandAll = computed(() => groups.value.some((group) => !group.expanded));
 const canCollapseAll = computed(() => groups.value.some((group) => group.expanded));
-const canSortGroups = computed(() => groups.value.length > 1);
-const canSortStandalone = computed(() => standaloneConnections.value.length > 1);
-const canDragConnections = computed(() => hasGroups.value || canSortStandalone.value);
+const canSortEntries = computed(() => dashboardIds.value.length > 1);
+const canDragConnections = computed(() => hasGroups.value || canSortEntries.value);
 
-const canSortGroupsAlpha = computed(
-  () => canSortGroups.value && alphabeticalIds(groups.value).join("\0") !== groupIds().join("\0"),
+const alphaIds = computed(() =>
+  alphabeticalIds([...groups.value, ...standaloneConnections.value]),
 );
-const canSortStandaloneAlpha = computed(
-  () =>
-    canSortStandalone.value &&
-    alphabeticalIds(standaloneConnections.value).join("\0") !== standaloneIds().join("\0"),
+const canSortAlpha = computed(
+  () => canSortEntries.value && alphaIds.value.join("\0") !== dashboardIds.value.join("\0"),
 );
-const canSortAlpha = computed(() => canSortGroupsAlpha.value || canSortStandaloneAlpha.value);
 
 async function sortAlphabetically() {
+  if (!canSortAlpha.value) {
+    return;
+  }
   try {
-    if (canSortGroupsAlpha.value) {
-      await reorderGroups(alphabeticalIds(groups.value));
-    }
-    if (canSortStandaloneAlpha.value) {
-      await reorderConnections(null, alphabeticalIds(standaloneConnections.value));
-    }
+    await reorderDashboard(alphaIds.value);
   } catch (err) {
     showToast(String(err), "error");
   }
@@ -115,6 +221,39 @@ async function sortAlphabetically() {
             </button>
           </div>
           <div class="toolbar-end">
+            <span v-if="filtering" class="muted tiny groups-search-count">
+              {{ visibleConnectionCount }} of {{ totalConnectionCount }}
+            </span>
+            <label v-if="showSearch" class="groups-search-field">
+              <span class="sr-only">Filter connections</span>
+              <svg class="database-menu-search-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"
+                />
+              </svg>
+              <input
+                ref="searchInput"
+                v-model="query"
+                type="text"
+                placeholder="Filter connections"
+                autocapitalize="off"
+                autocorrect="off"
+                autocomplete="off"
+                spellcheck="false"
+                @keydown="onSearchKeydown"
+              />
+              <button
+                v-if="query"
+                class="database-menu-search-clear"
+                type="button"
+                title="Clear search"
+                @click="clearSearch"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M6 18 18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </label>
             <button
               v-if="hasGroups"
               class="ghost"
@@ -148,34 +287,15 @@ async function sortAlphabetically() {
         <p v-if="isEmpty && !creating" class="muted">
           Add a MySQL, PostgreSQL, SQLite, or SQL Server connection. Groups keep related connections together.
         </p>
+        <p v-else-if="filtering && !entries.length" class="muted tiny">
+          No connections match that search.
+        </p>
 
         <div
-          v-if="showStandaloneList || showUngroupZone"
-          class="standalone-list"
-          :class="{
-            reordering: connectionDrag.draftKey.value === STANDALONE_LIST,
-            trailing: showUngroupZone,
-            'drop-target': connectionDrag.dropKey.value === STANDALONE_LIST,
-          }"
-          :data-connection-drop="STANDALONE_LIST"
+          class="groups-list"
+          data-dashboard-root
+          :class="{ reordering: Boolean(drag.draggingGroupId.value) }"
         >
-          <ConnectionRow
-            v-for="connection in visibleStandalone"
-            :key="connection.id"
-            :connection="connection"
-            :group-id="null"
-            :sibling-ids="visibleStandaloneIds"
-            flush
-            :sortable="canDragConnections"
-            :dragging="draggingConnectionId === connection.id"
-            @reorder-start="connectionDrag.start"
-          />
-          <p v-if="!visibleStandalone.length" class="muted tiny standalone-drop-hint">
-            Drop here to remove from group
-          </p>
-        </div>
-
-        <div class="groups-list" :class="{ reordering: Boolean(groupReorder.draggingId.value) }">
           <ConnectionGroupCard
             v-if="creating"
             :group="DRAFT_GROUP"
@@ -183,19 +303,33 @@ async function sortAlphabetically() {
             @cancel="creating = false"
             @created="creating = false"
           />
-          <ConnectionGroupCard
-            v-for="group in visibleGroups"
-            :key="group.id"
-            :group="group"
-            :sortable="canSortGroups"
-            :dragging="groupReorder.draggingId.value === group.id"
-            :connections="connectionDrag.connectionsFor(group.id, group.connections)"
-            :connections-sortable="canDragConnections"
-            :dragging-connection-id="draggingConnectionId"
-            :drop-target="connectionDrag.dropKey.value === group.id"
-            @reorder-start="groupReorder.start"
-            @connection-drag-start="connectionDrag.start"
-          />
+          <template v-for="entry in entries" :key="entry.id">
+            <ConnectionGroupCard
+              v-if="entry.kind === 'group'"
+              :data-dashboard-id="entry.id"
+              :group="entry.group"
+              :sortable="canSortEntries && !filtering"
+              :dragging="drag.draggingGroupId.value === entry.id"
+              :connections="groupConnections(entry.group)"
+              :connections-sortable="canDragConnections && !filtering"
+              :force-expanded="filtering"
+              :dragging-connection-id="drag.draggingItemId.value"
+              :drop-target="drag.dropGroupId.value === entry.id"
+              @reorder-start="(event, id) => drag.start(event, 'group', id)"
+              @connection-drag-start="(event, id) => drag.start(event, 'item', id)"
+            />
+            <ConnectionRow
+              v-else
+              :data-dashboard-id="entry.id"
+              :connection="entry.connection"
+              :group-id="null"
+              :sibling-ids="topLevelConnectionIds"
+              flush
+              :sortable="canDragConnections && !filtering"
+              :dragging="drag.draggingItemId.value === entry.id"
+              @reorder-start="(event, id) => drag.start(event, 'item', id)"
+            />
+          </template>
         </div>
       </div>
     </div>
