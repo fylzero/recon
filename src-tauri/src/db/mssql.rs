@@ -189,7 +189,7 @@ pub async fn open(entry: &ConnectionEntry, password: Option<&str>) -> Result<Ope
         .and_then(|output| output.rows.first()?.first()?.as_i64());
     Ok(Opened {
         pool: SessionPool::Mssql(pool),
-        conn: Conn::Mssql(conn),
+        conn: Conn::Mssql(Box::new(conn)),
         backend_id,
     })
 }

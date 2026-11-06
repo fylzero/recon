@@ -1636,7 +1636,7 @@ fn mssql_columns_sql(namespace: &str, schema: &str, name: &str) -> String {
 }
 
 fn mssql_create_table(qualified: &str, columns: &[Vec<CellValue>], indexes: &[Vec<CellValue>]) -> String {
-    let mut parts: Vec<String> = columns.iter().map(mssql_column_sql).collect();
+    let mut parts: Vec<String> = columns.iter().map(|row| mssql_column_sql(row)).collect();
     for row in indexes.iter().filter(|row| mssql_flag(row, 3) || mssql_flag(row, 7)) {
         let kind = if mssql_flag(row, 3) { "PRIMARY KEY" } else { "UNIQUE" };
         parts.push(format!(
@@ -1648,7 +1648,7 @@ fn mssql_create_table(qualified: &str, columns: &[Vec<CellValue>], indexes: &[Ve
     format!("CREATE TABLE {qualified} (\n    {}\n);\n", parts.join(",\n    "))
 }
 
-fn mssql_column_sql(row: &Vec<CellValue>) -> String {
+fn mssql_column_sql(row: &[CellValue]) -> String {
     let name = quote_bracket(&mssql_text(row, 0));
     if mssql_flag(row, 4) {
         let persisted = if mssql_flag(row, 6) { " PERSISTED" } else { "" };

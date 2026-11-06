@@ -838,7 +838,7 @@ impl Pool {
             Pool::MySql(pool) => Conn::MySql(pool.acquire().await.map_err(describe_error)?.detach()),
             Pool::Postgres(pool) => Conn::Postgres(pool.acquire().await.map_err(describe_error)?.detach()),
             Pool::Sqlite(pool) => Conn::Sqlite(pool.acquire().await.map_err(describe_error)?.detach()),
-            Pool::Mssql(pool) => Conn::Mssql(pool.detached().await?),
+            Pool::Mssql(pool) => Conn::Mssql(Box::new(pool.detached().await?)),
         })
     }
 
@@ -847,7 +847,7 @@ impl Pool {
             Pool::MySql(pool) => PooledConn::MySql(pool.acquire().await.map_err(describe_error)?),
             Pool::Postgres(pool) => PooledConn::Postgres(pool.acquire().await.map_err(describe_error)?),
             Pool::Sqlite(pool) => PooledConn::Sqlite(pool.acquire().await.map_err(describe_error)?),
-            Pool::Mssql(pool) => PooledConn::Mssql(pool.checkout().await?),
+            Pool::Mssql(pool) => PooledConn::Mssql(Box::new(pool.checkout().await?)),
         })
     }
 
@@ -864,7 +864,7 @@ pub enum PooledConn {
     MySql(sqlx::pool::PoolConnection<sqlx::MySql>),
     Postgres(sqlx::pool::PoolConnection<sqlx::Postgres>),
     Sqlite(sqlx::pool::PoolConnection<sqlx::Sqlite>),
-    Mssql(deadpool::managed::Object<mssql::MssqlManager>),
+    Mssql(Box<deadpool::managed::Object<mssql::MssqlManager>>),
 }
 
 impl PooledConn {
@@ -882,7 +882,7 @@ impl PooledConn {
             PooledConn::MySql(conn) => mysql::run(conn, sql, limit, None).await,
             PooledConn::Postgres(conn) => postgres::run(conn, sql, limit, None).await,
             PooledConn::Sqlite(conn) => sqlite::run(conn, sql, limit, None).await,
-            PooledConn::Mssql(conn) => mssql::run(conn.as_mut(), sql, limit, None).await,
+            PooledConn::Mssql(conn) => mssql::run(conn.as_mut().as_mut(), sql, limit, None).await,
         }
     }
 
@@ -954,7 +954,7 @@ impl PooledConn {
             PooledConn::Postgres(conn) => conn.close().await,
             PooledConn::Sqlite(conn) => conn.close().await,
             PooledConn::Mssql(conn) => {
-                let _ = deadpool::managed::Object::take(conn).close().await;
+                let _ = deadpool::managed::Object::take(*conn).close().await;
                 Ok(())
             }
         };
@@ -978,7 +978,7 @@ pub enum Conn {
     MySql(sqlx::MySqlConnection),
     Postgres(sqlx::PgConnection),
     Sqlite(sqlx::SqliteConnection),
-    Mssql(mssql::MssqlConn),
+    Mssql(Box<mssql::MssqlConn>),
 }
 
 impl Conn {
@@ -1022,6 +1022,8 @@ impl Conn {
     }
 }
 
+type ColumnCache = HashMap<(String, String), Arc<Vec<ColumnDetail>>>;
+
 pub struct Opened {
     pub pool: Pool,
     pub conn: Conn,
@@ -1041,7 +1043,7 @@ pub struct Session {
     pub namespace: Mutex<String>,
     pub tunnel: Option<ssh::Tunnel>,
     /// Column lists by namespace and table, so filters can be checked without a catalog query each time.
-    pub columns: Mutex<HashMap<(String, String), Arc<Vec<ColumnDetail>>>>,
+    pub columns: Mutex<ColumnCache>,
     /// Backend ids of browse queries that can be cancelled, by request id.
     pub running: tokio::sync::Mutex<HashMap<String, i64>>,
 }
