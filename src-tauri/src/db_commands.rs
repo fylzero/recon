@@ -1278,30 +1278,32 @@ fn order_clause(
 }
 
 /** The filtered `SELECT *` with the request's sort, but no LIMIT. */
-async fn sorted_select(session: &Session, request: &BrowseRequest) -> Result<Fragment, String> {
+/// The select, and whether it has an ORDER BY: the chosen column, then the primary key.
+async fn sorted_select(
+    session: &Session,
+    request: &BrowseRequest,
+) -> Result<(Fragment, bool), String> {
     let mut statement = filtered_select(session, request, "*").await?;
     let columns = table_columns(session, &request.namespace, &request.table).await?;
-    if let Some(order) = order_clause(
+    let order = order_clause(
         dialect(session.driver),
         &columns,
         request.order_by.as_deref(),
         request.order_dir,
-    )? {
+    )?;
+    let ordered = order.is_some();
+    if let Some(order) = order {
         statement.push_sql(order);
     }
-    Ok(statement)
+    Ok((statement, ordered))
 }
 
 async fn browse_statement(
     session: &Session,
     request: &BrowseRequest,
 ) -> Result<(Fragment, u64), String> {
-    let mut statement = sorted_select(session, request).await?;
+    let (mut statement, ordered) = sorted_select(session, request).await?;
     let limit = request.limit.clamp(1, BROWSE_LIMIT_MAX);
-    let ordered = request
-        .order_by
-        .as_deref()
-        .is_some_and(|column| !column.is_empty());
     statement.push_sql(dialect(session.driver).limit_sql(limit, request.offset, ordered));
     Ok((statement, limit))
 }
@@ -1317,7 +1319,9 @@ pub(crate) async fn export_statement(
             .await
             .map(|(statement, _)| statement);
     }
-    sorted_select(session, request).await
+    sorted_select(session, request)
+        .await
+        .map(|(statement, _)| statement)
 }
 
 fn record_statement(
@@ -1390,14 +1394,23 @@ async fn run_tracked(
     statement: &Fragment,
     limit: usize,
 ) -> Result<RawOutput, String> {
+    let mut tracked = None;
     if let Some(id) = request_id {
         if let Some(backend) = conn.backend_id().await {
             session.running.lock().await.insert(id.to_string(), backend);
+            tracked = Some(id);
         }
     }
     let outcome = conn.run_statement(statement, limit).await;
     if let Some(id) = request_id {
-        session.running.lock().await.remove(id);
+        let cancelled = session.running.lock().await.remove(id).is_none();
+        /*
+         * SQL Server cancels by ending the session, which reads as a lost
+         * connection. Reporting it as one would reconnect and run it again.
+         */
+        if cancelled && tracked.is_some() && outcome.is_err() && session.driver == Driver::Mssql {
+            return Err("Query cancelled.".into());
+        }
     }
     outcome
 }
@@ -1410,17 +1423,21 @@ async fn cancel_request(session: &Session, request_id: Option<&str>) {
     let Some(id) = request_id else {
         return;
     };
-    let running = session.running.lock().await;
+    let mut running = session.running.lock().await;
     let Some(backend) = running.get(id).copied() else {
         return;
     };
     let sql = match session.driver {
         Driver::Mysql => format!("KILL QUERY {backend}"),
         Driver::Postgres => format!("SELECT pg_cancel_backend({backend})"),
+        // SQL Server has no KILL QUERY. Its pool replaces the ended connection.
         Driver::Mssql => format!("KILL {backend}"),
         Driver::Sqlite => return,
     };
-    let _ = session.pool.run(&sql, 1).await;
+    let killed = session.pool.run(&sql, 1).await.is_ok();
+    if killed && session.driver == Driver::Mssql {
+        running.remove(id);
+    }
     drop(running);
 }
 
@@ -1781,44 +1798,35 @@ async fn save(session: Arc<Session>, requests: &[SaveRequest]) -> Result<usize, 
         } else {
             Vec::new()
         };
-        let identity_insert = identities.iter().any(|column| {
-            request
-                .inserts
-                .iter()
-                .any(|insert| explicit(insert, column))
-        });
-        if identity_insert {
-            let sql = db::mssql::identity_insert_sql(&table, true);
-            statements.push(db::EditStatement {
+        let identity_insert = |enabled: bool| {
+            let sql = db::mssql::identity_insert_sql(&table, enabled);
+            db::EditStatement {
                 sql: sql.clone(),
                 display: sql,
                 params: Vec::new(),
                 table: table.clone(),
                 label: "IDENTITY_INSERT".into(),
                 expect_one_row: false,
-            });
-        }
+            }
+        };
         for insert in &request.inserts {
             let overriding = sequences
                 .iter()
                 .any(|column| column.always && explicit(insert, &column.name));
+            // With IDENTITY_INSERT on, rows that leave the identity column out are rejected.
+            let sets_identity = identities.iter().any(|column| explicit(insert, column));
+            if sets_identity {
+                statements.push(identity_insert(true));
+            }
             statements.push(db::insert_statement(
                 session.driver,
                 &table,
                 insert,
                 overriding,
             ));
-        }
-        if identity_insert {
-            let sql = db::mssql::identity_insert_sql(&table, false);
-            statements.push(db::EditStatement {
-                sql: sql.clone(),
-                display: sql,
-                params: Vec::new(),
-                table: table.clone(),
-                label: "IDENTITY_INSERT".into(),
-                expect_one_row: false,
-            });
+            if sets_identity {
+                statements.push(identity_insert(false));
+            }
         }
         for column in &sequences {
             if request

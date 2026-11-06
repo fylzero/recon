@@ -63,15 +63,15 @@ function isGoLine(line: string) {
 }
 
 function isMssqlRoutine(sql: string) {
-  const words = sql
+  const words = stripComments(sql)
     .split(/[^A-Za-z0-9_]+/)
     .filter(Boolean)
     .slice(0, 4)
     .map((word) => word.toUpperCase());
-  if (words[0] !== "CREATE") {
+  if (words[0] !== "CREATE" && words[0] !== "ALTER") {
     return false;
   }
-  const kind = words[1] === "OR" ? words[3] : words[1];
+  const kind = words[0] === "CREATE" && words[1] === "OR" ? words[3] : words[1];
   return kind === "PROCEDURE" || kind === "PROC" || kind === "FUNCTION" || kind === "TRIGGER";
 }
 

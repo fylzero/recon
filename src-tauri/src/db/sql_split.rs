@@ -290,25 +290,7 @@ fn is_go_batch(line: &str) -> bool {
 
 /// A procedure, function, or trigger keeps its internal semicolons until the next `GO`.
 fn is_mssql_routine(sql: &str) -> bool {
-    let words: Vec<String> = sql
-        .split(|c: char| !is_ident_char(c))
-        .filter(|word| !word.is_empty())
-        .take(4)
-        .map(|word| word.to_ascii_uppercase())
-        .collect();
-    let kind = if words.first().is_some_and(|word| word == "CREATE") {
-        if words.get(1).is_some_and(|word| word == "OR") {
-            words.get(3)
-        } else {
-            words.get(1)
-        }
-    } else {
-        None
-    };
-    matches!(
-        kind.map(String::as_str),
-        Some("PROCEDURE" | "PROC" | "FUNCTION" | "TRIGGER")
-    )
+    super::mssql::defined_module(sql).is_some_and(|kind| kind != "VIEW")
 }
 
 fn is_ident_char(c: char) -> bool {
@@ -578,6 +560,11 @@ mod tests {
                 "CREATE PROCEDURE [dbo].[p] AS BEGIN\n  SELECT 1;\n  SELECT [a]]b];\nEND",
                 "SELECT 2",
             ]
+        );
+        let commented = "-- Keeps its semicolons\nCREATE OR ALTER PROCEDURE p AS\n  SELECT 1;\n  SELECT 2;\nGO\n";
+        assert_eq!(
+            split(Driver::Mssql, commented),
+            vec!["CREATE OR ALTER PROCEDURE p AS\n  SELECT 1;\n  SELECT 2;"]
         );
     }
 }

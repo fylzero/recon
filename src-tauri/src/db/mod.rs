@@ -568,9 +568,9 @@ pub fn insert_statement(
     for cell in &insert.values {
         columns.push(dialect.quote_ident(&cell.column));
         values.push(match cell.value.inline_sql() {
+            _ if driver == Driver::Mssql => mssql::edit_literal(&cell.value),
             Some(sql) => sql,
             None if driver == Driver::Postgres => cell.value.postgres_literal(),
-            None if driver == Driver::Mssql => mssql::edit_literal(&cell.value),
             None => {
                 params.push(cell.value.clone());
                 "?".to_string()
@@ -841,10 +841,11 @@ pub fn update_statement(
     let mut set_display = Vec::new();
     for change in &update.changes {
         let column = dialect.quote_ident(&change.column);
-        let sql = change
-            .value
-            .inline_sql()
-            .unwrap_or_else(|| value_sql(&change.value));
+        let sql = match change.value.inline_sql() {
+            _ if driver == Driver::Mssql => mssql::edit_literal(&change.value),
+            Some(sql) => sql,
+            None => value_sql(&change.value),
+        };
         set.push(format!("{column} = {sql}"));
         set_display.push(format!("{column} = {}", change.value.display_literal()));
     }
@@ -1272,6 +1273,7 @@ pub fn is_timeout_or_cancel(message: &str) -> bool {
         || lower.contains("max_statement_time")
         || lower.contains("query execution was interrupted")
         || lower.contains("query was cancel")
+        || lower.contains("query cancelled")
         || lower.contains("kill state")
         || lower.contains("attention signal")
 }

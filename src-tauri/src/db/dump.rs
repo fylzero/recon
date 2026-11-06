@@ -12,7 +12,7 @@ use tiberius::QueryItem;
 
 use super::{
     describe_error, hex, mssql, mysql, postgres, quote_backtick, quote_bracket, quote_double,
-    quote_literal, sqlite, text_at, texts, CellValue, Conn, Dialect, RawOutput,
+    quote_literal, sqlite, text_at, texts, CellValue, Conn, RawOutput,
 };
 
 pub const CANCELLED: &str = "Export cancelled.";
@@ -1572,13 +1572,37 @@ async fn dump_mssql(
 ) -> Result<(), String> {
     let db = quote_bracket(namespace);
     mssql::run(client, &format!("USE {db}"), 0, None).await?;
-    let isolated = mssql::run(client, "SET TRANSACTION ISOLATION LEVEL SNAPSHOT", 0, None)
-        .await
-        .is_ok()
+    /*
+     * Setting SNAPSHOT always succeeds, but reading under it fails unless the
+     * database allows it, which is off by default. Without it the export reads
+     * committed data table by table, like the other drivers without snapshots.
+     */
+    let allowed = mssql::run(
+        client,
+        "SELECT snapshot_isolation_state FROM sys.databases WHERE database_id = DB_ID()",
+        1,
+        None,
+    )
+    .await?
+    .rows
+    .first()
+    .and_then(|row| row.first()?.as_i64())
+        == Some(1);
+    let isolated = allowed
+        && mssql::run(client, "SET TRANSACTION ISOLATION LEVEL SNAPSHOT", 0, None)
+            .await
+            .is_ok()
         && mssql::run(client, "BEGIN TRAN", 0, None).await.is_ok();
     let outcome = dump_mssql_body(client, namespace, tables, options, dump).await;
     if isolated {
         let _ = mssql::run(client, "COMMIT", 0, None).await;
+        let _ = mssql::run(
+            client,
+            "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+            0,
+            None,
+        )
+        .await;
     }
     outcome
 }
@@ -1652,7 +1676,7 @@ async fn dump_mssql_body(
         let indexes = if options.structure {
             mssql::run(
                 client,
-                &Dialect::index_definitions_sql(&mssql::MssqlDialect, namespace, &table.name),
+                &mssql_indexes_sql(namespace, schema, name),
                 usize::MAX,
                 None,
             )
@@ -1665,8 +1689,11 @@ async fn dump_mssql_body(
             dump.write(&mssql_create_table(&qualified, &columns, &indexes))?;
         }
         if options.data {
-            let inserted: Vec<&Vec<CellValue>> =
-                columns.iter().filter(|row| !mssql_flag(row, 4)).collect();
+            // The server fills computed and rowversion columns, and rejects explicit values for them.
+            let inserted: Vec<&Vec<CellValue>> = columns
+                .iter()
+                .filter(|row| !mssql_flag(row, 4) && !is_rowversion(row))
+                .collect();
             if !inserted.is_empty() {
                 let names: Vec<String> = inserted.iter().map(|row| mssql_text(row, 0)).collect();
                 let list = column_list(&names, quote_bracket);
@@ -1700,15 +1727,47 @@ async fn dump_mssql_body(
                 } else {
                     format!(" WHERE {filter}")
                 };
+                let included = mssql_text(row, 6);
+                let include_sql = if included.is_empty() {
+                    String::new()
+                } else {
+                    format!(" INCLUDE ({included})")
+                };
                 dump.write(&format!(
-                    "CREATE {unique}INDEX {} ON {qualified} ({}){where_sql};\n",
+                    "CREATE {unique}{} INDEX {} ON {qualified} ({}){include_sql}{where_sql};\n",
+                    mssql_text(row, 5),
                     quote_bracket(&mssql_text(row, 0)),
                     mssql_text(row, 1)
                 ))?;
             }
+            let checks = mssql::run(
+                client,
+                &mssql_checks_sql(namespace, schema, name),
+                usize::MAX,
+                None,
+            )
+            .await?
+            .rows;
+            for row in &checks {
+                let constraint = quote_bracket(&mssql_text(row, 0));
+                let check = if mssql_flag(row, 2) {
+                    "NOCHECK"
+                } else {
+                    "CHECK"
+                };
+                dump.write(&format!(
+                    "ALTER TABLE {qualified} WITH {check} ADD CONSTRAINT {constraint} CHECK {};\n",
+                    mssql_text(row, 1)
+                ))?;
+                if mssql_flag(row, 3) {
+                    dump.write(&format!(
+                        "ALTER TABLE {qualified} NOCHECK CONSTRAINT {constraint};\n"
+                    ))?;
+                }
+            }
             let keys = mssql::run(
                 client,
-                &Dialect::foreign_keys_sql(&mssql::MssqlDialect, namespace, &table.name),
+                &mssql_foreign_keys_sql(namespace, schema, name),
                 usize::MAX,
                 None,
             )
@@ -1744,15 +1803,35 @@ async fn dump_mssql_body(
             let kind = mssql_text(row, 0);
             if kind.trim() == "V" && wanted.contains(object.as_str()) {
                 views.push((
+                    object,
                     mssql_name(&mssql_text(row, 1), &mssql_text(row, 2)),
                     mssql_text(row, 3),
                 ));
             }
         }
-        let views = dependency_order(views, |(_, definition), (other, _)| {
-            definition.contains(other)
+        let uses: HashSet<(String, String)> = mssql::run(
+            client,
+            &format!(
+                "SELECT rs.name + N'.' + ro.name, ds.name + N'.' + dob.name \
+                 FROM {db}.sys.sql_expression_dependencies d \
+                 JOIN {db}.sys.objects ro ON ro.object_id = d.referencing_id \
+                 JOIN {db}.sys.schemas rs ON rs.schema_id = ro.schema_id \
+                 JOIN {db}.sys.objects dob ON dob.object_id = d.referenced_id \
+                 JOIN {db}.sys.schemas ds ON ds.schema_id = dob.schema_id \
+                 WHERE ro.type = 'V' AND dob.type = 'V'"
+            ),
+            usize::MAX,
+            None,
+        )
+        .await?
+        .rows
+        .iter()
+        .map(|row| (mssql_text(row, 0), mssql_text(row, 1)))
+        .collect();
+        let views = dependency_order(views, |(view, _, _), (other, _, _)| {
+            uses.contains(&(view.clone(), other.clone()))
         });
-        for (name, definition) in &views {
+        for (_, name, definition) in &views {
             dump.start(name)?;
             if definition.is_empty() {
                 dump.skip(name, "no permission to read its definition")?;
@@ -1877,8 +1956,9 @@ fn mssql_create_table(
             "UNIQUE"
         };
         parts.push(format!(
-            "CONSTRAINT {} {kind} ({})",
+            "CONSTRAINT {} {kind} {} ({})",
             quote_bracket(&mssql_text(row, 0)),
+            mssql_text(row, 5),
             mssql_text(row, 1)
         ));
     }
@@ -1920,39 +2000,108 @@ fn mssql_column_sql(row: &[CellValue]) -> String {
 
 fn mssql_foreign_keys(table: &str, rows: &[Vec<CellValue>]) -> String {
     let mut sql = String::new();
-    let mut name = String::new();
-    let mut columns = Vec::new();
-    let mut referenced = String::new();
-    let mut ref_columns = Vec::new();
-    let flush = |sql: &mut String,
-                 name: &str,
-                 columns: &[String],
-                 referenced: &str,
-                 ref_columns: &[String]| {
-        if name.is_empty() {
-            return;
-        }
+    for key in rows.chunk_by(|a, b| mssql_text(a, 0) == mssql_text(b, 0)) {
+        let first = &key[0];
+        let name = quote_bracket(&mssql_text(first, 0));
+        let columns: Vec<String> = key
+            .iter()
+            .map(|row| quote_bracket(&mssql_text(row, 1)))
+            .collect();
+        let referenced: Vec<String> = key
+            .iter()
+            .map(|row| quote_bracket(&mssql_text(row, 4)))
+            .collect();
+        let check = if mssql_flag(first, 7) {
+            "NOCHECK"
+        } else {
+            "CHECK"
+        };
         sql.push_str(&format!(
-            "ALTER TABLE {table} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {referenced} ({});\n",
-            quote_bracket(name),
+            "ALTER TABLE {table} WITH {check} ADD CONSTRAINT {name} FOREIGN KEY ({}) REFERENCES {} ({}){}{};\n",
             columns.join(", "),
-            ref_columns.join(", ")
+            mssql_name(&mssql_text(first, 2), &mssql_text(first, 3)),
+            referenced.join(", "),
+            referential_action("DELETE", &mssql_text(first, 5)),
+            referential_action("UPDATE", &mssql_text(first, 6)),
         ));
-    };
-    for row in rows {
-        let next = mssql_text(row, 0);
-        if next != name {
-            flush(&mut sql, &name, &columns, &referenced, &ref_columns);
-            name = next;
-            columns.clear();
-            ref_columns.clear();
-            referenced = mssql_name(&mssql_text(row, 2), &mssql_text(row, 3));
+        if mssql_flag(first, 8) {
+            sql.push_str(&format!("ALTER TABLE {table} NOCHECK CONSTRAINT {name};\n"));
         }
-        columns.push(quote_bracket(&mssql_text(row, 1)));
-        ref_columns.push(quote_bracket(&mssql_text(row, 4)));
     }
-    flush(&mut sql, &name, &columns, &referenced, &ref_columns);
     sql
+}
+
+/// `NO_ACTION` is the default, and the others read like `SET_NULL`.
+fn referential_action(event: &str, action: &str) -> String {
+    if action.is_empty() || action == "NO_ACTION" {
+        String::new()
+    } else {
+        format!(" ON {event} {}", action.replace('_', " "))
+    }
+}
+
+/// `rowversion` is a synonym that the catalog reports as `timestamp`.
+fn is_rowversion(row: &[CellValue]) -> bool {
+    matches!(mssql_text(row, 1).as_str(), "timestamp" | "rowversion")
+}
+
+/// Rowstore indexes with their kind and included columns, which the Structure tab doesn't need.
+fn mssql_indexes_sql(namespace: &str, schema: &str, name: &str) -> String {
+    let db = quote_bracket(namespace);
+    let order = "WITHIN GROUP (ORDER BY ic.key_ordinal, ic.index_column_id)";
+    format!(
+        "SELECT i.name, \
+         STRING_AGG(CASE WHEN ic.is_included_column = 0 THEN CONCAT(QUOTENAME(c.name), \
+           CASE WHEN ic.is_descending_key = 1 THEN N' DESC' ELSE N'' END) END, N', ') {order}, \
+         i.is_unique, i.is_primary_key, ISNULL(i.filter_definition, N''), i.type_desc, \
+         ISNULL(STRING_AGG(CASE WHEN ic.is_included_column = 1 THEN QUOTENAME(c.name) END, N', ') {order}, N''), \
+         i.is_unique_constraint \
+         FROM {db}.sys.indexes i \
+         JOIN {db}.sys.objects o ON o.object_id = i.object_id \
+         JOIN {db}.sys.schemas s ON s.schema_id = o.schema_id \
+         JOIN {db}.sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
+         JOIN {db}.sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id \
+         WHERE s.name = {} AND o.name = {} AND i.type IN (1, 2) AND i.is_hypothetical = 0 \
+         GROUP BY i.index_id, i.name, i.is_unique, i.is_primary_key, i.is_unique_constraint, i.filter_definition, i.type_desc \
+         ORDER BY i.is_primary_key DESC, i.name",
+        mssql::n_literal(schema),
+        mssql::n_literal(name)
+    )
+}
+
+fn mssql_checks_sql(namespace: &str, schema: &str, name: &str) -> String {
+    let db = quote_bracket(namespace);
+    format!(
+        "SELECT cc.name, cc.definition, cc.is_not_trusted, cc.is_disabled \
+         FROM {db}.sys.check_constraints cc \
+         JOIN {db}.sys.objects o ON o.object_id = cc.parent_object_id \
+         JOIN {db}.sys.schemas s ON s.schema_id = o.schema_id \
+         WHERE s.name = {} AND o.name = {} \
+         ORDER BY cc.name",
+        mssql::n_literal(schema),
+        mssql::n_literal(name)
+    )
+}
+
+/// Like the dialect's foreign key query, plus the actions and state a backup has to keep.
+fn mssql_foreign_keys_sql(namespace: &str, schema: &str, name: &str) -> String {
+    let db = quote_bracket(namespace);
+    format!(
+        "SELECT fk.name, pc.name, rs.name, rt.name, rc.name, \
+         fk.delete_referential_action_desc, fk.update_referential_action_desc, fk.is_not_trusted, fk.is_disabled \
+         FROM {db}.sys.foreign_keys fk \
+         JOIN {db}.sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id \
+         JOIN {db}.sys.tables pt ON pt.object_id = fk.parent_object_id \
+         JOIN {db}.sys.schemas ps ON ps.schema_id = pt.schema_id \
+         JOIN {db}.sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id \
+         JOIN {db}.sys.tables rt ON rt.object_id = fk.referenced_object_id \
+         JOIN {db}.sys.schemas rs ON rs.schema_id = rt.schema_id \
+         JOIN {db}.sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id \
+         WHERE ps.name = {} AND pt.name = {} \
+         ORDER BY fk.name, fkc.constraint_column_id",
+        mssql::n_literal(schema),
+        mssql::n_literal(name)
+    )
 }
 
 fn mssql_name(schema: &str, name: &str) -> String {
@@ -2147,6 +2296,44 @@ mod tests {
     use crate::db::sql_split::Splitter;
     use crate::models::Driver;
     use sqlx::Connection;
+
+    #[test]
+    fn keeps_sql_server_key_actions_and_skips_rowversion() {
+        let text = |values: &[&str]| -> Vec<CellValue> {
+            values
+                .iter()
+                .map(|value| CellValue::Text((*value).into()))
+                .collect()
+        };
+        let mut first = text(&[
+            "fk_posts_user",
+            "user_id",
+            "dbo",
+            "users",
+            "id",
+            "CASCADE",
+            "SET_NULL",
+        ]);
+        first.extend([CellValue::Bool(false), CellValue::Bool(true)]);
+        let mut second = text(&[
+            "fk_posts_user",
+            "org_id",
+            "dbo",
+            "users",
+            "org_id",
+            "CASCADE",
+            "SET_NULL",
+        ]);
+        second.extend([CellValue::Bool(false), CellValue::Bool(true)]);
+        assert_eq!(
+            mssql_foreign_keys("[dbo].[posts]", &[first, second]),
+            "ALTER TABLE [dbo].[posts] WITH CHECK ADD CONSTRAINT [fk_posts_user] FOREIGN KEY ([user_id], [org_id]) \
+             REFERENCES [dbo].[users] ([id], [org_id]) ON DELETE CASCADE ON UPDATE SET NULL;\n\
+             ALTER TABLE [dbo].[posts] NOCHECK CONSTRAINT [fk_posts_user];\n"
+        );
+        assert!(is_rowversion(&text(&["rev", "timestamp"])));
+        assert!(!is_rowversion(&text(&["title", "nvarchar(40)"])));
+    }
 
     #[test]
     fn formats_literals_for_each_driver() {

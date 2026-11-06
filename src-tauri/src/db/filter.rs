@@ -471,6 +471,7 @@ impl Fragment {
 pub fn literal(driver: Driver, value: &EditValue) -> String {
     match value {
         EditValue::Null => "NULL".into(),
+        EditValue::Now(kind) if driver == Driver::Mssql => super::mssql::now_sql(*kind).into(),
         EditValue::Now(kind) => kind.sql().into(),
         EditValue::Bool(value) => match driver {
             Driver::Postgres => if *value { "TRUE" } else { "FALSE" }.into(),

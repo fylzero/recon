@@ -84,7 +84,7 @@ Recon is an open-source database client for macOS, Windows, and Linux, built wit
 - **MySQL / MariaDB**: Full support with SSL/TLS
 - **PostgreSQL**: Complete feature set with SSL/TLS
 - **SQLite**: Local database file support with ability to create new databases
-- **SQL Server**: SQL Server 2022 and newer, with a SQL login on port 1433
+- **SQL Server**: SQL Server 2022 and newer, signing in with a SQL Server login. Windows and Microsoft Entra ID authentication aren't supported yet. Connect to a named instance on its port rather than by `host\INSTANCE`.
 
 ## Download & Installation
 

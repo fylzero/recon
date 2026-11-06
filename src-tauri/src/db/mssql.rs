@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use deadpool::managed::{Manager, Metrics, Object, Pool, RecycleResult};
+use deadpool::managed::{Manager, Metrics, Object, Pool, RecycleError, RecycleResult};
 use futures_util::TryStreamExt;
 use tiberius::{AuthMethod, Client, ColumnData, ColumnType, Config, EncryptionLevel, QueryItem};
 use tokio::net::TcpStream;
@@ -34,11 +34,15 @@ impl Manager for MssqlManager {
         connect_config(&self.config).await
     }
 
-    async fn recycle(
-        &self,
-        _client: &mut MssqlClient,
-        _metrics: &Metrics,
-    ) -> RecycleResult<String> {
+    /// A cancelled browse ends its session with `KILL`, so idle connections are checked before reuse.
+    async fn recycle(&self, client: &mut MssqlClient, _metrics: &Metrics) -> RecycleResult<String> {
+        client
+            .simple_query("SELECT 1")
+            .await
+            .map_err(|err| RecycleError::Message(describe(err).into()))?
+            .into_results()
+            .await
+            .map_err(|err| RecycleError::Message(describe(err).into()))?;
         Ok(())
     }
 }
@@ -121,18 +125,25 @@ fn config_for(entry: &ConnectionEntry, password: Option<&str>) -> Config {
     if !entry.database.is_empty() {
         config.database(&entry.database);
     }
+    /*
+     * Like Postgres, only the verify modes check the certificate. Most SQL
+     * Server installs use the self-signed one it generates at startup.
+     * Login still handshakes with encryption off, so that trusts it too.
+     */
     match entry.ssl_mode.as_str() {
-        // Login still handshakes. Trusting the cert keeps a local server reachable with encryption off.
         "disable" => {
             config.encryption(EncryptionLevel::NotSupported);
             config.trust_cert();
         }
+        "verify-ca" | "verify-full" => config.encryption(EncryptionLevel::Required),
         "prefer" => {
             config.encryption(EncryptionLevel::On);
             config.trust_cert();
         }
-        // Require, verify-ca, and verify-full check the certificate against the OS trust store.
-        _ => config.encryption(EncryptionLevel::Required),
+        _ => {
+            config.encryption(EncryptionLevel::Required);
+            config.trust_cert();
+        }
     }
     config
 }
@@ -262,7 +273,8 @@ pub async fn run(
     limit: usize,
     cancel: Option<&AtomicBool>,
 ) -> Result<RawOutput, String> {
-    let count_row = !super::returns_rows(sql);
+    // A view, procedure, function, or trigger has to be alone in its batch.
+    let count_row = !super::returns_rows(sql) && defined_module(sql).is_none();
     let query = if count_row {
         format!("{sql}\nSELECT @@ROWCOUNT")
     } else {
@@ -334,6 +346,47 @@ pub async fn run(
     })
 }
 
+/// What a `CREATE`, `ALTER`, or `CREATE OR ALTER` batch defines, when it's a view or routine.
+pub(crate) fn defined_module(sql: &str) -> Option<&'static str> {
+    let words = leading_words(sql, 4);
+    let kind = match words.first()?.as_str() {
+        "CREATE" if words.get(1).is_some_and(|word| word == "OR") => words.get(3)?,
+        "CREATE" | "ALTER" => words.get(1)?,
+        _ => return None,
+    };
+    match kind.as_str() {
+        "VIEW" => Some("VIEW"),
+        "PROC" | "PROCEDURE" => Some("PROCEDURE"),
+        "FUNCTION" => Some("FUNCTION"),
+        "TRIGGER" => Some("TRIGGER"),
+        _ => None,
+    }
+}
+
+/// The first `count` words of `sql`, uppercased, skipping comments.
+fn leading_words(sql: &str, count: usize) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut rest = sql;
+    while words.len() < count {
+        rest = rest.trim_start();
+        if let Some(after) = rest.strip_prefix("--") {
+            rest = after.split_once('\n').map_or("", |(_, tail)| tail);
+        } else if let Some(after) = rest.strip_prefix("/*") {
+            rest = after.split_once("*/").map_or("", |(_, tail)| tail);
+        } else {
+            let end = rest
+                .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .unwrap_or(rest.len());
+            if end == 0 {
+                break;
+            }
+            words.push(rest[..end].to_ascii_uppercase());
+            rest = &rest[end..];
+        }
+    }
+    words
+}
+
 fn read_row(row: &tiberius::Row) -> RowValues {
     (0..row.len()).map(|index| cell(row, index)).collect()
 }
@@ -367,12 +420,18 @@ pub fn cell(row: &tiberius::Row, index: usize) -> CellValue {
         ColumnData::U8(Some(value)) => CellValue::Int(i64::from(*value)),
         ColumnData::I16(Some(value)) => CellValue::Int(i64::from(*value)),
         ColumnData::I32(Some(value)) => CellValue::Int(i64::from(*value)),
-        ColumnData::I64(Some(value))
+        ColumnData::I64(Some(value)) => CellValue::Int(*value),
+        // The driver decodes money as a float, so it's shown at money's fixed scale of 4.
+        ColumnData::F32(Some(value))
             if matches!(kind, Some(ColumnType::Money | ColumnType::Money4)) =>
         {
-            CellValue::Text(format_scaled(*value, 4))
+            CellValue::Text(format!("{value:.4}"))
         }
-        ColumnData::I64(Some(value)) => CellValue::Int(*value),
+        ColumnData::F64(Some(value))
+            if matches!(kind, Some(ColumnType::Money | ColumnType::Money4)) =>
+        {
+            CellValue::Text(format!("{value:.4}"))
+        }
         ColumnData::F32(Some(value)) => CellValue::from_float(f64::from(*value)),
         ColumnData::F64(Some(value)) => CellValue::from_float(*value),
         ColumnData::Numeric(Some(value)) => CellValue::Text(value.to_string()),
@@ -410,22 +469,33 @@ pub fn cell(row: &tiberius::Row, index: usize) -> CellValue {
             format_date(value.date().days() as i64 - 719_162),
             format_time(value.time().increments(), value.time().scale())
         )),
-        ColumnData::DateTimeOffset(Some(value)) => {
-            let offset = value.offset();
-            let sign = if offset < 0 { '-' } else { '+' };
-            let minutes = offset.unsigned_abs();
-            CellValue::DateTime(format!(
-                "{} {} {sign}{:02}:{:02}",
-                format_date(value.datetime2().date().days() as i64 - 719_162),
-                format_time(
-                    value.datetime2().time().increments(),
-                    value.datetime2().time().scale()
-                ),
-                minutes / 60,
-                minutes % 60
-            ))
-        }
+        ColumnData::DateTimeOffset(Some(value)) => CellValue::DateTime(format_datetimeoffset(
+            value.datetime2().date().days(),
+            value.datetime2().time().increments(),
+            value.datetime2().time().scale(),
+            value.offset(),
+        )),
     }
+}
+
+/// The wire carries the UTC date and time, so the offset is added back for the local time.
+fn format_datetimeoffset(days: u32, increments: u64, scale: u8, offset: i16) -> String {
+    let scale = scale.min(7);
+    let unit = 10i128.pow(u32::from(scale));
+    let per_day = 86_400 * unit;
+    let total =
+        i128::from(days) * per_day + i128::from(increments) + i128::from(offset) * 60 * unit;
+    let local_days = total.div_euclid(per_day) as i64;
+    let local_increments = total.rem_euclid(per_day) as u64;
+    let sign = if offset < 0 { '-' } else { '+' };
+    let minutes = offset.unsigned_abs();
+    format!(
+        "{} {} {sign}{:02}:{:02}",
+        format_date(local_days - 719_162),
+        format_time(local_increments, scale),
+        minutes / 60,
+        minutes % 60
+    )
 }
 
 fn type_name(kind: ColumnType) -> &'static str {
@@ -487,11 +557,6 @@ fn format_clock(seconds: u64, frac: u64, scale: u8) -> String {
 fn format_time(increments: u64, scale: u8) -> String {
     let scale = scale.min(7);
     let divisor = 10u64.pow(u32::from(scale));
-    let (divisor, increments) = if divisor == 0 {
-        (1, increments)
-    } else {
-        (divisor, increments)
-    };
     format_clock(increments / divisor, increments % divisor, scale)
 }
 
@@ -512,18 +577,6 @@ fn format_small_datetime(days: i32, minutes: u16) -> String {
         "{} {}",
         format_date(i64::from(days) - 25_567),
         format_clock(u64::from(minutes) * 60, 0, 0)
-    )
-}
-
-fn format_scaled(value: i64, scale: u32) -> String {
-    let divisor = 10u128.pow(scale);
-    let sign = if value < 0 { "-" } else { "" };
-    let value = u128::from(value.unsigned_abs());
-    format!(
-        "{sign}{}.{:0width$}",
-        value / divisor,
-        value % divisor,
-        width = scale as usize
     )
 }
 
@@ -552,7 +605,17 @@ pub fn edit_literal(value: &super::EditValue) -> String {
         super::EditValue::Int(value) => value.to_string(),
         super::EditValue::Float(value) => value.to_string(),
         super::EditValue::Text(value) => n_literal(value),
-        super::EditValue::Now(kind) => kind.sql().into(),
+        super::EditValue::Now(kind) => now_sql(*kind).into(),
+    }
+}
+
+/// SQL Server 2022 has no `CURRENT_DATE` or `CURRENT_TIME`.
+pub fn now_sql(kind: super::NowKind) -> &'static str {
+    match kind {
+        super::NowKind::Date => "CAST(SYSDATETIME() AS date)",
+        super::NowKind::Time => "CAST(SYSDATETIME() AS time)",
+        // Keeps the server's offset for datetimeoffset, and its local time for the others.
+        super::NowKind::Datetime => "SYSDATETIMEOFFSET()",
     }
 }
 
@@ -1012,6 +1075,59 @@ mod tests {
     }
 
     #[test]
+    fn shows_datetimeoffset_in_its_own_offset() {
+        // 2026-01-01 is day 739_616 since 0001-01-01. 15:00 UTC is 09:00 at -06:00.
+        let days = 739_616;
+        let utc = 15 * 3600 * 1000;
+        assert_eq!(
+            format_datetimeoffset(days, utc, 3, -360),
+            "2026-01-01 09:00:00.000 -06:00"
+        );
+        // 23:30 UTC at +05:30 rolls into the next day.
+        assert_eq!(
+            format_datetimeoffset(days, (23 * 3600 + 1800) * 1000, 3, 330),
+            "2026-01-02 05:00:00.000 +05:30"
+        );
+        assert_eq!(
+            format_datetimeoffset(days, 0, 0, 0),
+            "2026-01-01 00:00:00 +00:00"
+        );
+    }
+
+    #[test]
+    fn finds_views_and_routines_past_comments() {
+        assert_eq!(defined_module("CREATE VIEW v AS SELECT 1"), Some("VIEW"));
+        assert_eq!(
+            defined_module("-- note\n/* more */ create or alter proc p AS SELECT 1"),
+            Some("PROCEDURE")
+        );
+        assert_eq!(
+            defined_module("ALTER FUNCTION f() RETURNS int"),
+            Some("FUNCTION")
+        );
+        assert_eq!(
+            defined_module("CREATE TRIGGER t ON x AFTER INSERT AS"),
+            Some("TRIGGER")
+        );
+        assert_eq!(defined_module("CREATE TABLE t (id int)"), None);
+        assert_eq!(defined_module("ALTER TABLE t ADD c int"), None);
+        assert_eq!(defined_module("UPDATE t SET a = 1"), None);
+    }
+
+    #[test]
+    fn uses_sql_server_functions_for_now() {
+        use super::super::{EditValue, NowKind};
+        assert_eq!(
+            edit_literal(&EditValue::Now(NowKind::Date)),
+            "CAST(SYSDATETIME() AS date)"
+        );
+        assert_eq!(
+            edit_literal(&EditValue::Now(NowKind::Datetime)),
+            "SYSDATETIMEOFFSET()"
+        );
+    }
+
+    #[test]
     fn quotes_unicode_literals_and_splits_tables() {
         assert_eq!(n_literal("o'brien"), "N'o''brien'");
         assert_eq!(split_table("dbo.orders"), ("dbo", "orders"));
@@ -1151,10 +1267,29 @@ mod tests {
         .unwrap();
         exec(
             &mut opened.conn,
-            "INSERT INTO dbo.posts (title, active) VALUES (N'o''brien', 1)",
+            "INSERT INTO dbo.posts (title, active, stamp) VALUES (N'o''brien', 1, '2026-01-01 09:00 -06:00')",
         )
         .await
         .unwrap();
+        exec(
+            &mut opened.conn,
+            "CREATE VIEW dbo.active_posts AS SELECT id, title FROM dbo.posts WHERE active = 1",
+        )
+        .await
+        .unwrap();
+        exec(
+            &mut opened.conn,
+            "-- Keeps its body\nCREATE PROCEDURE dbo.touch AS\nBEGIN\n  UPDATE dbo.posts SET active = 1;\n  SELECT 1;\nEND",
+        )
+        .await
+        .unwrap();
+        let stamp = exec(&mut opened.conn, "SELECT stamp FROM dbo.posts")
+            .await
+            .unwrap();
+        assert_eq!(
+            stamp.rows[0][0],
+            CellValue::DateTime("2026-01-01 09:00:00.0000000 -06:00".into())
+        );
         let rows = exec(&mut opened.conn, "SELECT title, active, rev FROM dbo.posts")
             .await
             .unwrap();
@@ -1186,10 +1321,16 @@ mod tests {
             &mut opened.conn,
             "SQL Server",
             "recon_mssql_live",
-            &[crate::db::dump::DumpTable {
-                name: "dbo.posts".into(),
-                view: false,
-            }],
+            &[
+                crate::db::dump::DumpTable {
+                    name: "dbo.posts".into(),
+                    view: false,
+                },
+                crate::db::dump::DumpTable {
+                    name: "dbo.active_posts".into(),
+                    view: true,
+                },
+            ],
             crate::db::dump::DumpOptions {
                 structure: true,
                 data: true,
@@ -1228,6 +1369,15 @@ mod tests {
             .unwrap();
         assert_eq!(copied.rows[0][0], CellValue::Text("next".into()));
         assert_eq!(copied.rows[0][1], CellValue::Bool(true));
+        let body = exec(
+            &mut opened.conn,
+            "SELECT OBJECT_DEFINITION(OBJECT_ID(N'dbo.touch')), OBJECT_ID(N'dbo.active_posts')",
+        )
+        .await
+        .unwrap();
+        let definition = super::text_at(&super::texts(&body.rows[0]), 0);
+        assert!(!definition.contains("@@ROWCOUNT"), "{definition}");
+        assert!(body.rows[0][1] != CellValue::Null);
         exec(&mut opened.conn, "USE [master]").await.ok();
         exec(&mut opened.conn, "DROP DATABASE recon_mssql_live")
             .await
