@@ -10,9 +10,8 @@ export const CHANGELOG: ChangelogRelease[] = [
     date: "November 9, 2026",
     notes: [
       "Choose No password under Authentication when a connection doesn't need one. Recon doesn't fetch a password or store one.",
-      "Imports load through a phased SQL loader that can use multiple workers.",
-      "New Multithreaded import setting in General, on by default. On, imports run in parallel and reconnect and resume; off, a single connection runs the import inside a transaction that rolls back and you start over, while a Postgres restore stays one transaction either way.",
-      "While a SQL import or restore runs, the dialog shows each loader thread, how much of the file has been read, and then how many statements have finished. Show machine stats asks before it shows processor load and temperature, and remembers when you choose Grant.",
+      "New Multithreaded import setting in General, on by default. On, a MySQL or Postgres import or MySQL restore loads over up to 8 connections when the result can't depend on statement order, as with mysqldump and pg_dump output. Other files still run in order. Either way, a dropped connection reconnects and resumes.",
+      "While a SQL import or restore runs, the dialog shows each stage on one progress ring, with elapsed time and statements per second, and each connection's progress when it loads in parallel. On macOS and Linux it can also show processor load and temperature once you allow it, which you can turn off again in General.",
       "Importing a large statement into MySQL over TLS no longer stalls partway.",
     ],
   },

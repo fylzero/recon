@@ -364,7 +364,7 @@ pub struct AppData {
     /// Table filters reload the rows as they're edited, instead of waiting for Apply.
     #[serde(default = "default_auto_apply_filters")]
     pub auto_apply_filters: bool,
-    /// Import table data on more than one thread.
+    /// Import a file over several connections when its result can't depend on statement order.
     #[serde(default = "default_true")]
     pub multithreaded_import: bool,
     /// When to use system notifications: "background", "always", or "off".
@@ -395,7 +395,7 @@ impl Default for AppData {
             sidebar_width: default_sidebar_width(),
             max_auto_column_width: default_max_auto_column_width(),
             auto_apply_filters: default_auto_apply_filters(),
-            multithreaded_import: default_true(),
+            multithreaded_import: true,
             notifications: default_notifications(),
             machine_stats: false,
             window: None,

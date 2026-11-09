@@ -20,7 +20,7 @@ import {
 } from "../../fonts";
 import type { NotificationMode, PreferencesPatch } from "../../types";
 import { NOTIFICATION_MODES } from "../../notifications";
-import { shortcut, systemNotificationsTarget } from "../../platform";
+import { hasMachineStats, shortcut, systemNotificationsTarget } from "../../platform";
 
 const PAGE_SIZE_OPTIONS = [50, 100, 200, 300, 500];
 const ROW_LIMIT_OPTIONS = [1000, 5000, 10_000, 50_000, 100_000];
@@ -38,6 +38,7 @@ const {
   maxAutoColumnWidth,
   autoApplyFilters,
   multithreadedImport,
+  machineStats,
   notifications,
   savePreferences,
   previewPreferences,
@@ -203,8 +204,9 @@ function selectValue(event: Event) {
           <div class="settings-row-copy">
             <h3>Multithreaded import</h3>
             <p class="muted tiny">
-              Use multiple threads for fast import. Disable if your connection might fail during
-              import. Should be enabled for most cases.
+              Import MySQL and Postgres files over several connections when the result can't depend
+              on statement order, as with mysqldump and pg_dump output. Other files still run one
+              statement at a time, in order. Either way, a dropped connection resumes where it left off.
             </p>
           </div>
           <label class="settings-control checkbox-row">
@@ -214,6 +216,23 @@ function selectValue(event: Event) {
               @change="save({ multithreadedImport: ($event.target as HTMLInputElement).checked })"
             />
             <span>{{ multithreadedImport ? "On" : "Off" }}</span>
+          </label>
+        </div>
+        <div v-if="hasMachineStats" class="settings-row">
+          <div class="settings-row-copy">
+            <h3>Machine stats</h3>
+            <p class="muted tiny">
+              Show this machine's processor load and temperature while a multithreaded import or
+              restore runs.
+            </p>
+          </div>
+          <label class="settings-control checkbox-row">
+            <input
+              type="checkbox"
+              :checked="machineStats"
+              @change="save({ machineStats: ($event.target as HTMLInputElement).checked })"
+            />
+            <span>{{ machineStats ? "On" : "Off" }}</span>
           </label>
         </div>
         <div class="settings-row">

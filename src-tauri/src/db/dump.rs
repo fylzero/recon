@@ -2453,12 +2453,16 @@ mod tests {
             &mut conn,
             Driver::Sqlite,
             std::io::BufReader::new(std::io::Cursor::new(sql.as_bytes())),
-            1,
+            crate::db::sql_load::LoadOptions {
+                workers: 1,
+                split_tables: false,
+            },
             || async { Err::<Conn, String>("SQLite replay stays on one connection".into()) },
             &cancel,
             |_progress| {},
             std::iter::empty::<&str>(),
             &HashSet::new(),
+            None,
         )
         .await
         .unwrap_or_else(|err| panic!("{err}"));
@@ -2620,7 +2624,10 @@ mod tests {
                 conn,
                 Driver::Mysql,
                 std::io::BufReader::new(std::io::Cursor::new(sql)),
-                workers,
+                crate::db::sql_load::LoadOptions {
+                    workers,
+                    split_tables: true,
+                },
                 move || {
                     let pool = pool.clone();
                     async move { pool.detached().await }
@@ -2629,6 +2636,7 @@ mod tests {
                 |_progress| {},
                 ["USE recon_dump_dst", "SET FOREIGN_KEY_CHECKS = 0"],
                 &HashSet::new(),
+                None,
             )
             .await
             .unwrap_or_else(|err| panic!("{err}"));
@@ -2813,7 +2821,10 @@ mod tests {
             conn,
             Driver::Postgres,
             std::io::BufReader::new(std::io::Cursor::new(sql.as_bytes())),
-            workers,
+            crate::db::sql_load::LoadOptions {
+                workers,
+                split_tables: true,
+            },
             move || {
                 let pool = pool.clone();
                 async move { pool.detached().await }
@@ -2822,6 +2833,7 @@ mod tests {
             |_progress| {},
             [search_path],
             &HashSet::new(),
+            None,
         )
         .await
         .unwrap_or_else(|err| panic!("{err}"));

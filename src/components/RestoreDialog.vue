@@ -4,9 +4,8 @@ import { computed, onUnmounted, ref } from "vue";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
 import { useTransferJob } from "../composables/useTransfers";
-import { sendSystemNotification, windowFocused } from "../notifications";
 import { baseName } from "../platform";
-import { formatDuration, resumeAt, resumeChoice } from "../transfer";
+import { formatDuration, importStages, resumeAt, resumeChoice, runPhase, stagesPercent } from "../transfer";
 import type { BackupInfo, Driver, ImportProgress, ImportResume, ImportResumePoint } from "../types";
 import ImportWorkDashboard from "./ImportWorkDashboard.vue";
 import Modal from "./Modal.vue";
@@ -25,7 +24,7 @@ const emit = defineEmits<{
   restored: [];
 }>();
 
-const { showToast, multithreadedImport, notifications } = useApp();
+const { showToast } = useApp();
 const job = useTransferJob(() => props.connectionId, "restore");
 
 const understood = ref(false);
@@ -36,6 +35,10 @@ const resumePoint = ref<ImportResumePoint | null>(null);
 /** Resuming skips clearing, so the status starts at replaying rather than "Clearing…". */
 const resuming = ref(false);
 const progress = ref<ImportProgress | null>(null);
+/** The last progress outside a reconnect, which reports every worker at 0. */
+const dashboard = ref<ImportProgress | null>(null);
+/** The run began by checking whether the file can load in parallel. */
+const checked = ref(false);
 let transferId = "";
 let stopProgress: UnlistenFn | null = null;
 
@@ -59,37 +62,24 @@ const loss = computed(() => {
   }
   return "";
 });
-const partial = computed(() => {
-  const change = "Change it in Settings → General.";
-  if (atomic.value) {
-    return `This restore is a single transaction. If it fails or is cancelled, nothing changes. Multithreaded import applies to other imports and to a MySQL restore. ${change}`;
-  }
-  const left = `If the restore fails or is cancelled partway, “${props.namespace}” will be left partly restored.`;
-  if (props.driver === "mysql") {
-    return multithreadedImport.value
-      ? `${left} Multithreaded import is on, so this restore uses multiple threads. If the connection drops, Recon reconnects and picks up where it left off. ${change}`
-      : `${left} Multithreaded import is off, so if this restore stops, start over rather than resume. ${change}`;
-  }
-  return multithreadedImport.value
-    ? `${left} If the connection drops, Recon reconnects and picks up where it left off. Multithreaded import applies to other imports and to a MySQL restore. ${change}`
-    : `${left} Multithreaded import is off, so if this restore stops, start over rather than resume. ${change}`;
-});
-/** Postgres restore is one transaction, so it never resumes. Other restores resume only while Multithreaded import is on. */
-const canResume = computed(() => !atomic.value && multithreadedImport.value);
+const partial = computed(() =>
+  atomic.value
+    ? "If the restore fails or is cancelled, nothing changes."
+    : `If the restore fails or is cancelled partway, “${props.namespace}” will be left partly restored. If the connection drops, Recon reconnects and picks up where it left off.`,
+);
 /** Clearing can't be stopped halfway outside Postgres, so cancelling waits until the replay starts. */
 const canCancel = computed(() => !running.value || atomic.value || resuming.value || progress.value !== null);
-const percent = computed(() => {
-  const current = progress.value;
-  if (!current) {
-    return 0;
-  }
-  const planning = current.phase === "planning" || !current.totalStatements;
-  const done = planning ? current.fileBytes : current.statements;
-  const total = planning ? current.fileTotalBytes : current.totalStatements;
-  return total ? Math.min(100, Math.round((done / total) * 100)) : 0;
-});
+const percent = computed(() => Math.round(stagesPercent(importStages(dashboard.value, checked.value))));
+const phase = computed(() => runPhase(progress.value));
+const checking = computed(() => progress.value?.phase === "scanning");
 const uncertain = computed(() => Boolean(resumePoint.value && resumePoint.value.to > resumePoint.value.from));
 const uncertainWord = computed(() => (resumePoint.value && resumePoint.value.to - resumePoint.value.from > 1 ? "them" : "it"));
+const statusLabel = computed(() => {
+  if (cancelling.value) {
+    return "Cancelling…";
+  }
+  return phase.value ?? (progress.value || resuming.value ? "Restoring…" : "Clearing…");
+});
 
 function close() {
   if (running.value) {
@@ -108,10 +98,18 @@ async function start(resume: ImportResume | null = null) {
   error.value = "";
   resumePoint.value = null;
   progress.value = null;
+  dashboard.value = null;
+  checked.value = false;
   transferId = job.begin(`Restoring “${props.namespace}” from ${fileName.value}`);
   stopProgress = await listen<ImportProgress>("import-progress", (event) => {
     if (event.payload.transferId === transferId) {
       progress.value = event.payload;
+      if (event.payload.phase === "scanning") {
+        checked.value = true;
+      }
+      if (event.payload.phase !== "reconnecting") {
+        dashboard.value = event.payload;
+      }
       job.progress(percent.value);
     }
   });
@@ -119,11 +117,7 @@ async function start(resume: ImportResume | null = null) {
     const result = await api.restoreDatabase(props.connectionId, transferId, props.namespace, props.path, resume);
     const statements = `${result.statements.toLocaleString()} ${result.statements === 1 ? "statement" : "statements"}`;
     const duration = formatDuration(result.durationMs);
-    const summary = `Restored “${props.namespace}” from ${fileName.value} in ${duration} (${statements})`;
-    showToast(summary);
-    if (windowFocused.value && notifications.value === "background") {
-      void sendSystemNotification(summary, "success", "Restore Complete");
-    }
+    showToast(`Restored “${props.namespace}” from ${fileName.value} in ${duration} (${statements})`);
     emit("restored");
     emit("close");
   } catch (err) {
@@ -137,13 +131,7 @@ async function start(resume: ImportResume | null = null) {
       resumePoint.value = failure.resume;
       job.stopped();
       if (job.hidden.value) {
-        const hint = atomic.value
-          ? " Nothing was changed."
-          : multithreadedImport.value
-            ? failure.resume
-              ? " Open the restore to resume it."
-              : ""
-            : " Start over rather than resume.";
+        const hint = failure.resume ? " Open the restore to resume it." : "";
         showToast(`Restore of “${props.namespace}” stopped: ${error.value}${hint}`, "error");
       }
     }
@@ -206,20 +194,25 @@ onUnmounted(() => stopProgress?.());
       <input v-model="understood" type="checkbox" :disabled="running || Boolean(resumePoint)" />
       I understand everything in “{{ namespace }}” will be deleted
     </label>
-    <div v-if="running" class="transfer-progress">
-      <ImportWorkDashboard :progress="progress" />
-      <p v-if="progress?.phase === 'reconnecting' && progress.error" class="muted tiny transfer-error" aria-live="polite">
+    <div v-if="running" class="transfer-progress" aria-live="polite">
+      <ImportWorkDashboard :progress="dashboard" :checked="checked" />
+      <p class="muted tiny transfer-status">
+        <span class="transfer-status-label">{{ statusLabel }}</span>
+        <span v-if="checking">{{ percent }}%</span>
+        <span v-else-if="progress">{{ progress.statements.toLocaleString() }} statements · {{ percent }}%</span>
+      </p>
+      <p v-if="progress?.phase === 'reconnecting' && progress.error" class="muted tiny transfer-error">
         {{ progress.error }}
       </p>
     </div>
     <p v-if="error" class="settings-error transfer-error">{{ error }}</p>
-    <p v-if="resumePoint && !running && canResume" class="muted tiny">{{ resumeChoice(resumePoint) }}</p>
+    <p v-if="resumePoint && !running" class="muted tiny">{{ resumeChoice(resumePoint) }}</p>
     <template #actions>
       <button v-if="running" class="ghost transfer-hide" type="button" @click="job.hide">Run in background</button>
       <button class="ghost" type="button" :disabled="cancelling || !canCancel" @click="cancel">
         {{ error && !running ? "Close" : "Cancel" }}
       </button>
-      <template v-if="resumePoint && !running && canResume">
+      <template v-if="resumePoint && !running">
         <template v-if="uncertain">
           <button class="ghost" type="button" @click="resume(resumePoint.from)">Run {{ uncertainWord }} again</button>
           <button :class="resumePoint.likelySaved ? 'primary' : 'ghost'" type="button" @click="resume(resumePoint.to)">
@@ -230,7 +223,7 @@ onUnmounted(() => stopProgress?.());
       </template>
       <button v-else-if="!error" class="danger" type="button" :disabled="running || !understood" @click="start()">
         <span v-if="running" class="spinner" aria-hidden="true" />
-        {{ running ? "Restoring…" : "Erase and restore" }}
+        {{ checking ? "Checking…" : running ? "Restoring…" : "Erase and restore" }}
       </button>
     </template>
   </Modal>

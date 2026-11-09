@@ -2789,6 +2789,11 @@ button.link-button:hover:not(:disabled) {
   white-space: nowrap;
 }
 
+.transfer-status-label ~ span {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .transfer-warning {
   display: flex;
   flex-direction: column;
@@ -5542,40 +5547,6 @@ body.dragging-tab * {
   font-variant-numeric: tabular-nums;
 }
 
-.import-widget-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.35rem;
-  padding-bottom: 0.45rem;
-  border-bottom: 1px solid var(--border);
-}
-
-.import-widget-bar-label {
-  color: var(--muted);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin-right: 0.25rem;
-}
-
-button.import-widget-chip {
-  padding: 0.16rem 0.5rem;
-  border-radius: 999px;
-  font-family: var(--font-code);
-  font-size: 11px;
-  background: #12161f;
-  color: var(--muted);
-  border: 1px solid var(--border);
-  transition: all 0.12s ease;
-}
-
-button.import-widget-chip.active {
-  background: color-mix(in srgb, var(--good) 16%, var(--bg-raised));
-  color: var(--text);
-  border-color: color-mix(in srgb, var(--good) 55%, var(--border));
-}
-
 .import-work button.import-work-grant {
   margin-left: auto;
   padding: 0.18rem 0.55rem;
@@ -5588,10 +5559,6 @@ button.import-widget-chip.active {
   grid-template-columns: 14.5rem minmax(0, 1fr);
   gap: 0.9rem;
   align-items: start;
-}
-
-.import-dashboard-grid.no-left-column {
-  grid-template-columns: minmax(0, 1fr);
 }
 
 @media (max-width: 720px) {
@@ -5686,13 +5653,6 @@ button.import-widget-chip.active {
   font-family: var(--font-code);
 }
 
-.import-donut-pct-only {
-  fill: var(--text);
-  font-size: 20px;
-  font-weight: 650;
-  font-family: var(--font-code);
-}
-
 .import-donut-legend {
   width: 100%;
   display: flex;
@@ -5774,14 +5734,6 @@ button.import-widget-chip.active {
 
 .import-donut-phase.active {
   color: var(--text);
-}
-
-.import-donut-sub {
-  margin: 0.15rem 0 0;
-  text-align: center;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .import-metrics-column {

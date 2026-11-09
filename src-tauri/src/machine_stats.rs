@@ -10,12 +10,18 @@ pub struct MachineStats {
     pub temperature_celsius: Option<f32>,
 }
 
+/// Sampling sleeps and calls into the OS, so it runs off the async runtime.
 #[tauri::command]
-pub fn machine_stats() -> MachineStats {
-    MachineStats {
+pub async fn machine_stats() -> MachineStats {
+    tokio::task::spawn_blocking(|| MachineStats {
         cores: per_core_load(),
         temperature_celsius: temperature_celsius(),
-    }
+    })
+    .await
+    .unwrap_or(MachineStats {
+        cores: Vec::new(),
+        temperature_celsius: None,
+    })
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
@@ -869,9 +875,9 @@ mod tests {
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    #[test]
-    fn machine_stats_returns_valid_bounded_core_loads() {
-        let stats = machine_stats();
+    #[tokio::test]
+    async fn machine_stats_returns_valid_bounded_core_loads() {
+        let stats = machine_stats().await;
         assert!(!stats.cores.is_empty());
         assert!(stats.cores.iter().all(|load| (0.0..=100.0).contains(load)));
         if let Some(celsius) = stats.temperature_celsius {

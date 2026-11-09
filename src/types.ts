@@ -492,7 +492,7 @@ export interface ImportWorkerProgress {
   index: number;
   statements: number;
   totalStatements: number;
-  state: "waiting" | "running" | "idle" | "done";
+  state: "waiting" | "running" | "done";
 }
 
 export interface ImportProgress {
@@ -500,26 +500,20 @@ export interface ImportProgress {
   statements: number;
   bytes: number;
   totalBytes: number;
-  /** `planning` while the file is split, `running` during inserts, `finishing` for indexes and constraints, `skipping` past statements that already ran, or `reconnecting` after the connection dropped. */
-  phase: "planning" | "running" | "finishing" | "skipping" | "reconnecting";
+  /**
+   * `scanning` while the file is checked for a parallel load, `planning` while
+   * it is split, `running`, `skipping` past statements that already ran, or
+   * `reconnecting` after the connection dropped.
+   */
+  phase: "scanning" | "planning" | "running" | "skipping" | "reconnecting";
   /** Failed reconnect attempts so far, with the last one's error. */
   attempt: number;
   error: string | null;
   fileBytes: number;
   fileTotalBytes: number;
-  /** 0 until the split has counted statements. */
+  /** 0 until the split has counted statements, and always for a run in file order. */
   totalStatements: number;
-  /** Phase 1 create-schema statements. Omitted until the backend lands the field. */
-  schemaStatements?: number;
-  schemaTotalStatements?: number;
-  indexStatements?: number;
-  indexTotalStatements?: number;
-  fkStatements?: number;
-  fkTotalStatements?: number;
-  viewStatements?: number;
-  viewTotalStatements?: number;
-  triggerStatements?: number;
-  triggerTotalStatements?: number;
+  /** Empty for a run in file order. */
   workers: ImportWorkerProgress[];
 }
 
@@ -529,9 +523,6 @@ export interface MachineStats {
   cores: number[];
   /** Degrees Celsius, or null when unavailable. */
   temperatureCelsius: number | null;
-  /** Optional legacy aliases if present. */
-  load?: number[] | null;
-  temperatureC?: number | null;
 }
 
 export interface ImportBackend {
@@ -549,6 +540,13 @@ export interface ImportResumePoint {
   fingerprint: string;
   backend: ImportBackend | null;
   likelySaved: boolean;
+  /** The run loaded the file over several connections, so a resumed run must too. */
+  parallel: boolean;
+  splitTables: boolean;
+  /** For a parallel run, the statements that finished, as half-open index ranges. */
+  done: [number, number][];
+  /** For a parallel run, the statements between `from` and `to` that may or may not have been saved. */
+  uncertain: number[];
 }
 
 export interface ImportResume {
@@ -556,6 +554,11 @@ export interface ImportResume {
   line: number;
   fingerprint: string;
   backend: ImportBackend | null;
+  parallel: boolean;
+  splitTables: boolean;
+  done: [number, number][];
+  /** The uncertain statements to treat as saved, when skipping past them. */
+  skipped: number[];
 }
 
 export interface ImportFailure {

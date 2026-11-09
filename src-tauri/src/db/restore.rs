@@ -678,12 +678,16 @@ mod tests {
             conn,
             Driver::Sqlite,
             BufReader::new(std::io::Cursor::new(sql.as_bytes())),
-            1,
+            crate::db::sql_load::LoadOptions {
+                workers: 1,
+                split_tables: false,
+            },
             || async { Err::<Conn, String>("SQLite replay stays on one connection".into()) },
             &cancel,
             |_progress| {},
             std::iter::empty::<&str>(),
             &HashSet::new(),
+            None,
         )
         .await
         .unwrap_or_else(|err| panic!("{err}"));

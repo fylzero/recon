@@ -863,4 +863,40 @@ mod tests {
             vec!["CREATE OR ALTER PROCEDURE p AS\n  SELECT 1;\n  SELECT 2;"]
         );
     }
+
+    #[test]
+    fn splits_next_to_multibyte_characters() {
+        let sql = "INSERT INTO t VALUES ('café');INSERT INTO t VALUES ('ü;ß');\n";
+        assert_eq!(
+            split(Driver::Postgres, sql),
+            vec![
+                "INSERT INTO t VALUES ('café')",
+                "INSERT INTO t VALUES ('ü;ß')"
+            ]
+        );
+        let escaped = "INSERT INTO t VALUES ('a\\é;b', 'c');\nSELECT 1;\n";
+        assert_eq!(
+            split(Driver::Mysql, escaped),
+            vec!["INSERT INTO t VALUES ('a\\é;b', 'c')", "SELECT 1"]
+        );
+    }
+
+    #[test]
+    fn honours_a_two_character_delimiter() {
+        let sql = "DELIMITER //\nCREATE PROCEDURE p() BEGIN SELECT 1; SELECT '//'; END //\nDELIMITER ;\nSELECT 2;\n";
+        assert_eq!(
+            split(Driver::Mysql, sql),
+            vec![
+                "CREATE PROCEDURE p() BEGIN SELECT 1; SELECT '//'; END",
+                "SELECT 2"
+            ]
+        );
+    }
+
+    #[test]
+    fn splits_crlf_lines_and_multiline_block_comments() {
+        let sql = "SELECT 1;\r\n/* one;\r\n two; */\r\nSELECT 2;\r\n";
+        assert_eq!(split(Driver::Mysql, sql), vec!["SELECT 1", "SELECT 2"]);
+        assert_eq!(split(Driver::Postgres, sql), vec!["SELECT 1", "SELECT 2"]);
+    }
 }

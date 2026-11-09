@@ -1,7 +1,3 @@
-// The import and restore callers are wired separately. Until they call
-// `load_sql`, rustc treats the runner as unused.
-#![allow(dead_code)]
-
 //! Phased SQL dump loader.
 //!
 //! A dump is split and classified while it is read, written to temporary chunk
@@ -11,15 +7,20 @@
 //! `COPY ... FROM stdin` across the coordinator and any extra connections.
 //! Phase 3 runs indexes, constraints, triggers, views, and trailing session
 //! statements on the coordinator in file order.
+//!
+//! That order differs from the file's, so [`parallel_fit`] reads a file first
+//! to check the result can't change. Files it turns down run in file order on
+//! one connection instead.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::future::Future;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use super::resume::{self, Tx};
 use super::sql_split::{is_copy_from_stdin, Splitter, Statement};
 use super::{describe_error, is_connection_lost, Conn};
 use crate::models::Driver;
@@ -126,6 +127,8 @@ struct LoadTrackInner {
     statements: AtomicU64,
     total_statements: AtomicU64,
     workers: Vec<WorkerAtomics>,
+    /// How many of `workers` got a connection.
+    active: AtomicUsize,
 }
 
 /// Shared worker counts. The load updates them; the emit site reads [`LoadTrack::snapshot`].
@@ -136,23 +139,34 @@ pub(crate) struct LoadTrack {
 
 impl LoadTrack {
     pub(crate) fn planning(workers: usize) -> Self {
-        let workers = (0..workers.max(1)).map(|_| WorkerAtomics::new()).collect();
+        let workers: Vec<_> = (0..workers.max(1)).map(|_| WorkerAtomics::new()).collect();
         Self {
             inner: Arc::new(LoadTrackInner {
                 statements: AtomicU64::new(0),
                 total_statements: AtomicU64::new(0),
+                active: AtomicUsize::new(workers.len()),
                 workers,
             }),
         }
     }
 
+    /// Leaves out the workers whose connection couldn't open.
+    fn limit(&self, connections: usize) {
+        self.inner.active.store(
+            connections.clamp(1, self.inner.workers.len()),
+            Ordering::Relaxed,
+        );
+    }
+
     pub(crate) fn snapshot(&self) -> LoadWork {
         let statements = self.inner.statements.load(Ordering::Relaxed);
         let total_statements = self.inner.total_statements.load(Ordering::Relaxed);
+        let active = self.inner.active.load(Ordering::Relaxed);
         let workers = self
             .inner
             .workers
             .iter()
+            .take(active)
             .enumerate()
             .map(|(index, worker)| LoadWorker {
                 index,
@@ -248,10 +262,6 @@ impl LoadTrack {
             .store(LoadWorkerState::Running.to_u8(), Ordering::Relaxed);
     }
 
-    fn start_worker(&self, index: usize) {
-        self.mark_running(index);
-    }
-
     fn bump(&self, index: usize) {
         self.bump_many(index, 1);
     }
@@ -334,25 +344,17 @@ impl LoadTrack {
                 .store(LoadWorkerState::Done.to_u8(), Ordering::Relaxed);
         }
     }
-
-    fn finish_all(&self) {
-        let total = self.inner.total_statements.load(Ordering::Relaxed);
-        self.inner.statements.store(total, Ordering::Relaxed);
-        for worker in &self.inner.workers {
-            let w_total = worker.total_statements.load(Ordering::Relaxed);
-            worker.statements.store(w_total, Ordering::Relaxed);
-            worker
-                .state
-                .store(LoadWorkerState::Done.to_u8(), Ordering::Relaxed);
-        }
-    }
 }
 
-/// The database connection dropped while one dump statement was executing.
+/// A database connection dropped while dump statements were executing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadLostConnection {
-    /// 0-based index of the in-flight statement, in file order.
-    pub in_flight_index: usize,
+    /**
+     * 0-based file-order indexes of every statement that was running on a
+     * connection when it dropped, across all workers, in ascending order.
+     * Empty when the drop came between statements.
+     */
+    pub in_flight: Vec<usize>,
     /// Driver message from the failed call, unchanged. A lost connection keeps
     /// the `describe_error` text, which starts with the connection-lost prefix.
     pub source: String,
@@ -361,7 +363,7 @@ pub struct LoadLostConnection {
 /// Failure from [`load_sql`].
 ///
 /// Match [`LoadSqlError::LostConnection`] to resume. Its
-/// [`LoadLostConnection::in_flight_index`] is the statement that did not finish.
+/// [`LoadLostConnection::in_flight`] lists the statements that may not have finished.
 /// Every other failure is [`LoadSqlError::Failed`], and the string is the same
 /// message the loader used to return directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -376,10 +378,26 @@ impl std::fmt::Display for LoadSqlError {
             LoadSqlError::Failed(message) => f.write_str(message),
             LoadSqlError::LostConnection(lost) => {
                 f.write_str(&lost.source)?;
-                f.write_str(" (statement ")?;
-                std::fmt::Display::fmt(&lost.in_flight_index, f)?;
-                f.write_str(")")
+                let indexes: Vec<String> = lost.in_flight.iter().map(usize::to_string).collect();
+                match indexes.len() {
+                    0 => Ok(()),
+                    1 => write!(f, " (statement {})", indexes[0]),
+                    _ => write!(f, " (statements {})", indexes.join(", ")),
+                }
             }
+        }
+    }
+}
+
+impl LoadSqlError {
+    /// Joins a later failure into this one. Lost connections from several workers keep every in-flight statement.
+    fn absorb(&mut self, later: LoadSqlError) {
+        if let (LoadSqlError::LostConnection(lost), LoadSqlError::LostConnection(more)) =
+            (self, later)
+        {
+            lost.in_flight.extend(more.in_flight);
+            lost.in_flight.sort_unstable();
+            lost.in_flight.dedup();
         }
     }
 }
@@ -392,25 +410,42 @@ impl From<String> for LoadSqlError {
     }
 }
 
+/// How [`load_sql`] spreads the work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LoadOptions {
+    /// Connections to use, the coordinator included. Values below 1 run as 1.
+    pub(crate) workers: usize,
+    /**
+     * Whether one table's rows may run on more than one connection at once.
+     * Only for dumps whose rows carry their own keys, as [`parallel_fit`]
+     * decides, since rows that take the next auto-increment value, or that
+     * replace or ignore each other, depend on running in file order.
+     */
+    pub(crate) split_tables: bool,
+}
+
 /**
  * Loads a SQL dump onto `coordinator` in three phases.
  *
  * `reader` is any buffered reader. Wrap a plain reader in `std::io::BufReader`
  * first. Gzip is the caller's concern; pass the decoded SQL stream.
  *
- * `workers` is the phase-2 parallelism. Values below 1 run as 1. When it is 1,
- * every phase uses `coordinator` and `open_worker` is not called, so a SQLite
- * `BEGIN` / `COMMIT` still wraps the whole load on that connection. When it is
- * greater than 1, `open_worker` is called once for each extra connection that
- * has at least one data chunk (at most `workers - 1` times). Those connections
- * are closed before this function returns. The coordinator stays open.
+ * `options.workers` is the parallelism, the coordinator included. When it is
+ * 1, every phase uses `coordinator` and `open_worker` is not called. When it
+ * is greater than 1, `open_worker` is called `workers - 1` times before
+ * anything runs, and the load goes ahead on however many of those opened.
+ * Those connections are closed before this function returns. The coordinator
+ * stays open. A table's rows stay on one connection, in file order, unless
+ * `options.split_tables` is set.
  *
  * `preamble` is split with the same statement splitter and run on each extra
- * worker before its chunks. It is not run on the coordinator: the dump's own
+ * worker before anything else. It is not run on the coordinator: the dump's own
  * leading `SET` / `USE` / `PRAGMA` statements are phase 1, and its trailing
- * `SET` statements are phase 3, both on the coordinator. Pass an empty iterator
+ * `SET` statements are phase 3, both on the coordinator. Session statements
+ * phase 1 runs are repeated on every extra worker too. Pass an empty iterator
  * for SQLite. Preamble text is not part of the dump, so it has no file-order
- * index.
+ * index. On MySQL, foreign key checks are off on every connection while the
+ * rows load, then back to the coordinator's setting for phase 3.
  *
  * `skip_completed` lists file-order indexes that already finished. Those
  * statements are not sent again. Indexes are assigned while the file is split,
@@ -425,9 +460,8 @@ impl From<String> for LoadSqlError {
  * as [`LoadSqlError::Failed`] with `Line N: ...` (N is the statement's source
  * line), and the flag is set so other workers stop at their next statement.
  * A dropped connection is [`LoadSqlError::LostConnection`] instead:
- * `in_flight_index` is the statement that was executing, and `source` is the
- * driver message. Statements that already finished stay applied.
- * `LOCK TABLES` / `UNLOCK TABLES` are omitted when `workers > 1`.
+ * `in_flight` lists every statement that was executing on any connection, and
+ * `source` is the driver message. Statements that already finished stay applied.
  *
  * `progress` is called once before execution, with `statements` and `bytes` at
  * 0, `total_bytes` set, and `statement_index` `None`, then again after each
@@ -439,128 +473,16 @@ impl From<String> for LoadSqlError {
  * the load finishes or fails.
  */
 #[allow(clippy::too_many_arguments)]
-pub async fn load_sql<R, Open, Fut, Report, Preamble, PreambleSql>(
+pub(crate) async fn load_sql<R, Open, Fut, Report, Preamble, PreambleSql>(
     coordinator: &mut Conn,
     driver: Driver,
     reader: R,
-    workers: usize,
-    open_worker: Open,
-    cancel: &AtomicBool,
-    progress: Report,
-    preamble: Preamble,
-    skip_completed: &HashSet<usize>,
-) -> Result<(), LoadSqlError>
-where
-    R: BufRead + Send,
-    Open: FnMut() -> Fut + Send,
-    Fut: Future<Output = Result<Conn, String>> + Send,
-    Report: FnMut(LoadProgress) + Send,
-    Preamble: IntoIterator<Item = PreambleSql>,
-    PreambleSql: AsRef<str>,
-{
-    load_sql_inner(
-        coordinator,
-        driver,
-        reader,
-        workers,
-        open_worker,
-        cancel,
-        progress,
-        preamble,
-        skip_completed,
-        false,
-        None,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn load_sql_tracked<R, Open, Fut, Report, Preamble, PreambleSql>(
-    coordinator: &mut Conn,
-    driver: Driver,
-    reader: R,
-    workers: usize,
-    open_worker: Open,
-    cancel: &AtomicBool,
-    progress: Report,
-    preamble: Preamble,
-    skip_completed: &HashSet<usize>,
-    track: LoadTrack,
-) -> Result<(), LoadSqlError>
-where
-    R: BufRead + Send,
-    Open: FnMut() -> Fut + Send,
-    Fut: Future<Output = Result<Conn, String>> + Send,
-    Report: FnMut(LoadProgress) + Send,
-    Preamble: IntoIterator<Item = PreambleSql>,
-    PreambleSql: AsRef<str>,
-{
-    load_sql_inner(
-        coordinator,
-        driver,
-        reader,
-        workers,
-        open_worker,
-        cancel,
-        progress,
-        preamble,
-        skip_completed,
-        false,
-        Some(track),
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn load_sql_tracked_in_tx<R, Open, Fut, Report, Preamble, PreambleSql>(
-    coordinator: &mut Conn,
-    driver: Driver,
-    reader: R,
-    workers: usize,
-    open_worker: Open,
-    cancel: &AtomicBool,
-    progress: Report,
-    preamble: Preamble,
-    skip_completed: &HashSet<usize>,
-    in_transaction: bool,
-    track: LoadTrack,
-) -> Result<(), LoadSqlError>
-where
-    R: BufRead + Send,
-    Open: FnMut() -> Fut + Send,
-    Fut: Future<Output = Result<Conn, String>> + Send,
-    Report: FnMut(LoadProgress) + Send,
-    Preamble: IntoIterator<Item = PreambleSql>,
-    PreambleSql: AsRef<str>,
-{
-    load_sql_inner(
-        coordinator,
-        driver,
-        reader,
-        workers,
-        open_worker,
-        cancel,
-        progress,
-        preamble,
-        skip_completed,
-        in_transaction,
-        Some(track),
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn load_sql_inner<R, Open, Fut, Report, Preamble, PreambleSql>(
-    coordinator: &mut Conn,
-    driver: Driver,
-    reader: R,
-    workers: usize,
+    options: LoadOptions,
     mut open_worker: Open,
     cancel: &AtomicBool,
     progress: Report,
     preamble: Preamble,
     skip_completed: &HashSet<usize>,
-    in_transaction: bool,
     track: Option<LoadTrack>,
 ) -> Result<(), LoadSqlError>
 where
@@ -574,9 +496,18 @@ where
     let workers = if driver == Driver::Sqlite {
         1
     } else {
-        workers.max(1)
+        options.workers.max(1)
     };
-    let mut preamble = expand_preamble(driver, preamble);
+    let preamble = expand_preamble(driver, preamble);
+    let extras = if workers > 1 {
+        let opened = futures_util::future::join_all((1..workers).map(|_| open_worker())).await;
+        opened.into_iter().filter_map(Result::ok).collect()
+    } else {
+        Vec::new()
+    };
+    if let Some(track) = &track {
+        track.limit(1 + extras.len());
+    }
     let mut temps = TempFiles::default();
     let state = Mutex::new(ProgressState {
         statements: 0,
@@ -585,64 +516,750 @@ where
         report: progress,
         track: track.clone(),
     });
-    let mut plan = {
-        let ctx = RunCtx {
-            preamble: &preamble,
-            cancel,
-            error: &Mutex::new(None),
-            progress: &state,
-            skip_completed,
-            in_transaction,
-        };
-        run_phase1(
-            coordinator,
-            reader,
-            driver,
-            workers,
-            &mut open_worker,
-            &ctx,
-            &mut temps,
-        )
-        .await?
-    };
-    preamble.extend(plan.session_preamble);
+    let error = Mutex::new(None);
     let ctx = RunCtx {
         preamble: &preamble,
         cancel,
-        error: &Mutex::new(None),
+        error: &error,
         progress: &state,
         skip_completed,
-        in_transaction: plan.in_tx,
+        in_tx: AtomicBool::new(false),
     };
+    let mut plan = run_phase1(
+        coordinator,
+        reader,
+        driver,
+        workers,
+        options.split_tables,
+        extras,
+        &ctx,
+        &mut temps,
+    )
+    .await?;
     if let Some(track) = &track {
         track.install(&plan.data_statements);
     }
     finish_phase1(&state, plan.total_bytes);
-    let pre_extras = std::mem::take(&mut plan.extras);
+    let extras = std::mem::take(&mut plan.extras);
+    let foreign_keys = if driver == Driver::Mysql && workers > 1 && !plan.data.is_empty() {
+        match pause_foreign_keys(coordinator).await {
+            Ok(setting) => Some(setting),
+            Err(err) => {
+                close_conns(extras).await;
+                return Err(err);
+            }
+        }
+    } else {
+        None
+    };
+    let setup: Vec<String> = match foreign_keys {
+        Some(_) => vec![FOREIGN_KEYS_OFF.to_string()],
+        None => Vec::new(),
+    };
     run_phase2(
         coordinator,
         &plan.data,
-        workers,
-        pre_extras,
-        &mut open_worker,
+        extras,
+        &setup,
+        options.split_tables,
         &ctx,
     )
     .await?;
+    if let Some(setting) = foreign_keys {
+        coordinator
+            .execute(&format!("SET FOREIGN_KEY_CHECKS = {setting}"))
+            .await
+            .map_err(between_statements)?;
+    }
     if !plan.post.is_empty() {
-        exec_post(
-            coordinator,
-            driver,
-            workers,
-            in_transaction,
-            plan.in_tx,
-            &plan.post,
-            &ctx,
-        )
-        .await;
+        exec_post(coordinator, driver, workers, &plan.post, &ctx).await;
         take_error(ctx.error, cancel)?;
     }
     drop(temps);
     Ok(())
+}
+
+const FOREIGN_KEYS_OFF: &str = "SET FOREIGN_KEY_CHECKS = 0";
+
+/**
+ * Turns MySQL foreign key checks off on the coordinator for phase 2, which
+ * loads tables in no particular order, and returns the setting to put back.
+ */
+async fn pause_foreign_keys(conn: &mut Conn) -> Result<&'static str, LoadSqlError> {
+    let rows = conn
+        .run("SELECT @@SESSION.foreign_key_checks", 1, None)
+        .await
+        .map_err(between_statements)?
+        .text_rows();
+    let on = rows
+        .first()
+        .and_then(|row| row.first().cloned().flatten())
+        .is_none_or(|value| value != "0");
+    conn.execute(FOREIGN_KEYS_OFF)
+        .await
+        .map_err(between_statements)?;
+    Ok(if on { "1" } else { "0" })
+}
+
+/// A setup statement failed on an extra worker.
+fn worker_setup_failure(message: String) -> LoadSqlError {
+    if is_connection_lost(&message) {
+        between_statements(message)
+    } else {
+        LoadSqlError::Failed(format!("Worker setup failed: {message}"))
+    }
+}
+
+/// An error from a statement the loader adds itself, which has no index or line in the file.
+fn between_statements(message: String) -> LoadSqlError {
+    if is_connection_lost(&message) {
+        LoadSqlError::LostConnection(LoadLostConnection {
+            in_flight: Vec::new(),
+            source: message,
+        })
+    } else {
+        LoadSqlError::Failed(message)
+    }
+}
+
+/// What [`parallel_fit`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ParallelFit {
+    /// See [`LoadOptions::split_tables`].
+    pub(crate) split_tables: bool,
+}
+
+/// First lines of the dumps whose rows always carry their keys, so a table's rows may load in any order.
+const DUMP_HEADERS: [&str; 5] = [
+    "-- MySQL dump",
+    "-- MariaDB dump",
+    "-- PostgreSQL database dump",
+    "-- Recon SQL export",
+    "-- Recon backup v",
+];
+
+/**
+ * Reads a whole SQL file and decides whether [`load_sql`] can load it with
+ * several workers and get the same result as running it in file order.
+ * `None` means it can't, or that `driver` has no parallel load.
+ */
+pub(crate) fn parallel_fit<R: BufRead>(
+    mut reader: R,
+    driver: Driver,
+    cancel: &AtomicBool,
+) -> Result<Option<ParallelFit>, String> {
+    if !matches!(driver, Driver::Mysql | Driver::Postgres) {
+        return Ok(None);
+    }
+    let head = reader
+        .fill_buf()
+        .map_err(|err| format!("Could not read the SQL file: {err}"))?;
+    let known_dump = is_known_dump(&head[..head.len().min(4096)]);
+    let mut scan = OrderScan::new(driver, known_dump);
+    let mut stream = Stream::new(reader, driver);
+    while let Some(stmt) = stream.next_statement(cancel)? {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Import cancelled.".into());
+        }
+        let copy = driver == Driver::Postgres && is_copy_from_stdin(&stmt.sql);
+        if copy {
+            stream
+                .consume_copy(cancel, |_| Ok(()))
+                .map_err(|err| line_error(stmt.line, err))?;
+        }
+        let fits = scan.visit(&stmt.sql, copy);
+        stream.recycle(stmt.sql);
+        if !fits {
+            return Ok(None);
+        }
+    }
+    Ok(Some(ParallelFit {
+        split_tables: known_dump,
+    }))
+}
+
+fn is_known_dump(head: &[u8]) -> bool {
+    String::from_utf8_lossy(head).lines().any(|line| {
+        let line = line.trim_start_matches('\u{feff}').trim_start();
+        DUMP_HEADERS.iter().any(|header| line.starts_with(header))
+    })
+}
+
+/// The session settings that only change how statement text is read.
+const CHARSET_VARS: [&str; 3] = [
+    "character_set_client",
+    "character_set_results",
+    "collation_connection",
+];
+
+/**
+ * Follows a file in order and checks that the phased load keeps its meaning.
+ *
+ * Phase 1 runs what isn't a row, phase 2 loads each table's rows on one
+ * connection, and phase 3 runs what [`decide_phase_with_table`] deferred.
+ * So once a row or a deferred statement has been seen, every later statement
+ * runs out of place, and this only lets through the kinds that can't tell.
+ */
+struct OrderScan {
+    driver: Driver,
+    known_dump: bool,
+    seen_data: bool,
+    /// A statement has been put off to phase 3.
+    deferred: bool,
+    /// A deferred statement may depend on rows, so no more rows may follow.
+    tail_only: bool,
+    /// Session settings a deferred `SET` changed and hadn't put back yet.
+    dirty: HashSet<String>,
+    /// A deferred `SET` gave a user variable a value rows might read.
+    deferred_user_vars: bool,
+    setval: bool,
+    /// A deferred trigger whose table isn't known.
+    any_trigger: bool,
+    data_tables: HashSet<String>,
+    /// Every name deferred statements mention.
+    deferred_names: HashSet<String>,
+    /// Tables with a trigger, or a trigger toggle, that phase 3 adds after their rows.
+    trigger_tables: HashSet<String>,
+    fk_tables: HashSet<String>,
+}
+
+impl OrderScan {
+    fn new(driver: Driver, known_dump: bool) -> Self {
+        Self {
+            driver,
+            known_dump,
+            seen_data: false,
+            deferred: false,
+            tail_only: false,
+            dirty: HashSet::new(),
+            deferred_user_vars: false,
+            setval: false,
+            any_trigger: false,
+            data_tables: HashSet::new(),
+            deferred_names: HashSet::new(),
+            trigger_tables: HashSet::new(),
+            fk_tables: HashSet::new(),
+        }
+    }
+
+    /// Records the table a `CREATE TRIGGER` is on, and whether `sql` was one.
+    fn note_trigger(&mut self, sql: &str) -> bool {
+        let Some(table) = trigger_table(sql) else {
+            return false;
+        };
+        match table {
+            Some(table) => {
+                self.trigger_tables.insert(table);
+            }
+            None => self.any_trigger = true,
+        }
+        true
+    }
+
+    /// Whether the file still fits after `sql`.
+    fn visit(&mut self, sql: &str, copy: bool) -> bool {
+        let class = resume::classify(self.driver, sql);
+        if matches!(class.tx, Tx::Rollback | Tx::Autocommit(_)) {
+            return false;
+        }
+        let first = Words::new(sql).next().unwrap_or("");
+        let never = ["ROLLBACK", "ABORT", "SAVEPOINT", "RELEASE"];
+        if never.iter().any(|word| first.eq_ignore_ascii_case(word)) || creates_temporary(sql) {
+            return false;
+        }
+        let (decision, table) = decide_phase_with_table(sql, self.seen_data, 2);
+        match decision {
+            Decision::Skip => true,
+            Decision::Data => self.data(sql, table, copy),
+            Decision::Pre => self.pre(sql, first),
+            Decision::Post => self.post(sql, first),
+        }
+    }
+
+    fn data(&mut self, sql: &str, table: Option<String>, copy: bool) -> bool {
+        let Some(table) = table else {
+            return false;
+        };
+        if !copy && !plain_insert(sql) {
+            return false;
+        }
+        let unsafe_now = self.tail_only
+            || !self.dirty.is_empty()
+            || (self.setval && !self.known_dump)
+            || (self.deferred_user_vars && mentions_user_var(sql))
+            || self.any_trigger
+            || self.trigger_tables.contains(&table)
+            || (self.driver == Driver::Postgres && self.fk_tables.contains(&table))
+            || (conflict_sensitive(sql) && self.deferred_names.contains(&table));
+        if unsafe_now {
+            return false;
+        }
+        self.seen_data = true;
+        self.data_tables.insert(table);
+        true
+    }
+
+    fn pre(&mut self, sql: &str, first: &str) -> bool {
+        collect_fk_tables(sql, &mut self.fk_tables);
+        self.note_trigger(sql);
+        if !self.seen_data && !self.deferred {
+            return true;
+        }
+        if self
+            .dirty
+            .iter()
+            .any(|name| !CHARSET_VARS.contains(&name.as_str()))
+        {
+            return false;
+        }
+        if is_tx_begin(sql) || first.eq_ignore_ascii_case("COMMENT") {
+            return true;
+        }
+        if first.eq_ignore_ascii_case("SET") {
+            return set_targets(sql).is_some_and(|targets| {
+                targets.iter().all(|target| match target {
+                    SetTarget::User => true,
+                    SetTarget::Var { name, .. } => CHARSET_VARS.contains(&name.as_str()),
+                    SetTarget::Ignored | SetTarget::Charset => false,
+                })
+            });
+        }
+        let mut words = Words::new(sql);
+        words.next();
+        let kind = words.next().unwrap_or("");
+        let is = |word: &str| kind.eq_ignore_ascii_case(word);
+        if first.eq_ignore_ascii_case("CREATE") {
+            let harmless = [
+                "SEQUENCE",
+                "TYPE",
+                "DOMAIN",
+                "SCHEMA",
+                "EXTENSION",
+                "FUNCTION",
+                "PROCEDURE",
+                "AGGREGATE",
+                "OPERATOR",
+                "CAST",
+                "COLLATION",
+                "CONVERSION",
+                "TEXT",
+            ];
+            if harmless.iter().any(|word| is(word)) {
+                return true;
+            }
+        }
+        if first.eq_ignore_ascii_case("ALTER") {
+            let harmless = [
+                "SEQUENCE",
+                "TYPE",
+                "DOMAIN",
+                "SCHEMA",
+                "EXTENSION",
+                "FUNCTION",
+                "PROCEDURE",
+                "AGGREGATE",
+            ];
+            if harmless.iter().any(|word| is(word)) {
+                return true;
+            }
+        }
+        let Some(table) = moved_table(self.driver, sql) else {
+            return false;
+        };
+        if self.data_tables.contains(&table) {
+            return false;
+        }
+        !self.deferred_names.contains(&table)
+            || (first.eq_ignore_ascii_case("ALTER") && leaves_columns(sql))
+    }
+
+    fn post(&mut self, sql: &str, first: &str) -> bool {
+        self.deferred = true;
+        if first.eq_ignore_ascii_case("COMMIT")
+            || (first.eq_ignore_ascii_case("END") && is_bare_end(sql))
+        {
+            return true;
+        }
+        self.deferred_names.extend(identifiers(sql));
+        if first.eq_ignore_ascii_case("SET") {
+            let Some(targets) = set_targets(sql) else {
+                self.tail_only = true;
+                return true;
+            };
+            for target in targets {
+                match target {
+                    SetTarget::Ignored => {}
+                    SetTarget::User => self.deferred_user_vars = true,
+                    SetTarget::Charset => {
+                        self.dirty
+                            .extend(CHARSET_VARS.iter().map(|name| name.to_string()));
+                    }
+                    SetTarget::Var { name, restores } => {
+                        if restores {
+                            self.dirty.remove(&name);
+                        } else {
+                            self.dirty.insert(name);
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+        if first.eq_ignore_ascii_case("SELECT") && is_setval(sql) {
+            self.setval = true;
+            return true;
+        }
+        if self.note_trigger(sql) {
+            return true;
+        }
+        if first.eq_ignore_ascii_case("ALTER") {
+            let words: Vec<&str> = Words::new(sql).take(64).collect();
+            if toggles_trigger(&words) {
+                match ddl_own_table(sql) {
+                    Some(table) => {
+                        self.trigger_tables.insert(table);
+                    }
+                    None => self.any_trigger = true,
+                }
+                return true;
+            }
+        }
+        if !deferred_without_rows(sql, first) {
+            self.tail_only = true;
+        }
+        true
+    }
+}
+
+/**
+ * A deferred statement whose effect doesn't depend on which rows are loaded
+ * yet: an index, view, comment or key, or dropping a view.
+ */
+fn deferred_without_rows(sql: &str, first: &str) -> bool {
+    if first.eq_ignore_ascii_case("CREATE") {
+        if create_phase(sql, false) != Decision::Post {
+            return create_kind(sql).is_some_and(|kind| kind.eq_ignore_ascii_case("VIEW"));
+        }
+        let materialized =
+            create_kind(sql).is_some_and(|kind| kind.eq_ignore_ascii_case("MATERIALIZED"));
+        return !materialized || with_no_data(sql);
+    }
+    if first.eq_ignore_ascii_case("ALTER") {
+        return alter_phase(sql, false) == Decision::Post;
+    }
+    if first.eq_ignore_ascii_case("COMMENT") {
+        return comment_phase(sql) == Decision::Post;
+    }
+    if first.eq_ignore_ascii_case("DROP") {
+        let mut words = Words::new(sql);
+        words.next();
+        return words.next().is_some_and(|kind| {
+            kind.eq_ignore_ascii_case("VIEW") || kind.eq_ignore_ascii_case("MATERIALIZED")
+        });
+    }
+    false
+}
+
+/// The object keyword of a `CREATE`, past modifiers and MySQL's `ALGORITHM`, `DEFINER` and `SQL SECURITY` clauses.
+fn create_kind(sql: &str) -> Option<&str> {
+    const KINDS: [&str; 13] = [
+        "TABLE",
+        "VIEW",
+        "MATERIALIZED",
+        "INDEX",
+        "TRIGGER",
+        "FUNCTION",
+        "PROCEDURE",
+        "EVENT",
+        "SEQUENCE",
+        "TYPE",
+        "SCHEMA",
+        "DATABASE",
+        "DOMAIN",
+    ];
+    let mut words = Words::new(sql);
+    if !words.next()?.eq_ignore_ascii_case("CREATE") {
+        return None;
+    }
+    words
+        .take(16)
+        .find(|word| KINDS.iter().any(|kind| word.eq_ignore_ascii_case(kind)))
+}
+
+fn with_no_data(sql: &str) -> bool {
+    let words: Vec<&str> = Words::new(sql).collect();
+    words.windows(3).any(|w| {
+        w[0].eq_ignore_ascii_case("WITH")
+            && w[1].eq_ignore_ascii_case("NO")
+            && w[2].eq_ignore_ascii_case("DATA")
+    })
+}
+
+/// `Some` for a `CREATE TRIGGER`, with the table it's on when that can be read.
+fn trigger_table(sql: &str) -> Option<Option<String>> {
+    if !create_kind(sql)?.eq_ignore_ascii_case("TRIGGER") {
+        return None;
+    }
+    let mut words = Words::new(sql);
+    while let Some(word) = words.next() {
+        if word.eq_ignore_ascii_case("ON") {
+            return Some(read_qualified_table_ident(&sql[words.index..]).map(|(table, _)| table));
+        }
+    }
+    Some(None)
+}
+
+/// The one table a `DROP TABLE`, `TRUNCATE`, `CREATE TABLE` or `ALTER TABLE` changes, when it can move to phase 1.
+fn moved_table(driver: Driver, sql: &str) -> Option<String> {
+    let words: Vec<&str> = Words::new(sql).collect();
+    let has = |word: &str| words.iter().any(|w| w.eq_ignore_ascii_case(word));
+    let first = *words.first()?;
+    if first.eq_ignore_ascii_case("DROP") || first.eq_ignore_ascii_case("TRUNCATE") {
+        // Reaches other tables too. In a CREATE or ALTER, CASCADE is only a foreign key action.
+        if has("CASCADE") {
+            return None;
+        }
+        return pre_target_table(driver, sql);
+    }
+    if first.eq_ignore_ascii_case("CREATE") {
+        let copies = ["SELECT", "LIKE", "INHERITS", "PARTITION", "CLONE"];
+        if copies.iter().any(|word| has(word)) {
+            return None;
+        }
+        return ddl_own_table(sql);
+    }
+    if first.eq_ignore_ascii_case("ALTER") {
+        if has("RENAME") {
+            return None;
+        }
+        return ddl_own_table(sql);
+    }
+    None
+}
+
+/// An `ALTER TABLE` that only sets a column default or the owner, so views over the table come out the same.
+fn leaves_columns(sql: &str) -> bool {
+    if has_top_level_comma(sql) {
+        return false;
+    }
+    let words: Vec<&str> = Words::new(sql).take(64).collect();
+    let sets_default = pair(&words, "ALTER", "COLUMN") && pair(&words, "SET", "DEFAULT");
+    sets_default || pair(&words, "OWNER", "TO")
+}
+
+fn creates_temporary(sql: &str) -> bool {
+    let mut words = Words::new(sql);
+    words
+        .next()
+        .is_some_and(|w| w.eq_ignore_ascii_case("CREATE"))
+        && words
+            .take(3)
+            .any(|w| w.eq_ignore_ascii_case("TEMPORARY") || w.eq_ignore_ascii_case("TEMP"))
+}
+
+/// An `INSERT` or `REPLACE` of literal rows, which reads nothing else from the database.
+fn plain_insert(sql: &str) -> bool {
+    let mut rows = false;
+    for word in Words::new(sql) {
+        if word.eq_ignore_ascii_case("SELECT") || word.eq_ignore_ascii_case("TABLE") {
+            return false;
+        }
+        rows |= ["VALUES", "VALUE", "SET", "DEFAULT"]
+            .iter()
+            .any(|kind| word.eq_ignore_ascii_case(kind));
+    }
+    rows
+}
+
+/// Rows whose outcome depends on keys that phase 3 may only add later.
+fn conflict_sensitive(sql: &str) -> bool {
+    let mut words = Words::new(sql);
+    if words
+        .next()
+        .is_some_and(|w| w.eq_ignore_ascii_case("REPLACE"))
+    {
+        return true;
+    }
+    words.any(|w| {
+        w.eq_ignore_ascii_case("IGNORE")
+            || w.eq_ignore_ascii_case("DUPLICATE")
+            || w.eq_ignore_ascii_case("CONFLICT")
+    })
+}
+
+/// Whether `sql` reads a `@variable` outside quotes.
+fn mentions_user_var(sql: &str) -> bool {
+    let bytes = sql.as_bytes();
+    let mut words = Words::new(sql);
+    while words.index < bytes.len() {
+        let current = bytes[words.index];
+        if matches!(current, b'\'' | b'"' | b'`') {
+            words.skip_quote(current);
+            continue;
+        }
+        if current == b'@' {
+            return true;
+        }
+        words.index += 1;
+    }
+    false
+}
+
+/// Every identifier in `sql`, unquoted and lowercased the way [`data_target_table`] names tables. Keywords come too.
+fn identifiers(sql: &str) -> Vec<String> {
+    let bytes = sql.as_bytes();
+    let mut names = Vec::new();
+    let mut words = Words::new(sql);
+    while words.index < bytes.len() {
+        let current = bytes[words.index];
+        let next = bytes.get(words.index + 1).copied();
+        if current == b'\'' {
+            words.skip_quote(current);
+            continue;
+        }
+        if current == b'/' && next == Some(b'*') {
+            words.skip_comment();
+            continue;
+        }
+        if current == b'-' && next == Some(b'-') {
+            match memchr::memchr(b'\n', &bytes[words.index..]) {
+                Some(pos) => words.index += pos + 1,
+                None => words.index = bytes.len(),
+            }
+            continue;
+        }
+        if current == b'$' && words.skip_dollar() {
+            continue;
+        }
+        let start = words.index;
+        if matches!(current, b'`' | b'"' | b'[') || is_word_byte(current) {
+            if let Some(name) = read_ident_segment(bytes, &mut words.index) {
+                names.push(name);
+            }
+        }
+        if words.index == start {
+            words.index += 1;
+        }
+    }
+    names
+}
+
+/// One assignment in a `SET`.
+#[derive(Debug, PartialEq, Eq)]
+enum SetTarget {
+    /// A `@variable`.
+    User,
+    /// A global, persisted or next-transaction setting, which the load's sessions don't read.
+    Ignored,
+    /// `NAMES` or `CHARACTER SET`, which change all of [`CHARSET_VARS`].
+    Charset,
+    /// A session variable. `restores` when the value comes from a `@variable`, as dumps save and put back settings.
+    Var { name: String, restores: bool },
+}
+
+/// The assignments of a `SET` statement, or `None` when they can't be read.
+fn set_targets(sql: &str) -> Option<Vec<SetTarget>> {
+    let mut words = Words::new(sql);
+    if !words.next()?.eq_ignore_ascii_case("SET") {
+        return None;
+    }
+    let body = sql[words.index..].trim();
+    let body = body.strip_suffix("*/").unwrap_or(body);
+    let parts = split_top_level(body);
+    // Later parts without `=` continue a list value, as in Postgres's `SET search_path = a, b`.
+    let assignments = parts
+        .iter()
+        .enumerate()
+        .filter(|(at, part)| *at == 0 || part.contains('='));
+    assignments.map(|(_, part)| set_target(part)).collect()
+}
+
+fn set_target(item: &str) -> Option<SetTarget> {
+    let item = item.trim();
+    if let Some(rest) = item.strip_prefix("@@") {
+        let lower = rest.to_ascii_lowercase();
+        if ["global.", "persist.", "persist_only."]
+            .iter()
+            .any(|scope| lower.starts_with(scope))
+        {
+            return Some(SetTarget::Ignored);
+        }
+        let rest = ["session.", "local."]
+            .iter()
+            .find_map(|scope| lower.starts_with(scope).then(|| &rest[scope.len()..]))
+            .unwrap_or(rest);
+        return session_var(rest);
+    }
+    if item.starts_with('@') {
+        return Some(SetTarget::User);
+    }
+    let mut words = Words::new(item);
+    let first = words.next()?;
+    let is = |word: &str| first.eq_ignore_ascii_case(word);
+    if is("GLOBAL") || is("PERSIST") || is("PERSIST_ONLY") || is("TRANSACTION") {
+        return Some(SetTarget::Ignored);
+    }
+    if is("NAMES")
+        || is("CHARSET")
+        || (is("CHARACTER") && words.next()?.eq_ignore_ascii_case("SET"))
+    {
+        return Some(SetTarget::Charset);
+    }
+    if is("SESSION") || is("LOCAL") {
+        return session_var(item[words.index..].trim_start());
+    }
+    session_var(item)
+}
+
+fn session_var(item: &str) -> Option<SetTarget> {
+    let end = item
+        .find(|c: char| c == '=' || c == ':' || c.is_ascii_whitespace())
+        .unwrap_or(item.len());
+    let name = item[..end].trim_matches('`').to_ascii_lowercase();
+    if name.is_empty() {
+        return None;
+    }
+    let rest = item[end..].trim_start();
+    let value = rest
+        .strip_prefix(":=")
+        .or_else(|| rest.strip_prefix('='))
+        .or_else(|| {
+            rest.get(..2)
+                .filter(|to| to.eq_ignore_ascii_case("TO"))
+                .map(|_| &rest[2..])
+        })
+        .unwrap_or(rest)
+        .trim_start();
+    let restores = value.starts_with('@') && !value.starts_with("@@");
+    Some(SetTarget::Var { name, restores })
+}
+
+/// Splits `body` at commas outside quotes and parentheses.
+fn split_top_level(body: &str) -> Vec<&str> {
+    let bytes = body.as_bytes();
+    let mut parts = Vec::new();
+    let mut words = Words::new(body);
+    let mut depth = 0usize;
+    let mut start = 0;
+    while words.index < bytes.len() {
+        let current = bytes[words.index];
+        match current {
+            b'\'' | b'"' | b'`' => {
+                words.skip_quote(current);
+                continue;
+            }
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                parts.push(&body[start..words.index]);
+                start = words.index + 1;
+            }
+            _ => {}
+        }
+        words.index += 1;
+    }
+    parts.push(&body[start..]);
+    parts
 }
 
 struct PlannedStmt {
@@ -652,13 +1269,11 @@ struct PlannedStmt {
 }
 
 struct Phase1Plan {
-    pre_statements: u64,
     data: Vec<DataChunk>,
     data_statements: Vec<u64>,
     post: Vec<PlannedStmt>,
-    session_preamble: Vec<String>,
-    in_tx: bool,
     total_bytes: u64,
+    /// Extra connections, already set up, for phase 2.
     extras: Vec<Conn>,
 }
 
@@ -675,7 +1290,12 @@ fn is_lock_or_unlock_tables(sql: &str) -> bool {
         .is_some_and(|second| second.eq_ignore_ascii_case("TABLES"))
 }
 
-fn is_mysql_tx_forbidden_set(sql: &str) -> bool {
+/**
+ * A MySQL `SET` of the server's GTID state. It runs once on the coordinator
+ * like any other statement, but isn't repeated on the extra workers, where
+ * setting `GTID_PURGED` a second time fails.
+ */
+fn is_mysql_gtid_set(sql: &str) -> bool {
     let mut words = Words::new(sql);
     if !words.next().is_some_and(|w| w.eq_ignore_ascii_case("SET")) {
         return false;
@@ -687,14 +1307,17 @@ fn is_mysql_tx_forbidden_set(sql: &str) -> bool {
             continue;
         }
         let name = word.rsplit('.').next().unwrap_or(word);
-        if name.eq_ignore_ascii_case("SQL_LOG_BIN")
-            || name.eq_ignore_ascii_case("GTID_NEXT")
-            || name.eq_ignore_ascii_case("GTID_PURGED")
-        {
+        if name.eq_ignore_ascii_case("GTID_NEXT") || name.eq_ignore_ascii_case("GTID_PURGED") {
             return true;
         }
     }
     false
+}
+
+/// A session statement phase 1 repeats on every extra worker, so they all run with the same settings.
+fn replays_on_workers(driver: Driver, sql: &str) -> bool {
+    let class = resume::classify(driver, sql);
+    class.session && class.tx == Tx::None && !(driver == Driver::Mysql && is_mysql_gtid_set(sql))
 }
 
 fn is_tx_begin(sql: &str) -> bool {
@@ -764,12 +1387,18 @@ fn fail_phase1(
 ) {
     let failure = failure.into();
     let mut slot = lock(error);
-    let replace = match &*slot {
-        None => true,
-        Some((existing_idx, _)) => index < *existing_idx,
-    };
-    if replace {
-        *slot = Some((index, failure));
+    match &mut *slot {
+        None => *slot = Some((index, failure)),
+        Some((existing_idx, existing)) => {
+            let both_lost = matches!(existing, LoadSqlError::LostConnection(_))
+                && matches!(failure, LoadSqlError::LostConnection(_));
+            if both_lost {
+                existing.absorb(failure);
+                *existing_idx = (*existing_idx).min(index);
+            } else if index < *existing_idx {
+                *slot = Some((index, failure));
+            }
+        }
     }
     cancel.store(true, Ordering::Relaxed);
     notify.notify_waiters();
@@ -852,7 +1481,6 @@ async fn execute_sql_retry(conn: &mut Conn, sql: &str, cancel: &AtomicBool) -> R
 async fn execute_batch_retry(
     conn: &mut Conn,
     batch_sql: &str,
-    wrap_tx: bool,
     cancel: &AtomicBool,
 ) -> Result<u64, String> {
     let mut attempt = 0usize;
@@ -865,9 +1493,7 @@ async fn execute_batch_retry(
                     && !is_connection_lost(&err)
                     && is_retryable_deadlock(&err)
                 {
-                    if wrap_tx {
-                        let _ = conn.execute("ROLLBACK").await;
-                    }
+                    let _ = conn.execute("ROLLBACK").await;
                     let delay = DEADLOCK_RETRY_DELAYS_MS[attempt];
                     attempt += 1;
                     tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
@@ -877,6 +1503,48 @@ async fn execute_batch_retry(
             }
         }
     }
+}
+
+/**
+ * Runs `stmts` in one transaction. When that fails for any reason but a
+ * dropped connection, rolls it back and runs them one at a time, so a failure
+ * names its own statement. With `wrap` off, as inside the file's own
+ * transaction, runs them one at a time from the start. `done` gets each run
+ * of statements that finished, in file order.
+ */
+async fn run_batch(
+    conn: &mut Conn,
+    stmts: &[SqlStmt],
+    wrap: bool,
+    batch_sql: &mut String,
+    cancel: &AtomicBool,
+    mut done: impl FnMut(&[SqlStmt]),
+) -> Result<(), LoadSqlError> {
+    if wrap && stmts.len() > 1 {
+        build_batch_sql(batch_sql, stmts);
+        match execute_batch_retry(conn, batch_sql, cancel).await {
+            Ok(_) => {
+                done(stmts);
+                return Ok(());
+            }
+            Err(err) if is_connection_lost(&err) => {
+                return Err(LoadSqlError::LostConnection(LoadLostConnection {
+                    in_flight: stmts.iter().map(|stmt| stmt.index).collect(),
+                    source: err,
+                }));
+            }
+            Err(_) => {
+                conn.execute("ROLLBACK").await.map_err(between_statements)?;
+            }
+        }
+    }
+    for (at, stmt) in stmts.iter().enumerate() {
+        execute_sql_retry(conn, &stmt.sql, cancel)
+            .await
+            .map_err(|err| statement_failure(stmt.index, stmt.line, err))?;
+        done(&stmts[at..=at]);
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -900,13 +1568,7 @@ async fn exec_phase1_extra_worker(
         }
         if let Err(err) = execute_sql_retry(conn, sql, cancel).await {
             in_flight.store(0, Ordering::Relaxed);
-            fail_phase1(
-                error,
-                cancel,
-                notify,
-                usize::MAX,
-                format!("Worker setup failed: {err}"),
-            );
+            fail_phase1(error, cancel, notify, usize::MAX, worker_setup_failure(err));
             return false;
         }
     }
@@ -953,13 +1615,7 @@ async fn exec_phase1_extra_worker(
                 let res = if stop_phase1(error, cancel, notify, usize::MAX, None) {
                     Err(())
                 } else if let Err(err) = execute_sql_retry(conn, &sql, cancel).await {
-                    fail_phase1(
-                        error,
-                        cancel,
-                        notify,
-                        usize::MAX,
-                        format!("Worker setup failed: {err}"),
-                    );
+                    fail_phase1(error, cancel, notify, usize::MAX, worker_setup_failure(err));
                     Err(())
                 } else {
                     Ok(())
@@ -978,41 +1634,64 @@ async fn exec_phase1_extra_worker(
     true
 }
 
-async fn run_phase1<R, Open, Fut, Report>(
+#[allow(clippy::too_many_arguments)]
+async fn run_phase1<R, Report>(
     coordinator: &mut Conn,
     reader: R,
     driver: Driver,
     workers: usize,
-    open_worker: &mut Open,
+    split_tables: bool,
+    extras: Vec<Conn>,
     ctx: &RunCtx<'_, Report>,
     temps: &mut TempFiles,
 ) -> Result<Phase1Plan, LoadSqlError>
 where
     R: BufRead,
-    Open: FnMut() -> Fut + Send,
-    Fut: Future<Output = Result<Conn, String>> + Send,
     Report: FnMut(LoadProgress) + Send,
 {
-    if workers <= 1 || driver == Driver::Sqlite || ctx.in_transaction {
-        return run_phase1_sequential(coordinator, reader, driver, workers, ctx, temps).await;
+    if workers <= 1 {
+        close_conns(extras).await;
+        return run_phase1_sequential(coordinator, reader, driver, ctx, temps).await;
     }
     run_phase1_parallel(
         coordinator,
         reader,
         driver,
         workers,
-        open_worker,
+        split_tables,
+        extras,
         ctx,
         temps,
     )
     .await
 }
 
+/// Counts what phase 1 read since it last yielded, so splitting a large file doesn't starve the workers.
+#[derive(Default)]
+struct Pause {
+    statements: usize,
+    bytes: u64,
+}
+
+impl Pause {
+    async fn after(&mut self, bytes: u64, max_bytes: u64, max_statements: usize) {
+        self.statements += 1;
+        self.bytes += bytes;
+        if self.bytes >= max_bytes || self.statements >= max_statements {
+            self.reset();
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 async fn run_phase1_sequential<R, Report>(
     coordinator: &mut Conn,
     reader: R,
     driver: Driver,
-    workers: usize,
     ctx: &RunCtx<'_, Report>,
     temps: &mut TempFiles,
 ) -> Result<Phase1Plan, LoadSqlError>
@@ -1021,19 +1700,13 @@ where
     Report: FnMut(LoadProgress) + Send,
 {
     let mut stream = Stream::new(reader, driver);
-    let mut bins: Vec<Bin> = Vec::new();
-    let mut table_bins: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut last_bin: Option<usize> = None;
+    let mut spool = Spool::new(1, false);
     let mut post: Vec<PlannedStmt> = Vec::new();
-    let mut session_preamble: Vec<String> = Vec::new();
-    let mut in_tx = ctx.in_transaction;
     let mut seen_data = false;
     let mut total_bytes = 0u64;
-    let mut pre_statements = 0u64;
     // File order, including LOCK TABLES statements workers > 1 will not run.
     let mut next_index = 0usize;
-    let mut since_yield_stmts = 0usize;
-    let mut since_yield_bytes = 0u64;
+    let mut pause = Pause::default();
     let track = lock(ctx.progress).track.clone();
 
     while let Some(stmt) = stream.next_statement(ctx.cancel)? {
@@ -1043,83 +1716,34 @@ where
             return Err(line_error(stmt.line, "Import cancelled.").into());
         }
         if driver == Driver::Postgres && is_copy_from_stdin(&stmt.sql) {
-            let idx = select_table_bin(
-                &mut bins,
-                &mut table_bins,
-                &stmt.sql,
-                workers,
-                TABLE_CHUNK_BYTES,
-            );
-            suspend_previous_bin(&mut bins, &mut last_bin, idx)?;
             if let Some(track) = &track {
                 track.plan_data();
             }
-            ensure_file(&mut bins[idx], temps)?;
-            let file = bins[idx].file.as_mut().expect("data chunk");
-            file.reserve(stmt.sql.len() + 32, temps)?;
-            write_copy_start(file, index, stmt.line, &stmt.sql)?;
-            let (payload_bytes, copy_lines, _) = stream
-                .consume_copy(ctx.cancel, |chunk| {
-                    file.reserve(chunk.len() + 16, temps)?;
-                    write_copy_data(file, chunk)
-                })
-                .map_err(|err| LoadSqlError::from(line_error(stmt.line, err)))?;
-            let text_bytes = stmt.sql.len() as u64 + payload_bytes;
-            let lines = stmt.line_span() + copy_lines;
-            write_copy_end(file, text_bytes)?;
-            bins[idx].lines += lines;
-            bins[idx].bytes += text_bytes;
-            bins[idx].statements += 1;
+            let text_bytes = spool.push_copy(index, &stmt, &mut stream, ctx.cancel, temps)?;
             total_bytes += text_bytes;
             seen_data = true;
             stream.recycle(stmt.sql);
-            since_yield_stmts += 1;
-            since_yield_bytes += text_bytes;
-            if since_yield_bytes >= PHASE1_YIELD_BYTES || since_yield_stmts >= PHASE1_YIELD_STMTS {
-                since_yield_stmts = 0;
-                since_yield_bytes = 0;
-                tokio::task::yield_now().await;
-            }
+            pause
+                .after(text_bytes, PHASE1_YIELD_BYTES, PHASE1_YIELD_STMTS)
+                .await;
             continue;
         }
-        let (decision, target_table) = decide_phase_with_table(&stmt.sql, seen_data, workers);
+        let (decision, target_table) = decide_phase_with_table(&stmt.sql, seen_data, 1);
         match decision {
             Decision::Skip => {
                 stream.recycle(stmt.sql);
             }
             Decision::Data => {
-                let text_bytes = stmt.sql.len() as u64;
-                let lines = stmt.line_span();
-                let idx = select_table_bin_with_table(
-                    &mut bins,
-                    &mut table_bins,
-                    target_table,
-                    workers,
-                    TABLE_CHUNK_BYTES,
-                );
-                suspend_previous_bin(&mut bins, &mut last_bin, idx)?;
                 if let Some(track) = &track {
                     track.plan_data();
                 }
-                ensure_file(&mut bins[idx], temps)?;
-                let file = bins[idx].file.as_mut().expect("data chunk");
-                file.reserve(stmt.sql.len() + 32, temps)?;
-                write_sql_record(file, index, stmt.line, &stmt.sql)?;
-                bins[idx].lines += lines;
-                bins[idx].bytes += text_bytes;
-                bins[idx].statements += 1;
+                let text_bytes = spool.push_sql(index, &stmt, target_table, temps)?;
                 total_bytes += text_bytes;
                 seen_data = true;
                 stream.recycle(stmt.sql);
-                since_yield_stmts += 1;
-                since_yield_bytes += text_bytes;
-                if since_yield_bytes >= PHASE1_YIELD_BYTES
-                    || since_yield_stmts >= PHASE1_YIELD_STMTS
-                {
-                    since_yield_stmts = 0;
-                    since_yield_bytes = 0;
-                    tokio::task::yield_now().await;
-                }
+                pause
+                    .after(text_bytes, PHASE1_YIELD_BYTES, PHASE1_YIELD_STMTS)
+                    .await;
             }
             Decision::Pre => {
                 let text_bytes = stmt.sql.len() as u64;
@@ -1128,36 +1752,23 @@ where
                 }
                 let tx_begin = is_tx_begin(&stmt.sql);
                 let skip_exec = ctx.skip_completed.contains(&index)
-                    || (driver == Driver::Mysql
-                        && (is_lock_or_unlock_tables(&stmt.sql)
-                            || is_mysql_tx_forbidden_set(&stmt.sql)))
-                    || (tx_begin && (workers > 1 || in_tx));
+                    || (driver == Driver::Mysql && is_lock_or_unlock_tables(&stmt.sql))
+                    || (tx_begin && ctx.in_tx.load(Ordering::Relaxed));
                 if !skip_exec {
                     if let Err(err) = execute_sql_retry(coordinator, &stmt.sql, ctx.cancel).await {
                         return Err(statement_failure(index, stmt.line, err));
                     }
                     if tx_begin {
-                        in_tx = true;
+                        ctx.in_tx.store(true, Ordering::Relaxed);
                     }
                 }
-                if workers > 1 && driver != Driver::Sqlite {
-                    let class = super::resume::classify(driver, &stmt.sql);
-                    if class.session
-                        && class.tx == super::resume::Tx::None
-                        && !is_mysql_tx_forbidden_set(&stmt.sql)
-                    {
-                        session_preamble.push(stmt.sql.clone());
-                    }
-                }
-                pre_statements += 1;
                 total_bytes += text_bytes;
                 if let Some(track) = &track {
                     track.bump_pre(0);
                 }
                 note_pre_progress(ctx.progress, text_bytes, index);
                 stream.recycle(stmt.sql);
-                since_yield_stmts = 0;
-                since_yield_bytes = 0;
+                pause.reset();
             }
             Decision::Post => {
                 let text_bytes = stmt.sql.len() as u64;
@@ -1167,74 +1778,85 @@ where
                     sql: stmt.sql,
                 });
                 total_bytes += text_bytes;
-                since_yield_stmts += 1;
-                since_yield_bytes += text_bytes;
-                if since_yield_bytes >= PHASE1_YIELD_BYTES
-                    || since_yield_stmts >= PHASE1_YIELD_STMTS
-                {
-                    since_yield_stmts = 0;
-                    since_yield_bytes = 0;
-                    tokio::task::yield_now().await;
-                }
+                pause
+                    .after(text_bytes, PHASE1_YIELD_BYTES, PHASE1_YIELD_STMTS)
+                    .await;
             }
         }
     }
 
-    let (data, data_statements) = finish_bins(bins, workers)?;
+    let (data, data_statements) = spool.finish()?;
     Ok(Phase1Plan {
-        pre_statements,
         data,
         data_statements,
         post,
-        session_preamble,
-        in_tx,
         total_bytes,
         extras: Vec::new(),
     })
 }
 
-async fn run_phase1_parallel<R, Open, Fut, Report>(
+#[allow(clippy::too_many_arguments)]
+async fn run_phase1_parallel<R, Report>(
     coordinator: &mut Conn,
     reader: R,
     driver: Driver,
     workers: usize,
-    open_worker: &mut Open,
+    split_tables: bool,
+    extras: Vec<Conn>,
     ctx: &RunCtx<'_, Report>,
     temps: &mut TempFiles,
 ) -> Result<Phase1Plan, LoadSqlError>
 where
     R: BufRead,
-    Open: FnMut() -> Fut + Send,
-    Fut: Future<Output = Result<Conn, String>> + Send,
     Report: FnMut(LoadProgress) + Send,
 {
-    use futures_util::StreamExt;
-
     let track = lock(ctx.progress).track.clone();
+    let connections = 1 + extras.len();
     let worker_cancel = Arc::new(AtomicBool::new(ctx.cancel.load(Ordering::Relaxed)));
     let cancel_notify = Arc::new(tokio::sync::Notify::new());
     let worker_error: Arc<Mutex<Option<(usize, LoadSqlError)>>> = Arc::new(Mutex::new(None));
-    let in_flight_per_worker: Vec<Arc<AtomicU64>> =
-        (0..workers).map(|_| Arc::new(AtomicU64::new(0))).collect();
+    let in_flight_per_worker: Vec<Arc<AtomicU64>> = (0..connections)
+        .map(|_| Arc::new(AtomicU64::new(0)))
+        .collect();
     let total_in_flight = Arc::new(AtomicU64::new(0));
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<(u64, usize)>();
 
-    let mut txs = Vec::with_capacity(workers);
-    let mut rx0_opt = None;
-    let mut extra_rxs: Vec<Option<tokio::sync::mpsc::UnboundedReceiver<PreMsg>>> =
-        Vec::with_capacity(workers);
-    for w in 0..workers {
+    let (tx0, rx0) = tokio::sync::mpsc::unbounded_channel();
+    let mut txs = Vec::with_capacity(connections);
+    txs.push(tx0);
+    let mut handles = SpawnedPhase1Workers(Vec::with_capacity(extras.len()));
+    let init: Arc<[String]> = Arc::from(ctx.preamble);
+    for (offset, mut conn) in extras.into_iter().enumerate() {
+        let worker = offset + 1;
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         txs.push(tx);
-        if w == 0 {
-            rx0_opt = Some(rx);
-            extra_rxs.push(None);
-        } else {
-            extra_rxs.push(Some(rx));
-        }
+        let init = init.clone();
+        let cancel = worker_cancel.clone();
+        let notify = cancel_notify.clone();
+        let error = worker_error.clone();
+        let in_flight = in_flight_per_worker[worker].clone();
+        let total = total_in_flight.clone();
+        let track = track.clone();
+        let progress_tx = progress_tx.clone();
+        handles.0.push(tokio::spawn(async move {
+            let ok = exec_phase1_extra_worker(
+                &mut conn,
+                worker,
+                &init,
+                rx,
+                &cancel,
+                &notify,
+                &error,
+                &in_flight,
+                &total,
+                track.as_ref(),
+                &progress_tx,
+            )
+            .await;
+            (conn, ok)
+        }));
     }
-    let rx0 = rx0_opt.expect("coordinator rx");
-    let (open_tx, mut open_rx) = tokio::sync::mpsc::unbounded_channel::<(usize, Vec<String>)>();
-    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<(u64, usize)>();
+    drop(progress_tx);
 
     let sync_cancel = || {
         if ctx.cancel.load(Ordering::Relaxed) {
@@ -1252,27 +1874,17 @@ where
 
     let reader_fut = async move {
         let mut stream = Stream::new(reader, driver);
-        let mut bins: Vec<Bin> = Vec::new();
-        let mut table_bins: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
-        let mut last_bin: Option<usize> = None;
+        let mut spool = Spool::new(connections, split_tables);
         let mut post: Vec<PlannedStmt> = Vec::new();
-        let mut session_preamble: Vec<String> = Vec::new();
-        let mut in_tx = ctx.in_transaction;
         let mut seen_data = false;
         let mut total_bytes = 0u64;
-        let mut pre_statements = 0u64;
         let mut next_index = 0usize;
-        let mut since_yield_stmts = 0usize;
-        let mut since_yield_bytes = 0u64;
+        let mut pause = Pause::default();
 
-        let mut ddl_table_workers: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
+        let mut ddl_table_workers: HashMap<String, usize> = HashMap::new();
         let mut fk_tables: HashSet<String> = HashSet::new();
-        let mut worker_assigned_tables = vec![0usize; workers];
-        let mut worker_opened = vec![false; workers];
-        worker_opened[0] = true;
-        let mut dirty_workers = vec![false; workers];
+        let mut worker_assigned_tables = vec![0usize; connections];
+        let mut dirty_workers = vec![false; connections];
 
         while let Some(stmt) = stream.next_statement(&reader_cancel)? {
             let index = next_index;
@@ -1283,49 +1895,22 @@ where
             if ctx.cancel.load(Ordering::Relaxed) || reader_cancel.load(Ordering::Relaxed) {
                 return Err(line_error(stmt.line, "Import cancelled.").into());
             }
+            let (max_bytes, max_statements) = if reader_total_in_flight.load(Ordering::Relaxed) > 0
+            {
+                (64 * 1024, 64)
+            } else {
+                (PHASE1_YIELD_BYTES, PHASE1_YIELD_STMTS)
+            };
             if driver == Driver::Postgres && is_copy_from_stdin(&stmt.sql) {
-                let idx = select_table_bin(
-                    &mut bins,
-                    &mut table_bins,
-                    &stmt.sql,
-                    workers,
-                    TABLE_CHUNK_BYTES,
-                );
-                suspend_previous_bin(&mut bins, &mut last_bin, idx)?;
                 if let Some(track) = &reader_track {
                     track.plan_data();
                 }
-                ensure_file(&mut bins[idx], temps)?;
-                let file = bins[idx].file.as_mut().expect("data chunk");
-                file.reserve(stmt.sql.len() + 32, temps)?;
-                write_copy_start(file, index, stmt.line, &stmt.sql)?;
-                let (payload_bytes, copy_lines, _) = stream
-                    .consume_copy(&reader_cancel, |chunk| {
-                        file.reserve(chunk.len() + 16, temps)?;
-                        write_copy_data(file, chunk)
-                    })
-                    .map_err(|err| LoadSqlError::from(line_error(stmt.line, err)))?;
-                let text_bytes = stmt.sql.len() as u64 + payload_bytes;
-                let lines = stmt.line_span() + copy_lines;
-                write_copy_end(file, text_bytes)?;
-                bins[idx].lines += lines;
-                bins[idx].bytes += text_bytes;
-                bins[idx].statements += 1;
+                let text_bytes =
+                    spool.push_copy(index, &stmt, &mut stream, &reader_cancel, temps)?;
                 total_bytes += text_bytes;
                 seen_data = true;
                 stream.recycle(stmt.sql);
-                since_yield_stmts += 1;
-                since_yield_bytes += text_bytes;
-                let yield_bytes = if reader_total_in_flight.load(Ordering::Relaxed) > 0 {
-                    64 * 1024
-                } else {
-                    PHASE1_YIELD_BYTES
-                };
-                if since_yield_bytes >= yield_bytes || since_yield_stmts >= PHASE1_YIELD_STMTS {
-                    since_yield_stmts = 0;
-                    since_yield_bytes = 0;
-                    tokio::task::yield_now().await;
-                }
+                pause.after(text_bytes, max_bytes, max_statements).await;
                 continue;
             }
             let (decision, target_table) = decide_phase_with_table(&stmt.sql, seen_data, workers);
@@ -1334,68 +1919,25 @@ where
                     stream.recycle(stmt.sql);
                 }
                 Decision::Data => {
-                    let text_bytes = stmt.sql.len() as u64;
-                    let lines = stmt.line_span();
-                    let idx = select_table_bin_with_table(
-                        &mut bins,
-                        &mut table_bins,
-                        target_table,
-                        workers,
-                        TABLE_CHUNK_BYTES,
-                    );
-                    suspend_previous_bin(&mut bins, &mut last_bin, idx)?;
                     if let Some(track) = &reader_track {
                         track.plan_data();
                     }
-                    ensure_file(&mut bins[idx], temps)?;
-                    let file = bins[idx].file.as_mut().expect("data chunk");
-                    file.reserve(stmt.sql.len() + 32, temps)?;
-                    write_sql_record(file, index, stmt.line, &stmt.sql)?;
-                    bins[idx].lines += lines;
-                    bins[idx].bytes += text_bytes;
-                    bins[idx].statements += 1;
+                    let text_bytes = spool.push_sql(index, &stmt, target_table, temps)?;
                     total_bytes += text_bytes;
                     seen_data = true;
                     stream.recycle(stmt.sql);
-                    since_yield_stmts += 1;
-                    since_yield_bytes += text_bytes;
-                    let yield_bytes = if reader_total_in_flight.load(Ordering::Relaxed) > 0 {
-                        64 * 1024
-                    } else {
-                        PHASE1_YIELD_BYTES
-                    };
-                    let yield_stmts = if reader_total_in_flight.load(Ordering::Relaxed) > 0 {
-                        64
-                    } else {
-                        PHASE1_YIELD_STMTS
-                    };
-                    if since_yield_bytes >= yield_bytes || since_yield_stmts >= yield_stmts {
-                        since_yield_stmts = 0;
-                        since_yield_bytes = 0;
-                        tokio::task::yield_now().await;
-                    }
+                    pause.after(text_bytes, max_bytes, max_statements).await;
                 }
                 Decision::Pre => {
                     let text_bytes = stmt.sql.len() as u64;
-                    let tx_begin = is_tx_begin(&stmt.sql);
                     let skip_exec = ctx.skip_completed.contains(&index)
-                        || (driver == Driver::Mysql
-                            && (is_lock_or_unlock_tables(&stmt.sql)
-                                || is_mysql_tx_forbidden_set(&stmt.sql)))
-                        || (tx_begin && (workers > 1 || in_tx));
+                        || (driver == Driver::Mysql && is_lock_or_unlock_tables(&stmt.sql))
+                        || is_tx_begin(&stmt.sql);
                     if skip_exec {
                         if let Some(track) = &reader_track {
                             track.plan_pre(0);
                             track.bump_pre(0);
                         }
-                        let class = super::resume::classify(driver, &stmt.sql);
-                        if class.session
-                            && class.tx == super::resume::Tx::None
-                            && !is_mysql_tx_forbidden_set(&stmt.sql)
-                        {
-                            session_preamble.push(stmt.sql.clone());
-                        }
-                        pre_statements += 1;
                         total_bytes += text_bytes;
                         note_pre_progress(ctx.progress, text_bytes, index);
                         stream.recycle(stmt.sql);
@@ -1409,7 +1951,7 @@ where
                         let w = if let Some(&existing) = ddl_table_workers.get(table.as_str()) {
                             existing
                         } else {
-                            let chosen = (0..workers)
+                            let chosen = (0..connections)
                                 .min_by_key(|&w| {
                                     (
                                         reader_in_flight[w].load(Ordering::Relaxed),
@@ -1422,44 +1964,27 @@ where
                             worker_assigned_tables[chosen] += 1;
                             chosen
                         };
-                        if w > 0 && !worker_opened[w] {
-                            worker_opened[w] = true;
-                            let mut init =
-                                Vec::with_capacity(ctx.preamble.len() + session_preamble.len());
-                            init.extend_from_slice(ctx.preamble);
-                            init.extend_from_slice(&session_preamble);
-                            let _ = open_tx.send((w, init));
-                        }
                         dirty_workers[w] = true;
                         if let Some(track) = &reader_track {
                             track.plan_pre(w);
                         }
                         let cur_in_flight = reader_in_flight[w].fetch_add(1, Ordering::Relaxed) + 1;
                         reader_total_in_flight.fetch_add(1, Ordering::Relaxed);
-                        let backpressure = if cur_in_flight >= 64 {
+                        let (ack, backpressure) = if cur_in_flight >= 64 {
                             let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-                            let _ = txs[w].send(PreMsg::Stmt {
-                                index,
-                                line: stmt.line,
-                                sql: stmt.sql,
-                                text_bytes,
-                                ack: Some(ack_tx),
-                            });
-                            Some(ack_rx)
+                            (Some(ack_tx), Some(ack_rx))
                         } else {
-                            let _ = txs[w].send(PreMsg::Stmt {
-                                index,
-                                line: stmt.line,
-                                sql: stmt.sql,
-                                text_bytes,
-                                ack: None,
-                            });
-                            None
+                            (None, None)
                         };
-                        pre_statements += 1;
+                        let _ = txs[w].send(PreMsg::Stmt {
+                            index,
+                            line: stmt.line,
+                            sql: stmt.sql,
+                            text_bytes,
+                            ack,
+                        });
                         total_bytes += text_bytes;
-                        since_yield_stmts = 0;
-                        since_yield_bytes = 0;
+                        pause.reset();
                         if let Some(ack_rx) = backpressure {
                             let _ = ack_rx.await;
                         } else {
@@ -1496,11 +2021,8 @@ where
                     if let Some(track) = &reader_track {
                         track.plan_pre(0);
                     }
-                    let class = super::resume::classify(driver, &stmt.sql);
-                    let is_session = class.session
-                        && class.tx == super::resume::Tx::None
-                        && !is_mysql_tx_forbidden_set(&stmt.sql);
-                    let session_copy = is_session.then(|| stmt.sql.clone());
+                    let session_copy =
+                        replays_on_workers(driver, &stmt.sql).then(|| stmt.sql.clone());
 
                     reader_in_flight[0].fetch_add(1, Ordering::Relaxed);
                     reader_total_in_flight.fetch_add(1, Ordering::Relaxed);
@@ -1516,25 +2038,22 @@ where
                     if lock(&reader_error).is_some() {
                         break;
                     }
-                    if tx_begin {
-                        in_tx = true;
-                    }
                     if let Some(session_sql) = session_copy {
-                        session_preamble.push(session_sql.clone());
-                        for (w, &opened) in worker_opened.iter().enumerate().skip(1) {
-                            if opened {
-                                reader_in_flight[w].fetch_add(1, Ordering::Relaxed);
-                                reader_total_in_flight.fetch_add(1, Ordering::Relaxed);
-                                let _ = txs[w].send(PreMsg::Session {
+                        for (w, tx) in txs.iter().enumerate().skip(1) {
+                            reader_in_flight[w].fetch_add(1, Ordering::Relaxed);
+                            reader_total_in_flight.fetch_add(1, Ordering::Relaxed);
+                            if tx
+                                .send(PreMsg::Session {
                                     sql: session_sql.clone(),
-                                });
+                                })
+                                .is_err()
+                            {
+                                dec_in_flight(&reader_in_flight[w], &reader_total_in_flight);
                             }
                         }
                     }
-                    pre_statements += 1;
                     total_bytes += text_bytes;
-                    since_yield_stmts = 0;
-                    since_yield_bytes = 0;
+                    pause.reset();
                 }
                 Decision::Post => {
                     let text_bytes = stmt.sql.len() as u64;
@@ -1544,32 +2063,13 @@ where
                         sql: stmt.sql,
                     });
                     total_bytes += text_bytes;
-                    since_yield_stmts += 1;
-                    since_yield_bytes += text_bytes;
-                    let yield_bytes = if reader_total_in_flight.load(Ordering::Relaxed) > 0 {
-                        64 * 1024
-                    } else {
-                        PHASE1_YIELD_BYTES
-                    };
-                    if since_yield_bytes >= yield_bytes || since_yield_stmts >= PHASE1_YIELD_STMTS {
-                        since_yield_stmts = 0;
-                        since_yield_bytes = 0;
-                        tokio::task::yield_now().await;
-                    }
+                    pause.after(text_bytes, max_bytes, PHASE1_YIELD_STMTS).await;
                 }
             }
         }
 
         drop(txs);
-        drop(open_tx);
-        Ok::<_, LoadSqlError>((
-            pre_statements,
-            bins,
-            post,
-            session_preamble,
-            in_tx,
-            total_bytes,
-        ))
+        Ok::<_, LoadSqlError>((spool, post, total_bytes))
     };
 
     let coord_in_flight = in_flight_per_worker[0].clone();
@@ -1638,95 +2138,6 @@ where
         }
     };
 
-    let spawner_in_flight = in_flight_per_worker.clone();
-    let spawner_total_in_flight = total_in_flight.clone();
-    let spawner_error = worker_error.clone();
-    let spawner_cancel = worker_cancel.clone();
-    let spawner_notify = cancel_notify.clone();
-    let spawner_track = track.clone();
-
-    let extra_spawner = async move {
-        let mut opening = futures_util::stream::FuturesUnordered::new();
-        let mut handles = SpawnedPhase1Workers(Vec::new());
-        let mut open_closed = false;
-        while !open_closed || !opening.is_empty() {
-            sync_cancel();
-            tokio::select! {
-                biased;
-                msg = open_rx.recv(), if !open_closed => {
-                    match msg {
-                        Some((w, init_preamble)) => {
-                            if stop_phase1(&spawner_error, &spawner_cancel, &spawner_notify, usize::MAX, None) {
-                                let _ = extra_rxs[w].take();
-                                spawner_in_flight[w].store(0, Ordering::Relaxed);
-                            } else {
-                                let fut = open_worker();
-                                opening.push(async move { (w, init_preamble, fut.await) });
-                            }
-                        }
-                        None => {
-                            open_closed = true;
-                        }
-                    }
-                }
-                Some((w, init_preamble, result)) = opening.next(), if !opening.is_empty() => {
-                    match result {
-                        Ok(mut conn) => {
-                            if let Some(rx) = extra_rxs[w].take() {
-                                let task_cancel = spawner_cancel.clone();
-                                let task_notify = spawner_notify.clone();
-                                let task_error = spawner_error.clone();
-                                let task_in_flight = spawner_in_flight[w].clone();
-                                let task_total_in_flight = spawner_total_in_flight.clone();
-                                let task_track = spawner_track.clone();
-                                let task_progress_tx = progress_tx.clone();
-                                handles.0.push(tokio::spawn(async move {
-                                    let ok = exec_phase1_extra_worker(
-                                        &mut conn,
-                                        w,
-                                        &init_preamble,
-                                        rx,
-                                        &task_cancel,
-                                        &task_notify,
-                                        &task_error,
-                                        &task_in_flight,
-                                        &task_total_in_flight,
-                                        task_track.as_ref(),
-                                        &task_progress_tx,
-                                    )
-                                    .await;
-                                    (conn, ok)
-                                }));
-                            } else {
-                                conn.close().await;
-                            }
-                        }
-                        Err(err) => {
-                            let _ = extra_rxs[w].take();
-                            spawner_in_flight[w].store(0, Ordering::Relaxed);
-                            fail_phase1(&spawner_error, &spawner_cancel, &spawner_notify, usize::MAX, err);
-                        }
-                    }
-                }
-            }
-        }
-        drop(extra_rxs);
-        let mut ready_extras = Vec::with_capacity(handles.0.len());
-        let mut to_close = Vec::new();
-        for handle in std::mem::take(&mut handles.0) {
-            if let Ok((conn, ok)) = handle.await {
-                if ok {
-                    ready_extras.push(conn);
-                } else {
-                    to_close.push(conn);
-                }
-            }
-        }
-        drop(progress_tx);
-        close_conns(to_close).await;
-        ready_extras
-    };
-
     let progress_drainer = async {
         loop {
             sync_cancel();
@@ -1747,21 +2158,31 @@ where
         }
     };
 
-    let worker_manager = async {
-        let ((), extras, ()) =
-            futures_util::future::join3(coord_worker, extra_spawner, progress_drainer).await;
-        extras
-    };
-
-    let (reader_res, extras) = futures_util::future::join(reader_fut, worker_manager).await;
+    let ((reader_res, ()), ()) = futures_util::future::join(
+        futures_util::future::join(reader_fut, coord_worker),
+        progress_drainer,
+    )
+    .await;
+    let mut extras = Vec::with_capacity(handles.0.len());
+    let mut broken = Vec::new();
+    for handle in std::mem::take(&mut handles.0) {
+        if let Ok((conn, ok)) = handle.await {
+            if ok {
+                extras.push(conn);
+            } else {
+                broken.push(conn);
+            }
+        }
+    }
+    close_conns(broken).await;
     sync_cancel();
     let taken_err = lock(&worker_error).take();
     if let Some((_, err)) = taken_err {
         close_conns(extras).await;
         return Err(err);
     }
-    let (pre_statements, bins, post, session_preamble, in_tx, total_bytes) = match reader_res {
-        Ok(tuple) => tuple,
+    let (spool, post, total_bytes) = match reader_res {
+        Ok(parts) => parts,
         Err(err) => {
             close_conns(extras).await;
             return Err(err);
@@ -1771,7 +2192,7 @@ where
         close_conns(extras).await;
         return Err("Import cancelled.".to_string().into());
     }
-    let (data, data_statements) = match finish_bins(bins, workers) {
+    let (data, data_statements) = match spool.finish() {
         Ok(res) => res,
         Err(err) => {
             close_conns(extras).await;
@@ -1779,213 +2200,65 @@ where
         }
     };
     Ok(Phase1Plan {
-        pre_statements,
         data,
         data_statements,
         post,
-        session_preamble,
-        in_tx,
         total_bytes,
         extras,
     })
 }
 
-struct Plan {
-    pre: Option<DataChunk>,
-    pre_statements: u64,
-    data: Vec<DataChunk>,
-    data_statements: Vec<u64>,
-    post: Option<DataChunk>,
-    post_statements: u64,
-    total_bytes: u64,
-}
-
-fn plan_dump<R: BufRead>(
-    reader: R,
-    driver: Driver,
-    workers: usize,
-    cancel: &AtomicBool,
-    temps: &mut TempFiles,
-) -> Result<Plan, String> {
-    let mut stream = Stream::new(reader, driver);
-    let mut pre: Option<ChunkFile> = None;
-    let mut post: Option<ChunkFile> = None;
-    let mut bins: Vec<Bin> = Vec::new();
-    let mut table_bins: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut last_bin: Option<usize> = None;
-    let mut seen_data = false;
-    let mut total_bytes = 0u64;
-    let mut pre_statements = 0u64;
-    let mut post_statements = 0u64;
-    // File order, including LOCK TABLES statements workers > 1 will not run.
-    let mut next_index = 0usize;
-
-    while let Some(stmt) = stream.next_statement(cancel)? {
-        let index = next_index;
-        next_index += 1;
-        if cancel.load(Ordering::Relaxed) {
-            return Err(line_error(stmt.line, "Import cancelled."));
-        }
-        if driver == Driver::Postgres && is_copy_from_stdin(&stmt.sql) {
-            let idx = select_table_bin(
-                &mut bins,
-                &mut table_bins,
-                &stmt.sql,
-                workers,
-                TABLE_CHUNK_BYTES,
-            );
-            suspend_previous_bin(&mut bins, &mut last_bin, idx)?;
-            ensure_file(&mut bins[idx], temps)?;
-            let file = bins[idx].file.as_mut().expect("data chunk");
-            file.reserve(stmt.sql.len() + 32, temps)?;
-            write_copy_start(file, index, stmt.line, &stmt.sql)?;
-            let (payload_bytes, copy_lines, _) = stream
-                .consume_copy(cancel, |line| {
-                    file.reserve(line.len() + 16, temps)?;
-                    write_copy_data(file, line)
-                })
-                .map_err(|err| line_error(stmt.line, err))?;
-            let text_bytes = stmt.sql.len() as u64 + payload_bytes;
-            let lines = stmt.line_span() + copy_lines;
-            write_copy_end(file, text_bytes)?;
-            bins[idx].lines += lines;
-            bins[idx].bytes += text_bytes;
-            bins[idx].statements += 1;
-            total_bytes += text_bytes;
-            seen_data = true;
-            stream.recycle(stmt.sql);
-            continue;
-        }
-        let (decision, target_table) = decide_phase_with_table(&stmt.sql, seen_data, workers);
-        match decision {
-            Decision::Skip => {
-                stream.recycle(stmt.sql);
-            }
-            Decision::Data => {
-                let text_bytes = stmt.sql.len() as u64;
-                let lines = stmt.line_span();
-                let idx = select_table_bin_with_table(
-                    &mut bins,
-                    &mut table_bins,
-                    target_table,
-                    workers,
-                    TABLE_CHUNK_BYTES,
-                );
-                suspend_previous_bin(&mut bins, &mut last_bin, idx)?;
-                ensure_file(&mut bins[idx], temps)?;
-                let file = bins[idx].file.as_mut().expect("data chunk");
-                file.reserve(stmt.sql.len() + 32, temps)?;
-                write_sql_record(file, index, stmt.line, &stmt.sql)?;
-                bins[idx].lines += lines;
-                bins[idx].bytes += text_bytes;
-                bins[idx].statements += 1;
-                total_bytes += text_bytes;
-                seen_data = true;
-                stream.recycle(stmt.sql);
-            }
-            Decision::Pre => {
-                let text_bytes = stmt.sql.len() as u64;
-                write_sequence(&mut pre, temps, index, stmt.line, &stmt.sql)?;
-                pre_statements += 1;
-                total_bytes += text_bytes;
-                stream.recycle(stmt.sql);
-            }
-            Decision::Post => {
-                let text_bytes = stmt.sql.len() as u64;
-                write_sequence(&mut post, temps, index, stmt.line, &stmt.sql)?;
-                post_statements += 1;
-                total_bytes += text_bytes;
-                stream.recycle(stmt.sql);
-            }
-        }
-    }
-
-    let pre = finish_slot(pre)?;
-    let (data, data_statements) = finish_bins(bins, workers)?;
-    let post = finish_slot(post)?;
-    Ok(Plan {
-        pre,
-        pre_statements,
-        data,
-        data_statements,
-        post,
-        post_statements,
-        total_bytes,
-    })
-}
-
-async fn run_phase2<Open, Fut, Report>(
+async fn run_phase2<Report>(
     coordinator: &mut Conn,
     chunks: &[DataChunk],
-    workers: usize,
-    mut pre_extras: Vec<Conn>,
-    open_worker: &mut Open,
+    mut extras: Vec<Conn>,
+    setup: &[String],
+    split_tables: bool,
     ctx: &RunCtx<'_, Report>,
 ) -> Result<(), LoadSqlError>
 where
-    Open: FnMut() -> Fut + Send,
-    Fut: Future<Output = Result<Conn, String>> + Send,
     Report: FnMut(LoadProgress) + Send,
 {
     if chunks.is_empty() {
-        close_conns(pre_extras).await;
+        close_conns(extras).await;
         return Ok(());
     }
-    let groups = assign_workers(chunks, workers);
+    let groups = assign_workers(chunks, 1 + extras.len());
     let extra_count = groups.len().saturating_sub(1);
-    if extra_count > 0 && stop_requested(ctx.error, ctx.cancel, None) {
-        close_conns(pre_extras).await;
-        return take_error(ctx.error, ctx.cancel);
-    }
-    if pre_extras.len() > extra_count {
-        let unused = pre_extras.split_off(extra_count);
+    if extras.len() > extra_count {
+        let unused = extras.split_off(extra_count);
         close_conns(unused).await;
     }
-    let mut extras: Vec<(Conn, bool)> = pre_extras.into_iter().map(|c| (c, false)).collect();
-    let needed = extra_count.saturating_sub(extras.len());
-    if needed > 0 {
-        let mut open_futs = Vec::with_capacity(needed);
-        for _ in 0..needed {
-            open_futs.push(open_worker());
-        }
-        let opened = futures_util::future::join_all(open_futs).await;
-        for result in opened {
-            match result {
-                Ok(conn) => extras.push((conn, true)),
-                Err(err) => fail(ctx.error, ctx.cancel, err),
-            }
-        }
-    }
     if stop_requested(ctx.error, ctx.cancel, None) {
-        close_conns(extras.into_iter().map(|(c, _)| c).collect()).await;
+        close_conns(extras).await;
         return take_error(ctx.error, ctx.cancel);
     }
 
     if extras.is_empty() {
-        exec_group(coordinator, &groups[0], false, 0, ctx).await;
+        exec_group(coordinator, &groups[0], 0, ctx).await;
         return take_error(ctx.error, ctx.cancel);
     }
 
     let worker_cancel = Arc::new(AtomicBool::new(ctx.cancel.load(Ordering::Relaxed)));
     let cancel_notify = Arc::new(tokio::sync::Notify::new());
     let worker_error = Arc::new(Mutex::new(lock(ctx.error).clone()));
-    let preamble: Arc<[String]> = Arc::from(ctx.preamble);
+    let setup: Arc<[String]> = Arc::from(setup);
     let skip_completed = Arc::new(ctx.skip_completed.clone());
     let track = lock(ctx.progress).track.clone();
-    let shared_queues = match SharedQueues::new(&groups) {
+    let shared_queues = match SharedQueues::new(&groups, split_tables) {
         Ok(q) => Arc::new(q),
         Err(err) => {
             fail(ctx.error, ctx.cancel, err);
-            close_conns(extras.into_iter().map(|(c, _)| c).collect()).await;
+            close_conns(extras).await;
             return take_error(ctx.error, ctx.cancel);
         }
     };
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
 
     let mut handles = SpawnedWorkers(Vec::with_capacity(extras.len()));
-    for (offset, (mut conn, run_preamble)) in extras.into_iter().enumerate() {
+    for (offset, mut conn) in extras.into_iter().enumerate() {
         let task_ctx = Phase2Ctx {
-            preamble: preamble.clone(),
+            setup: setup.clone(),
             cancel: worker_cancel.clone(),
             cancel_notify: cancel_notify.clone(),
             error: worker_error.clone(),
@@ -1995,13 +2268,13 @@ where
             progress_tx: progress_tx.clone(),
         };
         handles.0.push(tokio::spawn(async move {
-            exec_phase2_worker(&mut conn, run_preamble, offset + 1, &task_ctx).await;
+            exec_phase2_worker(&mut conn, offset + 1, true, &task_ctx).await;
             conn
         }));
     }
 
     let coord_ctx = Phase2Ctx {
-        preamble,
+        setup,
         cancel: worker_cancel.clone(),
         cancel_notify: cancel_notify.clone(),
         error: worker_error.clone(),
@@ -2011,7 +2284,7 @@ where
         progress_tx,
     };
     let run_workers = async {
-        exec_phase2_worker(coordinator, false, 0, &coord_ctx).await;
+        exec_phase2_worker(coordinator, 0, false, &coord_ctx).await;
         drop(coord_ctx);
         let mut finished = Vec::with_capacity(handles.0.len());
         for handle in std::mem::take(&mut handles.0) {
@@ -2074,20 +2347,31 @@ struct SqlStmt {
 
 enum PoppedBatch {
     Sql(Vec<SqlStmt>),
+    /// A `COPY` header, with the chunk it came from, whose reader is at the rows. Hand the chunk back with [`SharedQueues::put_back`].
     Copy {
         index: usize,
         line: usize,
         sql: String,
-        payload: Vec<Vec<u8>>,
-        text_bytes: u64,
+        chunk: WorkerDeqs,
     },
 }
 
+/// Statements one worker finished, with their sizes.
 struct ProgressBatch {
-    bytes: u64,
-    statements: u64,
     worker: usize,
     indexes: Vec<(usize, u64)>,
+}
+
+impl ProgressBatch {
+    fn of(worker: usize, stmts: &[SqlStmt]) -> Self {
+        Self {
+            worker,
+            indexes: stmts
+                .iter()
+                .map(|stmt| (stmt.index, stmt.sql.len() as u64))
+                .collect(),
+        }
+    }
 }
 
 enum WorkerDeqs {
@@ -2112,12 +2396,11 @@ enum NextRecord {
         line: usize,
         sql: String,
     },
+    /// Only the header. The rows follow in the chunk's reader.
     Copy {
         index: usize,
         line: usize,
         sql: String,
-        payload: Vec<Vec<u8>>,
-        text_bytes: u64,
     },
 }
 
@@ -2157,6 +2440,16 @@ impl WorkerDeqs {
         }
     }
 
+    /// Whether nothing has been read from this chunk yet.
+    fn untouched(&self) -> bool {
+        match self {
+            WorkerDeqs::Memory { cursor, peeked, .. } => {
+                peeked.is_none() && cursor.position() == MAGIC.len() as u64
+            }
+            WorkerDeqs::Disk { reader, .. } => reader.is_none(),
+        }
+    }
+
     fn push_back_record(&mut self, record: NextRecord) {
         match self {
             WorkerDeqs::Memory { peeked, .. } | WorkerDeqs::Disk { peeked, .. } => {
@@ -2193,6 +2486,20 @@ impl WorkerDeqs {
             }
         }
     }
+
+    /// The chunk's reader, at the rows of the `COPY` whose header was read last.
+    fn payload(&mut self) -> Result<&mut (dyn Read + Send), String> {
+        match self {
+            WorkerDeqs::Memory { cursor, .. } => Ok(cursor),
+            WorkerDeqs::Disk {
+                reader: Some(reader),
+                ..
+            } => Ok(reader),
+            WorkerDeqs::Disk { reader: None, .. } => {
+                Err("The import chunk ended inside COPY data.".into())
+            }
+        }
+    }
 }
 
 fn read_next_record<R: Read>(reader: &mut R) -> Result<Option<NextRecord>, String> {
@@ -2210,22 +2517,7 @@ fn read_next_record<R: Read>(reader: &mut R) -> Result<Option<NextRecord>, Strin
             let index = read_usize(reader)?;
             let line = read_usize(reader)?;
             let sql = read_sql(reader)?;
-            let mut payload = Vec::new();
-            let text_bytes = loop {
-                match read_tag(reader)? {
-                    Some(TAG_DATA) => payload.push(read_vec(reader)?),
-                    Some(TAG_END) => break read_u64(reader)?,
-                    Some(_) => return Err("The import chunk has a broken COPY payload.".into()),
-                    None => return Err("The import chunk ended inside COPY data.".into()),
-                }
-            };
-            Ok(Some(NextRecord::Copy {
-                index,
-                line,
-                sql,
-                payload,
-                text_bytes,
-            }))
+            Ok(Some(NextRecord::Copy { index, line, sql }))
         }
         _ => Err("The import chunk has an unknown record.".into()),
     }
@@ -2233,10 +2525,12 @@ fn read_next_record<R: Read>(reader: &mut R) -> Result<Option<NextRecord>, Strin
 
 struct SharedQueues {
     queues: Vec<Mutex<VecDeque<WorkerDeqs>>>,
+    /// Whether an idle worker may take rows from a chunk another worker has started.
+    split_tables: bool,
 }
 
 impl SharedQueues {
-    fn new(groups: &[Vec<DataChunk>]) -> Result<Self, String> {
+    fn new(groups: &[Vec<DataChunk>], split_tables: bool) -> Result<Self, String> {
         let mut queues = Vec::with_capacity(groups.len());
         for (worker, group) in groups.iter().enumerate() {
             let mut deq = VecDeque::with_capacity(group.len());
@@ -2245,47 +2539,17 @@ impl SharedQueues {
             }
             queues.push(Mutex::new(deq));
         }
-        Ok(Self { queues })
+        Ok(Self {
+            queues,
+            split_tables,
+        })
     }
 
-    fn pop(&self, worker: usize, track: Option<&LoadTrack>) -> Result<Option<NextRecord>, String> {
+    /// Returns a chunk taken by [`PoppedBatch::Copy`], so `worker` carries on with its next record.
+    fn put_back(&self, worker: usize, chunk: WorkerDeqs) {
         if let Some(slot) = self.queues.get(worker) {
-            let mut deq = lock(slot);
-            while let Some(front) = deq.front_mut() {
-                let victim = front.victim();
-                match front.next_record()? {
-                    Some(rec) => {
-                        if let Some(track) = track {
-                            track.steal_one(worker, victim);
-                        }
-                        return Ok(Some(rec));
-                    }
-                    None => {
-                        deq.pop_front();
-                    }
-                }
-            }
+            lock(slot).push_front(chunk);
         }
-        let n = self.queues.len();
-        for offset in 1..n {
-            let other = (worker + offset) % n;
-            let mut deq = lock(&self.queues[other]);
-            while let Some(front) = deq.front_mut() {
-                let victim = front.victim();
-                match front.next_record()? {
-                    Some(rec) => {
-                        if let Some(track) = track {
-                            track.steal_one(worker, victim);
-                        }
-                        return Ok(Some(rec));
-                    }
-                    None => {
-                        deq.pop_front();
-                    }
-                }
-            }
-        }
-        Ok(None)
     }
 
     fn pop_batch_from_deq(
@@ -2308,31 +2572,20 @@ impl SharedQueues {
                         return Ok(Some(PoppedBatch::Sql(batch)));
                     }
                 }
-                Some(
-                    copy @ NextRecord::Copy {
-                        index,
-                        line,
-                        sql: _,
-                        payload: _,
-                        text_bytes,
-                    },
-                ) => {
+                Some(NextRecord::Copy { index, line, sql }) => {
                     if !batch.is_empty() {
-                        front.push_back_record(copy);
+                        front.push_back_record(NextRecord::Copy { index, line, sql });
                         return Ok(Some(PoppedBatch::Sql(batch)));
                     }
                     if let Some(track) = track {
                         track.steal_one(thief, victim);
                     }
-                    let NextRecord::Copy { sql, payload, .. } = copy else {
-                        unreachable!()
-                    };
+                    let chunk = deq.pop_front().expect("front chunk");
                     return Ok(Some(PoppedBatch::Copy {
                         index,
                         line,
                         sql,
-                        payload,
-                        text_bytes,
+                        chunk,
                     }));
                 }
                 None => {
@@ -2343,11 +2596,7 @@ impl SharedQueues {
                 }
             }
         }
-        if !batch.is_empty() {
-            Ok(Some(PoppedBatch::Sql(batch)))
-        } else {
-            Ok(None)
-        }
+        Ok((!batch.is_empty()).then_some(PoppedBatch::Sql(batch)))
     }
 
     fn pop_batch(
@@ -2355,30 +2604,29 @@ impl SharedQueues {
         worker: usize,
         track: Option<&LoadTrack>,
     ) -> Result<Option<PoppedBatch>, String> {
-        // First pull from our own queue.
         if let Some(slot) = self.queues.get(worker) {
             let mut deq = lock(slot);
             if let Some(batch) = Self::pop_batch_from_deq(&mut deq, worker, track)? {
                 return Ok(Some(batch));
             }
         }
-        // Own queue is empty: first try to steal an untouched chunk from the back of
-        // another worker's queue (preferring a different table than its active front chunk)
-        // so two workers do not contend on the same table while queued tables remain.
+        /*
+         * Own queue is empty: take an untouched chunk from the back of another
+         * worker's queue, preferring a different table than its front chunk,
+         * so two workers do not contend on the same table while queued tables remain.
+         */
         let n = self.queues.len();
         for require_different_table in [true, false] {
             for offset in 1..n {
                 let other = (worker + offset) % n;
                 let stolen = {
                     let mut deq = lock(&self.queues[other]);
-                    if deq.len() > 1 {
-                        let front_table = deq.front().map(WorkerDeqs::table_id);
-                        let back_table = deq.back().map(WorkerDeqs::table_id);
-                        if !require_different_table || front_table != back_table {
-                            deq.pop_back()
-                        } else {
-                            None
-                        }
+                    let untouched = deq.back().is_some_and(WorkerDeqs::untouched);
+                    let same_table = deq.len() > 1
+                        && deq.front().map(WorkerDeqs::table_id)
+                            == deq.back().map(WorkerDeqs::table_id);
+                    if untouched && !(require_different_table && same_table) {
+                        deq.pop_back()
                     } else {
                         None
                     }
@@ -2395,7 +2643,10 @@ impl SharedQueues {
                 }
             }
         }
-        // All remaining queues are down to their final chunk: steal a batch from the front.
+        if !self.split_tables {
+            return Ok(None);
+        }
+        // All remaining queues are down to chunks already started: steal a batch from the front.
         for offset in 1..n {
             let other = (worker + offset) % n;
             let mut deq = lock(&self.queues[other]);
@@ -2408,7 +2659,8 @@ impl SharedQueues {
 }
 
 struct Phase2Ctx {
-    preamble: Arc<[String]>,
+    /// Run on each extra worker before its first batch.
+    setup: Arc<[String]>,
     cancel: Arc<AtomicBool>,
     cancel_notify: Arc<tokio::sync::Notify>,
     error: Arc<Mutex<Option<LoadSqlError>>>,
@@ -2418,25 +2670,21 @@ struct Phase2Ctx {
     progress_tx: tokio::sync::mpsc::UnboundedSender<ProgressBatch>,
 }
 
-fn build_batch_sql(buf: &mut String, stmts: &[SqlStmt], wrap_tx: bool) {
+fn build_batch_sql(buf: &mut String, stmts: &[SqlStmt]) {
     buf.clear();
     let total_len: usize = stmts.iter().map(|s| s.sql.len() + 2).sum::<usize>() + 16;
     if buf.capacity() < total_len {
         buf.reserve(total_len - buf.capacity());
     }
-    if wrap_tx {
-        buf.push_str("BEGIN;\n");
-    }
+    buf.push_str("BEGIN;\n");
     for stmt in stmts {
         buf.push_str(&stmt.sql);
         buf.push_str(";\n");
     }
-    if wrap_tx {
-        buf.push_str("COMMIT;");
-    }
+    buf.push_str("COMMIT;");
 }
 
-async fn exec_phase2_worker(conn: &mut Conn, run_preamble: bool, worker: usize, ctx: &Phase2Ctx) {
+async fn exec_phase2_worker(conn: &mut Conn, worker: usize, run_setup: bool, ctx: &Phase2Ctx) {
     if stop_requested(&ctx.error, &ctx.cancel, None) {
         ctx.cancel_notify.notify_waiters();
         return;
@@ -2444,25 +2692,16 @@ async fn exec_phase2_worker(conn: &mut Conn, run_preamble: bool, worker: usize, 
     if let Some(track) = &ctx.track {
         track.mark_running(worker);
     }
-    if run_preamble {
-        for sql in ctx.preamble.iter() {
-            if stop_requested(&ctx.error, &ctx.cancel, None) {
-                ctx.cancel_notify.notify_waiters();
-                return;
-            }
+    if run_setup {
+        for sql in ctx.setup.iter() {
             if let Err(err) = conn.execute(sql).await {
-                fail(
-                    &ctx.error,
-                    &ctx.cancel,
-                    format!("Worker setup failed: {err}"),
-                );
+                fail(&ctx.error, &ctx.cancel, worker_setup_failure(err));
                 ctx.cancel_notify.notify_waiters();
                 return;
             }
         }
     }
     let mut batch_sql = String::new();
-    let mut to_run = Vec::with_capacity(BATCH_MAX_STMTS);
     loop {
         if stop_requested(&ctx.error, &ctx.cancel, None) {
             ctx.cancel_notify.notify_waiters();
@@ -2482,221 +2721,64 @@ async fn exec_phase2_worker(conn: &mut Conn, run_preamble: bool, worker: usize, 
                 return;
             }
         };
-        match popped {
+        let result = match popped {
             PoppedBatch::Sql(stmts) => {
                 let first_line = stmts.first().map(|s| s.line);
                 if stop_requested(&ctx.error, &ctx.cancel, first_line) {
                     ctx.cancel_notify.notify_waiters();
                     return;
                 }
-                to_run.clear();
-                let mut skipped_indexes = Vec::new();
-                let mut skipped_bytes = 0u64;
-                for stmt in stmts {
-                    if ctx.skip_completed.contains(&stmt.index) {
-                        let b = stmt.sql.len() as u64;
-                        skipped_bytes += b;
-                        skipped_indexes.push((stmt.index, b));
-                    } else {
-                        to_run.push(stmt);
-                    }
+                let (done, to_run): (Vec<SqlStmt>, Vec<SqlStmt>) = stmts
+                    .into_iter()
+                    .partition(|stmt| ctx.skip_completed.contains(&stmt.index));
+                if !done.is_empty() {
+                    let _ = ctx.progress_tx.send(ProgressBatch::of(worker, &done));
                 }
-                if !skipped_indexes.is_empty() {
-                    let _ = ctx.progress_tx.send(ProgressBatch {
-                        bytes: skipped_bytes,
-                        statements: skipped_indexes.len() as u64,
-                        worker,
-                        indexes: skipped_indexes,
-                    });
-                }
-                if to_run.is_empty() {
-                    continue;
-                }
-                if to_run.len() == 1 {
-                    let stmt = &to_run[0];
-                    if let Err(err) = execute_sql_retry(conn, &stmt.sql, &ctx.cancel).await {
-                        fail(
-                            &ctx.error,
-                            &ctx.cancel,
-                            statement_failure(stmt.index, stmt.line, err),
-                        );
-                        ctx.cancel_notify.notify_waiters();
-                        return;
-                    }
-                    let b = stmt.sql.len() as u64;
-                    let _ = ctx.progress_tx.send(ProgressBatch {
-                        bytes: b,
-                        statements: 1,
-                        worker,
-                        indexes: vec![(stmt.index, b)],
-                    });
-                } else {
-                    build_batch_sql(&mut batch_sql, &to_run, true);
-                    match execute_batch_retry(conn, &batch_sql, true, &ctx.cancel).await {
-                        Ok(_) => {
-                            let mut total_b = 0u64;
-                            let mut indexes = Vec::with_capacity(to_run.len());
-                            for stmt in &to_run {
-                                let b = stmt.sql.len() as u64;
-                                total_b += b;
-                                indexes.push((stmt.index, b));
-                            }
-                            let _ = ctx.progress_tx.send(ProgressBatch {
-                                bytes: total_b,
-                                statements: to_run.len() as u64,
-                                worker,
-                                indexes,
-                            });
-                        }
-                        Err(err) => {
-                            if is_connection_lost(&err) {
-                                fail(
-                                    &ctx.error,
-                                    &ctx.cancel,
-                                    statement_failure(to_run[0].index, to_run[0].line, err),
-                                );
-                                ctx.cancel_notify.notify_waiters();
-                                return;
-                            }
-                            let _ = conn.execute("ROLLBACK").await;
-                            for stmt in &to_run {
-                                if let Err(item_err) =
-                                    execute_sql_retry(conn, &stmt.sql, &ctx.cancel).await
-                                {
-                                    fail(
-                                        &ctx.error,
-                                        &ctx.cancel,
-                                        statement_failure(stmt.index, stmt.line, item_err),
-                                    );
-                                    ctx.cancel_notify.notify_waiters();
-                                    return;
-                                }
-                                let b = stmt.sql.len() as u64;
-                                let _ = ctx.progress_tx.send(ProgressBatch {
-                                    bytes: b,
-                                    statements: 1,
-                                    worker,
-                                    indexes: vec![(stmt.index, b)],
-                                });
-                            }
-                            if !is_retryable_deadlock(&err) {
-                                let batch_err =
-                                    statement_failure(to_run[0].index, to_run[0].line, err);
-                                fail(&ctx.error, &ctx.cancel, batch_err);
-                                ctx.cancel_notify.notify_waiters();
-                                return;
-                            }
-                        }
-                    }
-                }
+                run_batch(conn, &to_run, true, &mut batch_sql, &ctx.cancel, |stmts| {
+                    let _ = ctx.progress_tx.send(ProgressBatch::of(worker, stmts));
+                })
+                .await
             }
             PoppedBatch::Copy {
                 index,
                 line,
                 sql,
-                payload,
-                text_bytes,
+                mut chunk,
             } => {
                 if stop_requested(&ctx.error, &ctx.cancel, Some(line)) {
                     ctx.cancel_notify.notify_waiters();
                     return;
                 }
-                if ctx.skip_completed.contains(&index) {
+                let copied = match chunk.payload() {
+                    Ok(mut payload) => {
+                        if ctx.skip_completed.contains(&index) {
+                            drain_copy(&mut payload).map_err(|err| line_error(line, err).into())
+                        } else {
+                            execute_copy(conn, index, line, &sql, &mut payload, &ctx.cancel).await
+                        }
+                    }
+                    Err(err) => Err(line_error(line, err).into()),
+                };
+                copied.map(|bytes| {
                     let _ = ctx.progress_tx.send(ProgressBatch {
-                        bytes: text_bytes,
-                        statements: 1,
                         worker,
-                        indexes: vec![(index, text_bytes)],
+                        indexes: vec![(index, bytes)],
                     });
-                    continue;
-                }
-                match execute_copy_slices(
-                    conn,
-                    index,
-                    line,
-                    &sql,
-                    &payload,
-                    text_bytes,
-                    &ctx.cancel,
-                )
-                .await
-                {
-                    Ok(bytes) => {
-                        let _ = ctx.progress_tx.send(ProgressBatch {
-                            bytes,
-                            statements: 1,
-                            worker,
-                            indexes: vec![(index, bytes)],
-                        });
-                    }
-                    Err(err) => {
-                        fail(&ctx.error, &ctx.cancel, err);
-                        ctx.cancel_notify.notify_waiters();
-                        return;
-                    }
-                }
+                    ctx.queues.put_back(worker, chunk);
+                })
             }
+        };
+        if let Err(err) = result {
+            fail(&ctx.error, &ctx.cancel, err);
+            ctx.cancel_notify.notify_waiters();
+            return;
         }
-    }
-}
-
-async fn execute_copy_slices(
-    conn: &mut Conn,
-    index: usize,
-    line: usize,
-    sql: &str,
-    payload: &[Vec<u8>],
-    text_bytes: u64,
-    cancel: &AtomicBool,
-) -> Result<u64, LoadSqlError> {
-    let Conn::Postgres(pg) = conn else {
-        return Err(statement_failure(
-            index,
-            line,
-            "COPY FROM stdin only works with Postgres.".into(),
-        ));
-    };
-    let mut copy = match pg.copy_in_raw(sql).await {
-        Ok(copy) => copy,
-        Err(err) => return Err(statement_failure(index, line, describe_error(err))),
-    };
-    let mut batch = Vec::new();
-    for data in payload {
-        if cancel.load(Ordering::Relaxed) {
-            let _ = copy.abort("Import cancelled.".to_string()).await;
-            return Err(statement_failure(index, line, "Import cancelled.".into()));
-        }
-        batch.extend_from_slice(data);
-        if batch.len() >= COPY_SEND {
-            if let Err(err) = copy.send(batch.as_slice()).await {
-                let msg = describe_error(err);
-                let _ = copy.abort(msg.clone()).await;
-                return Err(statement_failure(index, line, msg));
-            }
-            batch.clear();
-        }
-    }
-    if !batch.is_empty() {
-        if cancel.load(Ordering::Relaxed) {
-            let _ = copy.abort("Import cancelled.".to_string()).await;
-            return Err(statement_failure(index, line, "Import cancelled.".into()));
-        }
-        if let Err(err) = copy.send(batch.as_slice()).await {
-            let message = describe_error(err);
-            let _ = copy.abort(message.clone()).await;
-            return Err(statement_failure(index, line, message));
-        }
-    }
-    match copy.finish().await {
-        Ok(_) => Ok(text_bytes),
-        Err(err) => Err(statement_failure(index, line, describe_error(err))),
     }
 }
 
 async fn exec_group<Report>(
     conn: &mut Conn,
     chunks: &[DataChunk],
-    run_preamble: bool,
     worker: usize,
     ctx: &RunCtx<'_, Report>,
 ) where
@@ -2708,17 +2790,6 @@ async fn exec_group<Report>(
     let track = lock(ctx.progress).track.clone();
     if let Some(track) = track {
         track.mark_running(worker);
-    }
-    if run_preamble {
-        for sql in ctx.preamble {
-            if stop_requested(ctx.error, ctx.cancel, None) {
-                return;
-            }
-            if let Err(err) = conn.execute(sql).await {
-                fail(ctx.error, ctx.cancel, format!("Worker setup failed: {err}"));
-                return;
-            }
-        }
     }
     for chunk in chunks {
         if exec_chunk(conn, ctx, chunk, worker).await.is_err() {
@@ -2734,8 +2805,6 @@ async fn exec_post<Report>(
     conn: &mut Conn,
     driver: Driver,
     workers: usize,
-    outer_tx: bool,
-    mut in_tx: bool,
     post: &[PlannedStmt],
     ctx: &RunCtx<'_, Report>,
 ) where
@@ -2751,9 +2820,9 @@ async fn exec_post<Report>(
         }
         let tx_end = is_tx_end(&stmt.sql);
         let skip_exec = ctx.skip_completed.contains(&stmt.index)
-            || (driver == Driver::Mysql
-                && (is_lock_or_unlock_tables(&stmt.sql) || is_mysql_tx_forbidden_set(&stmt.sql)))
-            || (tx_end && (outer_tx || workers > 1 || !in_tx || Some(pos) != last_tx_end));
+            || (driver == Driver::Mysql && is_lock_or_unlock_tables(&stmt.sql))
+            || (tx_end
+                && (workers > 1 || !ctx.in_tx.load(Ordering::Relaxed) || Some(pos) != last_tx_end));
         if !skip_exec {
             if let Err(err) = execute_sql_retry(conn, &stmt.sql, ctx.cancel).await {
                 fail(
@@ -2764,7 +2833,7 @@ async fn exec_post<Report>(
                 return;
             }
             if tx_end {
-                in_tx = false;
+                ctx.in_tx.store(false, Ordering::Relaxed);
             }
         }
         note_post_progress(ctx.progress, stmt.sql.len() as u64, stmt.index);
@@ -2813,83 +2882,14 @@ where
     if batch.is_empty() {
         return Ok(());
     }
-    if batch.len() == 1 {
-        let stmt = batch.pop().expect("single statement");
-        *batch_bytes = 0;
-        if let Err(err) = execute_sql_retry(conn, &stmt.sql, ctx.cancel).await {
-            fail(
-                ctx.error,
-                ctx.cancel,
-                statement_failure(stmt.index, stmt.line, err),
-            );
-            return Err(());
-        }
-        note_progress(ctx.progress, stmt.sql.len() as u64, stmt.index, worker);
-        return Ok(());
-    }
-
-    let wrap_tx = !ctx.in_transaction;
-    build_batch_sql(batch_sql, batch, wrap_tx);
-    match execute_batch_retry(conn, batch_sql, wrap_tx, ctx.cancel).await {
-        Ok(_) => {
-            let mut total_b = 0u64;
-            let mut indexes = Vec::with_capacity(batch.len());
-            for stmt in batch.drain(..) {
-                let b = stmt.sql.len() as u64;
-                total_b += b;
-                indexes.push((stmt.index, b));
-            }
-            *batch_bytes = 0;
-            note_progress_batch(
-                ctx.progress,
-                ProgressBatch {
-                    bytes: total_b,
-                    statements: indexes.len() as u64,
-                    worker,
-                    indexes,
-                },
-            );
-            Ok(())
-        }
-        Err(err) => {
-            if is_connection_lost(&err) {
-                fail(
-                    ctx.error,
-                    ctx.cancel,
-                    statement_failure(batch[0].index, batch[0].line, err),
-                );
-                batch.clear();
-                *batch_bytes = 0;
-                return Err(());
-            }
-            if wrap_tx {
-                let _ = conn.execute("ROLLBACK").await;
-            }
-            for stmt in batch.iter() {
-                if let Err(item_err) = execute_sql_retry(conn, &stmt.sql, ctx.cancel).await {
-                    fail(
-                        ctx.error,
-                        ctx.cancel,
-                        statement_failure(stmt.index, stmt.line, item_err),
-                    );
-                    batch.clear();
-                    *batch_bytes = 0;
-                    return Err(());
-                }
-                note_progress(ctx.progress, stmt.sql.len() as u64, stmt.index, worker);
-            }
-            if !is_retryable_deadlock(&err) {
-                let batch_err = statement_failure(batch[0].index, batch[0].line, err);
-                fail(ctx.error, ctx.cancel, batch_err);
-                batch.clear();
-                *batch_bytes = 0;
-                return Err(());
-            }
-            batch.clear();
-            *batch_bytes = 0;
-            Ok(())
-        }
-    }
+    let wrap = !ctx.in_tx.load(Ordering::Relaxed);
+    let result = run_batch(conn, batch, wrap, batch_sql, ctx.cancel, |stmts| {
+        note_progress_batch(ctx.progress, ProgressBatch::of(worker, stmts));
+    })
+    .await;
+    batch.clear();
+    *batch_bytes = 0;
+    result.map_err(|err| fail(ctx.error, ctx.cancel, err))
 }
 
 async fn exec_reader<Report, R>(
@@ -3131,7 +3131,8 @@ struct RunCtx<'a, Report> {
     error: &'a Mutex<Option<LoadSqlError>>,
     progress: &'a Mutex<ProgressState<Report>>,
     skip_completed: &'a HashSet<usize>,
-    in_transaction: bool,
+    /// Whether the coordinator is inside a transaction the file opened, which batches must not commit or roll back.
+    in_tx: AtomicBool,
 }
 
 struct ProgressState<Report> {
@@ -3241,9 +3242,11 @@ fn fail(
     cancel: &AtomicBool,
     failure: impl Into<LoadSqlError>,
 ) {
+    let failure = failure.into();
     let mut slot = lock(error);
-    if slot.is_none() {
-        *slot = Some(failure.into());
+    match &mut *slot {
+        None => *slot = Some(failure),
+        Some(existing) => existing.absorb(failure),
     }
     cancel.store(true, Ordering::Relaxed);
 }
@@ -3298,7 +3301,7 @@ fn line_error(line: usize, message: impl Into<String>) -> String {
 fn statement_failure(index: usize, line: usize, message: String) -> LoadSqlError {
     if is_connection_lost(&message) {
         LoadSqlError::LostConnection(LoadLostConnection {
-            in_flight_index: index,
+            in_flight: vec![index],
             source: message,
         })
     } else {
@@ -3337,7 +3340,6 @@ fn assign_workers(chunks: &[DataChunk], workers: usize) -> Vec<Vec<DataChunk>> {
     }
 
     struct TableWeight {
-        table_id: usize,
         first_idx: usize,
         lines: u64,
         statements: u64,
@@ -3346,7 +3348,7 @@ fn assign_workers(chunks: &[DataChunk], workers: usize) -> Vec<Vec<DataChunk>> {
     }
 
     let mut tables: Vec<TableWeight> = Vec::new();
-    let mut table_pos: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut table_pos: HashMap<usize, usize> = HashMap::new();
     for (idx, chunk) in chunks.iter().enumerate() {
         if let Some(&pos) = table_pos.get(&chunk.table_id) {
             let entry = &mut tables[pos];
@@ -3358,7 +3360,6 @@ fn assign_workers(chunks: &[DataChunk], workers: usize) -> Vec<Vec<DataChunk>> {
             let pos = tables.len();
             table_pos.insert(chunk.table_id, pos);
             tables.push(TableWeight {
-                table_id: chunk.table_id,
                 first_idx: idx,
                 lines: chunk.lines,
                 statements: chunk.statements,
@@ -3396,7 +3397,6 @@ fn assign_workers(chunks: &[DataChunk], workers: usize) -> Vec<Vec<DataChunk>> {
 
     let mut order: Vec<usize> = (0..tables.len()).collect();
     order.sort_by(|&a, &b| {
-        let _ = (tables[a].table_id, tables[b].table_id);
         (tables[b].lines, tables[b].statements, tables[b].bytes)
             .cmp(&(tables[a].lines, tables[a].statements, tables[a].bytes))
             .then_with(|| tables[a].first_idx.cmp(&tables[b].first_idx))
@@ -3421,6 +3421,7 @@ fn assign_workers(chunks: &[DataChunk], workers: usize) -> Vec<Vec<DataChunk>> {
     groups
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Pre,
@@ -3436,6 +3437,7 @@ enum Decision {
     Skip,
 }
 
+#[cfg(test)]
 impl Decision {
     fn phase(self) -> Option<Phase> {
         match self {
@@ -3447,6 +3449,7 @@ impl Decision {
     }
 }
 
+#[cfg(test)]
 fn decide_phase(sql: &str, seen_data: bool, workers: usize) -> Decision {
     decide_phase_with_table(sql, seen_data, workers).0
 }
@@ -3482,7 +3485,10 @@ fn decide_phase_with_table(
     if first.eq_ignore_ascii_case("END") && is_bare_end(sql) {
         return (Decision::Post, None);
     }
-    if first.eq_ignore_ascii_case("DROP") || first.eq_ignore_ascii_case("TRUNCATE") {
+    if first.eq_ignore_ascii_case("DROP") {
+        return (drop_phase(sql, seen_data), None);
+    }
+    if first.eq_ignore_ascii_case("TRUNCATE") {
         return (Decision::Pre, None);
     }
     if first.eq_ignore_ascii_case("COMMENT") {
@@ -3510,6 +3516,29 @@ fn decide_phase_with_table(
         return (alter_phase(sql, seen_data), None);
     }
     (contextual(seen_data), None)
+}
+
+/// Dropping an object that phase 3 may create again keeps its place before that `CREATE`.
+fn drop_phase(sql: &str, seen_data: bool) -> Decision {
+    const LATER: [&str; 9] = [
+        "VIEW",
+        "MATERIALIZED",
+        "TRIGGER",
+        "INDEX",
+        "FUNCTION",
+        "PROCEDURE",
+        "EVENT",
+        "RULE",
+        "POLICY",
+    ];
+    let mut words = Words::new(sql);
+    words.next();
+    match words.next() {
+        Some(kind) if LATER.iter().any(|later| kind.eq_ignore_ascii_case(later)) => {
+            contextual(seen_data)
+        }
+        _ => Decision::Pre,
+    }
 }
 
 fn contextual(seen_data: bool) -> Decision {
@@ -3624,8 +3653,6 @@ fn create_phase(sql: &str, seen_data: bool) -> Decision {
             || word.eq_ignore_ascii_case("TYPE")
             || word.eq_ignore_ascii_case("DOMAIN")
             || word.eq_ignore_ascii_case("EXTENSION")
-            || word.eq_ignore_ascii_case("FUNCTION")
-            || word.eq_ignore_ascii_case("PROCEDURE")
             || word.eq_ignore_ascii_case("SCHEMA")
             || word.eq_ignore_ascii_case("DATABASE")
         {
@@ -3672,6 +3699,9 @@ fn alter_phase(sql: &str, seen_data: bool) -> Decision {
     };
     if second.eq_ignore_ascii_case("SEQUENCE") {
         return Decision::Pre;
+    }
+    if second.eq_ignore_ascii_case("VIEW") || second.eq_ignore_ascii_case("MATERIALIZED") {
+        return Decision::Post;
     }
     let mut buf = [""; 64];
     buf[0] = first;
@@ -4079,10 +4109,6 @@ struct Bin {
 }
 
 impl Bin {
-    fn empty() -> Self {
-        Self::with_table(0)
-    }
-
     fn with_table(table_id: usize) -> Self {
         Self {
             table_id,
@@ -4115,70 +4141,128 @@ fn select_bin(bins: &mut Vec<Bin>, workers: usize, target: u64) -> usize {
     }
 }
 
-/// Collects all data statements targeting the same table into that table's own
-/// bin during Phase 1 when `workers > 1` so multiple connections never contend
-/// on the same table's auto-increment or index locks, and so each table's total
-/// lines to import can be counted before [`assign_workers`] delegates tables to
-/// worker threads.
-fn select_table_bin(
-    bins: &mut Vec<Bin>,
-    table_bins: &mut std::collections::HashMap<String, usize>,
-    sql: &str,
+/**
+ * Phase 1's copy of the data statements, written to chunks for phase 2.
+ *
+ * With more than one worker, each table's statements go to that table's own
+ * chunk, so one connection loads a table in file order and connections never
+ * contend on one table's auto-increment or index locks. With `split_tables`,
+ * a large table is cut into several chunks that workers may share.
+ */
+struct Spool {
+    bins: Vec<Bin>,
+    tables: HashMap<String, usize>,
+    last: Option<usize>,
     workers: usize,
-    target: u64,
-) -> usize {
-    let table = (workers > 1).then(|| data_target_table(sql)).flatten();
-    select_table_bin_with_table(bins, table_bins, table, workers, target)
+    split_tables: bool,
 }
 
-fn select_table_bin_with_table(
-    bins: &mut Vec<Bin>,
-    table_bins: &mut std::collections::HashMap<String, usize>,
-    table: Option<String>,
-    workers: usize,
-    target: u64,
-) -> usize {
-    if workers <= 1 {
-        return select_bin(bins, workers, target);
-    }
-    if let Some(table) = table {
-        if let Some(slot) = table_bins.get_mut(table.as_str()) {
-            let idx = *slot;
-            if idx < bins.len()
-                && bins[idx].bytes < target
-                && bins[idx].statements < TABLE_CHUNK_STMTS
-            {
-                return idx;
-            }
-            let table_id = bins.get(idx).map_or(bins.len(), |bin| bin.table_id);
-            let new_idx = bins.len();
-            bins.push(Bin::with_table(table_id));
-            *slot = new_idx;
-            return new_idx;
+impl Spool {
+    fn new(workers: usize, split_tables: bool) -> Self {
+        Self {
+            bins: Vec::new(),
+            tables: HashMap::new(),
+            last: None,
+            workers: workers.max(1),
+            split_tables,
         }
-        let idx = bins.len();
-        bins.push(Bin::with_table(idx));
-        table_bins.insert(table, idx);
-        return idx;
     }
-    let idx = bins.len();
-    bins.push(Bin::with_table(idx));
-    idx
-}
 
-fn suspend_previous_bin(
-    bins: &mut [Bin],
-    last_bin: &mut Option<usize>,
-    next_bin: usize,
-) -> Result<(), String> {
-    if let Some(prev) = last_bin.replace(next_bin) {
-        if prev != next_bin {
-            if let Some(prev_file) = bins.get_mut(prev).and_then(|bin| bin.file.as_mut()) {
-                prev_file.suspend_disk()?;
+    fn bin_for(&mut self, table: Option<String>) -> usize {
+        if self.workers <= 1 {
+            return select_bin(&mut self.bins, 1, TABLE_CHUNK_BYTES);
+        }
+        let Some(table) = table else {
+            let idx = self.bins.len();
+            self.bins.push(Bin::with_table(idx));
+            return idx;
+        };
+        let Some(slot) = self.tables.get_mut(table.as_str()) else {
+            let idx = self.bins.len();
+            self.bins.push(Bin::with_table(idx));
+            self.tables.insert(table, idx);
+            return idx;
+        };
+        let bin = &self.bins[*slot];
+        let full = bin.bytes >= TABLE_CHUNK_BYTES || bin.statements >= TABLE_CHUNK_STMTS;
+        if !self.split_tables || !full {
+            return *slot;
+        }
+        let table_id = bin.table_id;
+        *slot = self.bins.len();
+        self.bins.push(Bin::with_table(table_id));
+        *slot
+    }
+
+    /// The bin for `table`, with its file open. Flushes the last one used, so only one disk chunk holds a buffer at a time.
+    fn open(&mut self, table: Option<String>) -> Result<usize, String> {
+        let idx = self.bin_for(table);
+        if let Some(prev) = self.last.replace(idx) {
+            if prev != idx {
+                if let Some(file) = self.bins[prev].file.as_mut() {
+                    file.suspend_disk()?;
+                }
             }
         }
+        self.bins[idx].file.get_or_insert_with(ChunkFile::new);
+        Ok(idx)
     }
-    Ok(())
+
+    /// Spools one data statement and returns its size.
+    fn push_sql(
+        &mut self,
+        index: usize,
+        stmt: &Statement,
+        table: Option<String>,
+        temps: &mut TempFiles,
+    ) -> Result<u64, String> {
+        let idx = self.open(table)?;
+        let bin = &mut self.bins[idx];
+        let file = bin.file.as_mut().expect("data chunk");
+        file.reserve(stmt.sql.len() + 32, temps)?;
+        write_sql_record(file, index, stmt.line, &stmt.sql)?;
+        let text_bytes = stmt.sql.len() as u64;
+        bin.lines += stmt.line_span();
+        bin.bytes += text_bytes;
+        bin.statements += 1;
+        Ok(text_bytes)
+    }
+
+    /// Spools a `COPY ... FROM stdin` and the rows `stream` holds after it, and returns their size.
+    fn push_copy<R: BufRead>(
+        &mut self,
+        index: usize,
+        stmt: &Statement,
+        stream: &mut Stream<R>,
+        cancel: &AtomicBool,
+        temps: &mut TempFiles,
+    ) -> Result<u64, LoadSqlError> {
+        let table = (self.workers > 1)
+            .then(|| data_target_table(&stmt.sql))
+            .flatten();
+        let idx = self.open(table)?;
+        let bin = &mut self.bins[idx];
+        let file = bin.file.as_mut().expect("data chunk");
+        file.reserve(stmt.sql.len() + 32, temps)?;
+        write_copy_start(file, index, stmt.line, &stmt.sql)?;
+        let (payload_bytes, copy_lines, _) = stream
+            .consume_copy(cancel, |chunk| {
+                file.reserve(chunk.len() + 16, temps)?;
+                write_copy_data(file, chunk)
+            })
+            .map_err(|err| LoadSqlError::from(line_error(stmt.line, err)))?;
+        let text_bytes = stmt.sql.len() as u64 + payload_bytes;
+        write_copy_end(file, text_bytes)?;
+        bin.lines += stmt.line_span() + copy_lines;
+        bin.bytes += text_bytes;
+        bin.statements += 1;
+        Ok(text_bytes)
+    }
+
+    /// The finished chunks, and how many statements each worker starts with.
+    fn finish(self) -> Result<(Vec<DataChunk>, Vec<u64>), String> {
+        finish_bins(self.bins, self.workers)
+    }
 }
 
 fn is_insert_modifier(word: &str) -> bool {
@@ -4522,16 +4606,11 @@ fn ddl_own_table(sql: &str) -> Option<String> {
 /// worker connections can execute independent table DDL in parallel while
 /// keeping all statements for the same table in order on the same worker.
 fn pre_target_table(driver: Driver, sql: &str) -> Option<String> {
-    if is_tx_begin(sql) || is_lock_or_unlock_tables(sql) || is_mysql_tx_forbidden_set(sql) {
+    if is_tx_begin(sql) || is_lock_or_unlock_tables(sql) {
         return None;
     }
-    let class = super::resume::classify(driver, sql);
-    if class.session
-        || !matches!(
-            class.tx,
-            super::resume::Tx::None | super::resume::Tx::ImplicitCommit
-        )
-    {
+    let class = resume::classify(driver, sql);
+    if class.session || !matches!(class.tx, Tx::None | Tx::ImplicitCommit) {
         return None;
     }
     let mut words = Words::new(sql);
@@ -4695,12 +4774,12 @@ struct ChunkFile {
 }
 
 impl ChunkFile {
-    fn create(_temps: &mut TempFiles) -> Result<Self, String> {
+    fn new() -> Self {
         let mut buf = Vec::with_capacity(4096);
         buf.extend_from_slice(MAGIC);
-        Ok(Self {
+        Self {
             writer: ChunkWriter::Memory(buf),
-        })
+        }
     }
 
     fn reserve(&mut self, bytes: usize, temps: &mut TempFiles) -> Result<(), String> {
@@ -4784,32 +4863,6 @@ impl Write for ChunkFile {
             } => writer.flush(),
         }
     }
-}
-
-fn ensure_file(bin: &mut Bin, temps: &mut TempFiles) -> Result<(), String> {
-    if bin.file.is_none() {
-        bin.file = Some(ChunkFile::create(temps)?);
-    }
-    Ok(())
-}
-
-fn write_sequence(
-    slot: &mut Option<ChunkFile>,
-    temps: &mut TempFiles,
-    index: usize,
-    line: usize,
-    sql: &str,
-) -> Result<(), String> {
-    if slot.is_none() {
-        *slot = Some(ChunkFile::create(temps)?);
-    }
-    let file = slot.as_mut().expect("phase chunk");
-    file.reserve(sql.len() + 32, temps)?;
-    write_sql_record(file, index, line, sql)
-}
-
-fn finish_slot(slot: Option<ChunkFile>) -> Result<Option<DataChunk>, String> {
-    slot.map(|file| file.finish(0, 0, 0)).transpose()
 }
 
 fn finish_bins(bins: Vec<Bin>, workers: usize) -> Result<(Vec<DataChunk>, Vec<u64>), String> {
@@ -4946,17 +4999,6 @@ fn read_vec(reader: &mut impl Read) -> Result<Vec<u8>, String> {
 fn read_sql(reader: &mut impl Read) -> Result<String, String> {
     let bytes = read_vec(reader)?;
     String::from_utf8(bytes).map_err(|_| "The import chunk is not valid UTF-8.".to_string())
-}
-
-fn read_sql_into(reader: &mut impl Read, buf: &mut Vec<u8>) -> Result<(), String> {
-    let len = usize::try_from(read_u64(reader)?)
-        .map_err(|_| "The import chunk is too large.".to_string())?;
-    buf.resize(len, 0);
-    if len > 0 {
-        read_exact(reader, buf)?;
-    }
-    std::str::from_utf8(buf).map_err(|_| "The import chunk is not valid UTF-8.".to_string())?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -5449,7 +5491,7 @@ UNLOCK TABLES;
         let err = statement_failure(7, 12, message.clone());
         match err {
             LoadSqlError::LostConnection(lost) => {
-                assert_eq!(lost.in_flight_index, 7);
+                assert_eq!(lost.in_flight, vec![7]);
                 assert_eq!(lost.source, message);
             }
             LoadSqlError::Failed(message) => panic!("collapsed into {message}"),
@@ -5488,24 +5530,76 @@ UNLOCK TABLES;
         out
     }
 
-    fn planned_statements(driver: Driver, script: &str, workers: usize) -> Vec<(usize, String)> {
+    /// Phase 1's split of a file, routed the way the loader routes it, without running anything.
+    struct Spooled {
+        pre: Vec<(usize, String)>,
+        data: Vec<DataChunk>,
+        data_statements: Vec<u64>,
+        post: Vec<(usize, String)>,
+    }
+
+    fn spool_dump<R: BufRead>(
+        reader: R,
+        driver: Driver,
+        workers: usize,
+        split_tables: bool,
+        cancel: &AtomicBool,
+        temps: &mut TempFiles,
+    ) -> Result<Spooled, String> {
+        let mut stream = Stream::new(reader, driver);
+        let mut spool = Spool::new(workers, split_tables);
+        let mut pre = Vec::new();
+        let mut post = Vec::new();
+        let mut seen_data = false;
+        let mut next_index = 0;
+        while let Some(stmt) = stream.next_statement(cancel)? {
+            let index = next_index;
+            next_index += 1;
+            if driver == Driver::Postgres && is_copy_from_stdin(&stmt.sql) {
+                spool
+                    .push_copy(index, &stmt, &mut stream, cancel, temps)
+                    .map_err(|err| err.to_string())?;
+                seen_data = true;
+                continue;
+            }
+            let (decision, table) = decide_phase_with_table(&stmt.sql, seen_data, workers);
+            match decision {
+                Decision::Skip => {}
+                Decision::Data => {
+                    spool.push_sql(index, &stmt, table, temps)?;
+                    seen_data = true;
+                }
+                Decision::Pre => pre.push((index, stmt.sql)),
+                Decision::Post => post.push((index, stmt.sql)),
+            }
+        }
+        let (data, data_statements) = spool.finish()?;
+        Ok(Spooled {
+            pre,
+            data,
+            data_statements,
+            post,
+        })
+    }
+
+    fn spool(driver: Driver, script: &str, workers: usize, split_tables: bool) -> Spooled {
         let mut temps = TempFiles::default();
-        let plan = plan_dump(
+        spool_dump(
             Cursor::new(script.as_bytes()),
             driver,
             workers,
+            split_tables,
             &AtomicBool::new(false),
             &mut temps,
         )
-        .unwrap();
-        let mut all = Vec::new();
-        for path in plan
-            .pre
-            .iter()
-            .chain(plan.data.iter())
-            .chain(plan.post.iter())
-        {
-            all.extend(read_chunk_statements(path));
+        .unwrap()
+    }
+
+    fn planned_statements(driver: Driver, script: &str, workers: usize) -> Vec<(usize, String)> {
+        let plan = spool(driver, script, workers, false);
+        let mut all: Vec<(usize, String)> = plan.pre.into_iter().chain(plan.post).collect();
+        for chunk in &plan.data {
+            all.extend(read_chunk_statements(chunk));
         }
         all.sort_by_key(|(index, _)| *index);
         all
@@ -5625,7 +5719,7 @@ UNLOCK TABLES;
             cancel: cancel.clone(),
         });
         let mut temps = TempFiles::default();
-        let err = plan_dump(reader, Driver::Mysql, 1, &cancel, &mut temps)
+        let err = spool_dump(reader, Driver::Mysql, 1, false, &cancel, &mut temps)
             .err()
             .expect("cancelled during multiline statement");
         assert!(err.contains("Import cancelled."), "{err}");
@@ -5644,7 +5738,7 @@ UNLOCK TABLES;
             cancel: cancel.clone(),
         });
         let mut temps = TempFiles::default();
-        let err = plan_dump(reader, Driver::Postgres, 1, &cancel, &mut temps)
+        let err = spool_dump(reader, Driver::Postgres, 1, false, &cancel, &mut temps)
             .err()
             .expect("cancelled during COPY data");
         assert_eq!(err, "Line 1: Import cancelled.");
@@ -5668,7 +5762,7 @@ INSERT INTO users VALUES (2, 'bob');
 CREATE INDEX idx_posts_user ON posts (user_id);
 "#;
         let cancel = AtomicBool::new(false);
-        let track = LoadTrack::planning(2);
+        let track = LoadTrack::planning(1);
         let state = Mutex::new(ProgressState {
             statements: 0,
             bytes: 0,
@@ -5683,17 +5777,16 @@ CREATE INDEX idx_posts_user ON posts (user_id);
             error: &Mutex::new(None),
             progress: &state,
             skip_completed: &skip,
-            in_transaction: false,
+            in_tx: AtomicBool::new(false),
         };
         let mut temps = TempFiles::default();
-        let mut open_worker =
-            || async { Err::<Conn, String>("SQLite must not open extra workers".into()) };
         let plan = run_phase1(
             &mut conn,
             BufReader::new(Cursor::new(script.as_bytes())),
             Driver::Sqlite,
-            2,
-            &mut open_worker,
+            1,
+            false,
+            Vec::new(),
             &ctx,
             &mut temps,
         )
@@ -5702,9 +5795,8 @@ CREATE INDEX idx_posts_user ON posts (user_id);
 
         // Phase 1 already executed both CREATE TABLE statements on the coordinator
         // and kept data chunks in memory without touching disk.
-        assert_eq!(plan.pre_statements, 2);
         assert!(temps.paths.is_empty());
-        assert_eq!(plan.data_statements, vec![2, 1]);
+        assert_eq!(plan.data_statements, vec![3]);
         assert_eq!(plan.post.len(), 1);
         assert!(plan.post[0].sql.contains("CREATE INDEX"));
 
@@ -5746,15 +5838,7 @@ CREATE INDEX idx_posts_user ON posts (user_id);
             script.push_str(&format!("CREATE INDEX idx_t{i} ON t{i} (id);\n"));
         }
 
-        let mut temps = TempFiles::default();
-        let plan = plan_dump(
-            Cursor::new(script.as_bytes()),
-            Driver::Mysql,
-            4,
-            &AtomicBool::new(false),
-            &mut temps,
-        )
-        .unwrap();
+        let plan = spool(Driver::Mysql, &script, 4, false);
 
         // 16 INSERTs across 4 workers -> 4 INSERTs per worker, even though the first INSERT is 4 KB.
         assert_eq!(plan.data_statements, vec![4, 4, 4, 4]);
@@ -5773,7 +5857,7 @@ CREATE INDEX idx_posts_user ON posts (user_id);
     }
 
     #[test]
-    fn same_table_inserts_route_to_same_worker_and_idle_workers_can_steal() {
+    fn same_table_inserts_route_to_same_worker_and_idle_workers_take_whole_tables() {
         let script = r#"
 INSERT INTO `users` VALUES (1);
 INSERT INTO `users` VALUES (2);
@@ -5781,48 +5865,105 @@ INSERT INTO `users` VALUES (3);
 INSERT INTO `posts` VALUES (10);
 INSERT INTO `posts` VALUES (11);
 "#;
-        let mut temps = TempFiles::default();
-        let plan = plan_dump(
-            Cursor::new(script.as_bytes()),
-            Driver::Mysql,
-            2,
-            &AtomicBool::new(false),
-            &mut temps,
-        )
-        .unwrap();
+        let plan = spool(Driver::Mysql, script, 2, false);
 
         // All 3 `users` INSERTs stay on worker 0 and both `posts` INSERTs stay on worker 1.
         assert_eq!(plan.data_statements, vec![3, 2]);
 
         let groups = assign_workers(&plan.data, 2);
-        let queues = SharedQueues::new(&groups).unwrap();
+        let queues = SharedQueues::new(&groups, false).unwrap();
         let track = LoadTrack::planning(2);
         track.install(&plan.data_statements);
 
-        // Worker 1 finishes its 2 `posts` statements, then steals the 3rd `users` statement from worker 0.
-        assert!(queues.pop(1, Some(&track)).unwrap().is_some());
-        track.bump(1);
-        assert!(queues.pop(1, Some(&track)).unwrap().is_some());
-        track.bump(1);
-        assert!(queues.pop(0, Some(&track)).unwrap().is_some());
-        track.bump(0);
-        assert!(queues.pop(0, Some(&track)).unwrap().is_some());
-        track.bump(0);
-        // Now worker 1 is out of its own queue and steals the remaining statement from worker 0.
-        assert!(queues.pop(1, Some(&track)).unwrap().is_some());
-        track.bump(1);
-        assert!(queues.pop(0, Some(&track)).unwrap().is_none());
-        assert!(queues.pop(1, Some(&track)).unwrap().is_none());
+        // Worker 1 runs its own table, then takes `users`, which worker 0 hasn't started.
+        let Some(PoppedBatch::Sql(posts)) = queues.pop_batch(1, Some(&track)).unwrap() else {
+            panic!("expected the posts batch");
+        };
+        assert_eq!(posts.len(), 2);
+        let Some(PoppedBatch::Sql(users)) = queues.pop_batch(1, Some(&track)).unwrap() else {
+            panic!("expected the users batch");
+        };
+        assert_eq!(users.len(), 3);
+        assert!(queues.pop_batch(0, Some(&track)).unwrap().is_none());
 
         let work = track.snapshot();
-        assert_eq!(work.statements, 5);
         assert_eq!(work.total_statements, 5);
-        assert_eq!(work.workers[0].statements, 2);
-        assert_eq!(work.workers[0].total_statements, 2);
-        assert_eq!(work.workers[0].state, LoadWorkerState::Done);
-        assert_eq!(work.workers[1].statements, 3);
-        assert_eq!(work.workers[1].total_statements, 3);
-        assert_eq!(work.workers[1].state, LoadWorkerState::Done);
+        assert_eq!(work.workers[0].total_statements, 0);
+        assert_eq!(work.workers[1].total_statements, 5);
+    }
+
+    #[test]
+    fn a_started_table_stays_on_its_worker_unless_tables_split() {
+        let mut script = String::new();
+        for i in 0..(BATCH_MAX_STMTS * 2) {
+            script.push_str(&format!("INSERT INTO `users` VALUES ({i});\n"));
+        }
+        script.push_str("INSERT INTO `posts` VALUES (1);\n");
+        for split_tables in [false, true] {
+            let plan = spool(Driver::Mysql, &script, 2, split_tables);
+            let groups = assign_workers(&plan.data, 2);
+            let queues = SharedQueues::new(&groups, split_tables).unwrap();
+            let users = groups
+                .iter()
+                .position(|group| group.iter().any(|chunk| chunk.statements > 1))
+                .unwrap();
+            let other = 1 - users;
+            assert!(queues.pop_batch(users, None).unwrap().is_some());
+            assert!(queues.pop_batch(other, None).unwrap().is_some());
+            // Worker `other` is out of work, and `users` is partway through its only chunk.
+            let stolen = queues.pop_batch(other, None).unwrap();
+            assert_eq!(
+                stolen.is_some(),
+                split_tables,
+                "split_tables: {split_tables}"
+            );
+        }
+    }
+
+    #[test]
+    fn copy_records_stream_from_the_chunk_and_hand_it_back() {
+        let mut bytes = Vec::new();
+        write_all(&mut bytes, MAGIC).unwrap();
+        write_copy_start(&mut bytes, 0, 1, "COPY t (id) FROM stdin").unwrap();
+        write_copy_data(&mut bytes, b"1\n2\n").unwrap();
+        write_copy_end(&mut bytes, 26).unwrap();
+        write_sql_record(&mut bytes, 1, 5, "INSERT INTO t VALUES (3)").unwrap();
+        let chunk = DataChunk {
+            table_id: 0,
+            source: ChunkSource::Memory(Arc::from(bytes)),
+            lines: 5,
+            statements: 2,
+            bytes: 50,
+        };
+        let queues = SharedQueues::new(&[vec![chunk]], false).unwrap();
+        let Some(PoppedBatch::Copy {
+            index,
+            sql,
+            mut chunk,
+            ..
+        }) = queues.pop_batch(0, None).unwrap()
+        else {
+            panic!("expected the COPY");
+        };
+        assert_eq!((index, sql.as_str()), (0, "COPY t (id) FROM stdin"));
+        // No other worker can take the rest of the chunk while its COPY streams.
+        assert!(queues.pop_batch(0, None).unwrap().is_none());
+        let mut payload = chunk.payload().unwrap();
+        let mut rows = Vec::new();
+        loop {
+            match read_tag(&mut payload).unwrap() {
+                Some(TAG_DATA) => rows.extend(read_vec(&mut payload).unwrap()),
+                Some(TAG_END) => break,
+                other => panic!("unexpected tag {other:?}"),
+            }
+        }
+        assert_eq!(read_u64(&mut payload).unwrap(), 26);
+        assert_eq!(rows, b"1\n2\n");
+        queues.put_back(0, chunk);
+        let Some(PoppedBatch::Sql(rest)) = queues.pop_batch(0, None).unwrap() else {
+            panic!("expected the INSERT after the COPY");
+        };
+        assert_eq!(rest[0].index, 1);
     }
 
     #[tokio::test]
@@ -5853,11 +5994,15 @@ COMMIT;
         let cancel = AtomicBool::new(false);
         let track = LoadTrack::planning(1);
         let mut completed = Vec::new();
-        load_sql_tracked(
+        load_sql(
             &mut conn,
             Driver::Sqlite,
             BufReader::new(Cursor::new(script.as_bytes())),
-            4, // Clamped to 1 for SQLite so open_worker is never called
+            // Clamped to 1 for SQLite so open_worker is never called
+            LoadOptions {
+                workers: 4,
+                split_tables: false,
+            },
             || async { Err::<Conn, String>("SQLite must not open extra workers".into()) },
             &cancel,
             |progress| {
@@ -5867,7 +6012,7 @@ COMMIT;
             },
             std::iter::empty::<&str>(),
             &HashSet::new(),
-            track.clone(),
+            Some(track.clone()),
         )
         .await
         .unwrap();
@@ -5950,18 +6095,21 @@ COMMIT;
             Decision::Post
         );
 
-        // Verify MySQL transaction-forbidden SETs and LOCK/UNLOCK TABLES are detected
-        assert!(is_mysql_tx_forbidden_set("SET @@SESSION.SQL_LOG_BIN= 0"));
-        assert!(is_mysql_tx_forbidden_set(
-            "/*!40101 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN */"
-        ));
-        assert!(is_mysql_tx_forbidden_set(
+        // Verify GTID SETs, which extra workers don't repeat, and LOCK/UNLOCK TABLES are detected
+        assert!(is_mysql_gtid_set(
             "SET @@GLOBAL.GTID_PURGED=/*!80000 '+'*/ 'abc'"
         ));
-        assert!(!is_mysql_tx_forbidden_set(
-            "SET @MYSQLDUMP_TEMP_LOG_BIN = @@SESSION.SQL_LOG_BIN"
+        assert!(is_mysql_gtid_set("SET @@SESSION.GTID_NEXT= 'AUTOMATIC'"));
+        assert!(!is_mysql_gtid_set("SET @@SESSION.SQL_LOG_BIN= 0"));
+        assert!(!is_mysql_gtid_set("SET FOREIGN_KEY_CHECKS=0"));
+        assert!(replays_on_workers(
+            Driver::Mysql,
+            "SET @@SESSION.SQL_LOG_BIN= 0"
         ));
-        assert!(!is_mysql_tx_forbidden_set("SET FOREIGN_KEY_CHECKS=0"));
+        assert!(!replays_on_workers(
+            Driver::Mysql,
+            "SET @@GLOBAL.GTID_PURGED=/*!80000 '+'*/ 'abc'"
+        ));
         assert!(is_lock_or_unlock_tables("LOCK TABLES `users` WRITE"));
         assert!(is_lock_or_unlock_tables("UNLOCK TABLES"));
     }
@@ -5992,11 +6140,14 @@ COMMIT;
         let report_track = track.clone();
         let mut phase2_snapshots = Vec::new();
         let mut past_phase1 = false;
-        load_sql_tracked(
+        load_sql(
             &mut conn,
             Driver::Sqlite,
             BufReader::new(Cursor::new(script.as_bytes())),
-            1,
+            LoadOptions {
+                workers: 1,
+                split_tables: false,
+            },
             || async { Err::<Conn, String>("unused".into()) },
             &cancel,
             |progress| {
@@ -6016,7 +6167,7 @@ COMMIT;
             },
             std::iter::empty::<&str>(),
             &HashSet::new(),
-            track.clone(),
+            Some(track.clone()),
         )
         .await
         .unwrap();
@@ -6032,63 +6183,6 @@ COMMIT;
             assert!(stmt_idx.unwrap() >= 6);
             assert_eq!((done, total, worker_done, worker_total), (3, 3, 3, 3));
         }
-    }
-
-    #[tokio::test]
-    async fn outer_transaction_skips_nested_begin_commit_and_honors_sqlite_foreign_keys_off() {
-        use sqlx::Connection;
-
-        let mut conn = Conn::Sqlite(
-            sqlx::SqliteConnection::connect("sqlite::memory:")
-                .await
-                .unwrap(),
-        );
-        conn.execute("PRAGMA foreign_keys = ON").await.unwrap();
-
-        // Out-of-order child -> parent dump with its own BEGIN TRANSACTION / COMMIT
-        let script = r#"
-PRAGMA foreign_keys = OFF;
-BEGIN TRANSACTION;
-CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id));
-INSERT INTO posts VALUES (10, 1);
-CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
-INSERT INTO users VALUES (1, 'alice');
-COMMIT;
-"#;
-
-        // Simulate `load_in_transaction`: disable foreign_keys before BEGIN, then commit at the end
-        conn.execute("PRAGMA foreign_keys = OFF").await.unwrap();
-        conn.execute("BEGIN").await.unwrap();
-        let cancel = AtomicBool::new(false);
-        let track = LoadTrack::planning(1);
-        load_sql_tracked_in_tx(
-            &mut conn,
-            Driver::Sqlite,
-            BufReader::new(Cursor::new(script.as_bytes())),
-            1,
-            || async { Err::<Conn, String>("unused".into()) },
-            &cancel,
-            |_progress| {},
-            std::iter::empty::<&str>(),
-            &HashSet::new(),
-            true,
-            track,
-        )
-        .await
-        .unwrap();
-        // Outer transaction is still active because the dump's inner `COMMIT;` was skipped
-        conn.execute("COMMIT").await.unwrap();
-
-        let count = conn
-            .run(
-                "SELECT COUNT(*) FROM posts JOIN users ON users.id = posts.user_id",
-                1,
-                None,
-            )
-            .await
-            .unwrap()
-            .text_rows();
-        assert_eq!(count[0][0].as_deref(), Some("1"));
     }
 
     #[test]
@@ -6114,15 +6208,7 @@ COMMIT;
             script.push_str(&format!("  ({i}){term}"));
         }
 
-        let mut temps = TempFiles::default();
-        let plan = plan_dump(
-            Cursor::new(script.as_bytes()),
-            Driver::Mysql,
-            2,
-            &AtomicBool::new(false),
-            &mut temps,
-        )
-        .unwrap();
+        let plan = spool(Driver::Mysql, &script, 2, false);
 
         // Each table gets its own chunk in Phase 1 with exact line-range weights.
         assert_eq!(plan.data.len(), 3);
@@ -6147,14 +6233,7 @@ COMMIT;
                 even_script.push_str(&format!("INSERT INTO {table} VALUES ({i});\n"));
             }
         }
-        let plan_even = plan_dump(
-            Cursor::new(even_script.as_bytes()),
-            Driver::Mysql,
-            2,
-            &AtomicBool::new(false),
-            &mut temps,
-        )
-        .unwrap();
+        let plan_even = spool(Driver::Mysql, &even_script, 2, false);
         let even_groups = assign_workers(&plan_even.data, 2);
         let even_worker_lines: Vec<u64> = even_groups
             .iter()
@@ -6177,14 +6256,7 @@ COMMIT;
         }
         pg_script.push_str("\\.\n");
 
-        let pg_plan = plan_dump(
-            Cursor::new(pg_script.as_bytes()),
-            Driver::Postgres,
-            2,
-            &AtomicBool::new(false),
-            &mut temps,
-        )
-        .unwrap();
+        let pg_plan = spool(Driver::Postgres, &pg_script, 2, false);
         let pg_groups = assign_workers(&pg_plan.data, 2);
         let pg_worker_lines: Vec<u64> = pg_groups
             .iter()
@@ -6216,11 +6288,14 @@ INSERT INTO items VALUES (3, 'three');\n\
         let cancel = AtomicBool::new(false);
         let track = LoadTrack::planning(1);
         let mut completed = Vec::new();
-        let err = load_sql_tracked(
+        let err = load_sql(
             &mut conn,
             Driver::Sqlite,
             BufReader::new(Cursor::new(script.as_bytes())),
-            1,
+            LoadOptions {
+                workers: 1,
+                split_tables: false,
+            },
             || async { Err::<Conn, String>("unused".into()) },
             &cancel,
             |progress| {
@@ -6230,7 +6305,7 @@ INSERT INTO items VALUES (3, 'three');\n\
             },
             std::iter::empty::<&str>(),
             &HashSet::new(),
-            track,
+            Some(track),
         )
         .await
         .unwrap_err();
@@ -6265,15 +6340,9 @@ INSERT INTO items VALUES (3, 'three');\n\
             script.push_str(&format!("INSERT INTO `events` VALUES ({i});\n"));
         }
 
-        let mut temps = TempFiles::default();
-        let plan = plan_dump(
-            Cursor::new(script.as_bytes()),
-            Driver::Mysql,
-            4,
-            &AtomicBool::new(false),
-            &mut temps,
-        )
-        .unwrap();
+        let plan = spool(Driver::Mysql, &script, 4, true);
+        let whole = spool(Driver::Mysql, &script, 4, false);
+        assert_eq!(whole.data.len(), 1);
 
         // Single table exceeding TABLE_CHUNK_STMTS splits into 3 chunks with the same table_id.
         assert_eq!(plan.data.len(), 3);
@@ -6289,28 +6358,19 @@ INSERT INTO items VALUES (3, 'three');\n\
             vec![TABLE_CHUNK_STMTS, TABLE_CHUNK_STMTS, 100]
         );
 
-        // Also verify byte-threshold splitting for a single table via select_table_bin_with_table.
-        let mut bins = Vec::new();
-        let mut table_bins = std::collections::HashMap::new();
-        let b0 = select_table_bin_with_table(
-            &mut bins,
-            &mut table_bins,
-            Some("events".into()),
-            4,
-            TABLE_CHUNK_BYTES,
-        );
+        // Also verify byte-threshold splitting for a single table.
+        let mut split = Spool::new(4, true);
+        let b0 = split.bin_for(Some("events".into()));
         assert_eq!(b0, 0);
-        bins[b0].bytes = TABLE_CHUNK_BYTES;
-        bins[b0].statements = 1;
-        let b1 = select_table_bin_with_table(
-            &mut bins,
-            &mut table_bins,
-            Some("events".into()),
-            4,
-            TABLE_CHUNK_BYTES,
-        );
+        split.bins[b0].bytes = TABLE_CHUNK_BYTES;
+        split.bins[b0].statements = 1;
+        let b1 = split.bin_for(Some("events".into()));
         assert_eq!(b1, 1);
-        assert_eq!(bins[b0].table_id, bins[b1].table_id);
+        assert_eq!(split.bins[b0].table_id, split.bins[b1].table_id);
+        let mut whole = Spool::new(4, false);
+        let b0 = whole.bin_for(Some("events".into()));
+        whole.bins[b0].bytes = TABLE_CHUNK_BYTES;
+        assert_eq!(whole.bin_for(Some("events".into())), b0);
     }
 
     #[tokio::test]
@@ -6430,20 +6490,12 @@ INSERT INTO beta VALUES (2, 'b');
 INSERT INTO gamma VALUES (3, 'c');
 INSERT INTO delta VALUES (4, 'd');
 "#;
-        let opened_count = Arc::new(AtomicU64::new(0));
-        let opened_count_clone = opened_count.clone();
-        let opts_clone = opts.clone();
-        let mut open_worker = move || {
-            let count = opened_count_clone.clone();
-            let opts = opts_clone.clone();
-            async move {
-                count.fetch_add(1, Ordering::Relaxed);
-                sqlx::SqliteConnection::connect_with(&opts)
-                    .await
-                    .map(Conn::Sqlite)
-                    .map_err(|e| e.to_string())
-            }
-        };
+        let mut extras = Vec::new();
+        for _ in 0..2 {
+            extras.push(Conn::Sqlite(
+                sqlx::SqliteConnection::connect_with(&opts).await.unwrap(),
+            ));
+        }
 
         let cancel = AtomicBool::new(false);
         let track = LoadTrack::planning(3);
@@ -6461,7 +6513,7 @@ INSERT INTO delta VALUES (4, 'd');
             error: &Mutex::new(None),
             progress: &state,
             skip_completed: &skip,
-            in_transaction: false,
+            in_tx: AtomicBool::new(false),
         };
         let mut temps = TempFiles::default();
         let mut plan = run_phase1_parallel(
@@ -6469,17 +6521,16 @@ INSERT INTO delta VALUES (4, 'd');
             BufReader::new(Cursor::new(script.as_bytes())),
             Driver::Mysql,
             3,
-            &mut open_worker,
+            false,
+            extras,
             &ctx,
             &mut temps,
         )
         .await
         .unwrap();
 
-        // 4 tables (8 DDL statements) across 3 workers -> opened 2 extra worker connections in Phase 1
-        assert_eq!(opened_count.load(Ordering::Relaxed), 2);
+        // 4 tables (8 DDL statements) across 3 workers, and both extra connections come back for Phase 2
         assert_eq!(plan.extras.len(), 2);
-        assert_eq!(plan.pre_statements, 8);
 
         // All 3 worker threads participated in Phase 1 and recorded their completed DDL statements
         let phase1_work = track.snapshot();
@@ -6489,20 +6540,12 @@ INSERT INTO delta VALUES (4, 'd');
         assert_eq!(worker_ddl_total, 8);
         assert!(phase1_work.workers.iter().all(|w| w.statements >= 2));
 
-        // Transitioning to Phase 2 reuses the 2 opened extra connections without calling `open_worker` again
+        // Phase 2 reuses the 2 extra connections
         track.install(&plan.data_statements);
         let pre_extras = std::mem::take(&mut plan.extras);
-        run_phase2(
-            &mut coord,
-            &plan.data,
-            3,
-            pre_extras,
-            &mut open_worker,
-            &ctx,
-        )
-        .await
-        .unwrap();
-        assert_eq!(opened_count.load(Ordering::Relaxed), 2);
+        run_phase2(&mut coord, &plan.data, pre_extras, &[], false, &ctx)
+            .await
+            .unwrap();
 
         let rows = coord
             .run(
@@ -6529,22 +6572,14 @@ INSERT INTO `table_b` VALUES (10);\n\
 INSERT INTO `table_b` VALUES (20);\n\
 INSERT INTO `table_c` VALUES (100);\n\
 ";
-        let mut temps = TempFiles::default();
-        let plan = plan_dump(
-            Cursor::new(script.as_bytes()),
-            Driver::Mysql,
-            2,
-            &AtomicBool::new(false),
-            &mut temps,
-        )
-        .unwrap();
+        let plan = spool(Driver::Mysql, script, 2, false);
 
         let groups = assign_workers(&plan.data, 2);
         // Worker 0 has 1 table (`table_a`, 3 stmts); Worker 1 has 2 tables (`table_b` at front, `table_c` at back).
         assert_eq!(groups[0].len(), 1);
         assert_eq!(groups[1].len(), 2);
 
-        let queues = SharedQueues::new(&groups).unwrap();
+        let queues = SharedQueues::new(&groups, false).unwrap();
         let track = LoadTrack::planning(2);
         track.install(&plan.data_statements);
 
@@ -6570,5 +6605,299 @@ INSERT INTO `table_c` VALUES (100);\n\
         };
         assert_eq!(w1_own.len(), 2);
         assert!(w1_own[0].sql.contains("table_b"));
+    }
+
+    fn fits(driver: Driver, script: &str) -> Option<ParallelFit> {
+        parallel_fit(
+            Cursor::new(script.as_bytes()),
+            driver,
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+    }
+
+    const MYSQLDUMP: &str = "-- MySQL dump 10.13  Distrib 8.0.36
+/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
+/*!50503 SET NAMES utf8mb4 */;
+/*!40014 SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0 */;
+DROP TABLE IF EXISTS `users`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `users` (`id` int NOT NULL, PRIMARY KEY (`id`));
+/*!40101 SET character_set_client = @saved_cs_client */;
+LOCK TABLES `users` WRITE;
+/*!40000 ALTER TABLE `users` DISABLE KEYS */;
+INSERT INTO `users` VALUES (1),(2);
+/*!40000 ALTER TABLE `users` ENABLE KEYS */;
+UNLOCK TABLES;
+DELIMITER ;;
+/*!50003 CREATE*/ /*!50017 DEFINER=`root`@`%`*/ /*!50003 TRIGGER `users_ai` AFTER INSERT ON `users` FOR EACH ROW SET @n = 1 */;;
+DELIMITER ;
+DROP TABLE IF EXISTS `posts`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `posts` (`id` int NOT NULL, `user_id` int, PRIMARY KEY (`id`), CONSTRAINT `posts_user_fk` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE);
+/*!40101 SET character_set_client = @saved_cs_client */;
+LOCK TABLES `posts` WRITE;
+INSERT INTO `posts` VALUES (1,1);
+UNLOCK TABLES;
+/*!40014 SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS */;
+/*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;
+";
+
+    #[test]
+    fn mysqldump_output_loads_in_parallel_with_split_tables() {
+        let fit = fits(Driver::Mysql, MYSQLDUMP).expect("mysqldump output fits");
+        assert!(fit.split_tables);
+        // The same statements without a dump header still fit, but each table stays on one worker.
+        let headless = MYSQLDUMP.split_once('\n').unwrap().1;
+        assert!(!fits(Driver::Mysql, headless).unwrap().split_tables);
+        assert!(fits(Driver::Sqlite, MYSQLDUMP).is_none());
+        assert!(fits(Driver::Mssql, MYSQLDUMP).is_none());
+    }
+
+    #[test]
+    fn mysqldump_8_dummy_views_fit() {
+        let script = "-- MySQL dump 10.13
+CREATE TABLE `users` (`id` int NOT NULL, `name` text, PRIMARY KEY (`id`));
+INSERT INTO `users` VALUES (1,'a');
+DROP TABLE IF EXISTS `names`;
+/*!50001 DROP VIEW IF EXISTS `names`*/;
+SET @saved_cs_client     = @@character_set_client;
+/*!50503 SET character_set_client = utf8mb4 */;
+/*!50001 CREATE VIEW `names` AS SELECT 1 AS `name`*/;
+SET character_set_client = @saved_cs_client;
+CREATE TABLE `posts` (`id` int NOT NULL, PRIMARY KEY (`id`));
+INSERT INTO `posts` VALUES (1);
+/*!50001 DROP VIEW IF EXISTS `names`*/;
+/*!50001 CREATE ALGORITHM=UNDEFINED */
+/*!50013 DEFINER=`root`@`%` SQL SECURITY DEFINER */
+/*!50001 VIEW `names` AS select `users`.`name` AS `name` from `users` */;
+";
+        assert!(fits(Driver::Mysql, script).is_some());
+    }
+
+    #[test]
+    fn pg_dump_output_with_views_sequences_and_post_data_fits() {
+        let script = "--
+-- PostgreSQL database dump
+--
+SET statement_timeout = 0;
+SET client_encoding = 'UTF8';
+SELECT pg_catalog.set_config('search_path', '', false);
+CREATE TABLE public.users (id integer NOT NULL, name text);
+ALTER TABLE public.users OWNER TO app;
+CREATE SEQUENCE public.users_id_seq AS integer START WITH 1;
+ALTER SEQUENCE public.users_id_seq OWNED BY public.users.id;
+CREATE VIEW public.names AS SELECT users.name FROM public.users;
+CREATE MATERIALIZED VIEW public.counts AS SELECT count(*) AS n FROM public.users WITH NO DATA;
+CREATE TABLE public.posts (id integer NOT NULL, user_id integer);
+ALTER TABLE ONLY public.users ALTER COLUMN id SET DEFAULT nextval('public.users_id_seq'::regclass);
+COPY public.users (id, name) FROM stdin;
+1\tann
+\\.
+SELECT pg_catalog.setval('public.users_id_seq', 1, true);
+COPY public.posts (id, user_id) FROM stdin;
+1\t1
+\\.
+ALTER TABLE ONLY public.users ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+CREATE INDEX posts_user ON public.posts USING btree (user_id);
+ALTER TABLE ONLY public.posts ADD CONSTRAINT posts_user_fk FOREIGN KEY (user_id) REFERENCES public.users(id);
+REFRESH MATERIALIZED VIEW public.counts;
+";
+        assert!(
+            fits(Driver::Postgres, script)
+                .expect("pg_dump output fits")
+                .split_tables
+        );
+    }
+
+    #[test]
+    fn files_whose_result_depends_on_statement_order_load_in_file_order() {
+        let cases = [
+            (
+                "USE after data",
+                "CREATE TABLE a (id int);\nINSERT INTO a VALUES (1);\nUSE other;\nCREATE TABLE b (id int);\nINSERT INTO b VALUES (1);\n",
+            ),
+            (
+                "UPDATE between INSERTs",
+                "CREATE TABLE a (id int);\nINSERT INTO a VALUES (1);\nUPDATE a SET id = 2;\nINSERT INTO a VALUES (1);\n",
+            ),
+            (
+                "TRUNCATE of a loaded table",
+                "CREATE TABLE a (id int);\nINSERT INTO a VALUES (1);\nTRUNCATE a;\nINSERT INTO a VALUES (2);\n",
+            ),
+            (
+                "DROP ... CASCADE after data",
+                "CREATE TABLE a (id int);\nINSERT INTO a VALUES (1);\nDROP TABLE b CASCADE;\nCREATE TABLE b (id int);\nINSERT INTO b VALUES (1);\n",
+            ),
+            (
+                "DROP of a loaded table",
+                "CREATE TABLE a (id int);\nINSERT INTO a VALUES (1);\nDROP TABLE a;\nCREATE TABLE a (id int);\nINSERT INTO a VALUES (2);\n",
+            ),
+            (
+                "ADD COLUMN between INSERTs",
+                "CREATE TABLE a (id int);\nINSERT INTO a VALUES (1);\nALTER TABLE a ADD COLUMN b int;\nINSERT INTO a VALUES (2, 3);\n",
+            ),
+            (
+                "trigger before data",
+                "CREATE TABLE a (id int);\nCREATE TRIGGER t BEFORE INSERT ON a FOR EACH ROW SET NEW.id = NEW.id + 1;\nINSERT INTO a VALUES (1);\n",
+            ),
+            (
+                "ROLLBACK",
+                "CREATE TABLE a (id int);\nBEGIN;\nINSERT INTO a VALUES (1);\nROLLBACK;\n",
+            ),
+            (
+                "INSERT ... SELECT",
+                "CREATE TABLE a (id int);\nCREATE TABLE b (id int);\nINSERT INTO a VALUES (1);\nINSERT INTO b SELECT id FROM a;\n",
+            ),
+            (
+                "insert into an unreadable table",
+                "CREATE TABLE a (id int);\nINSERT INTO (SELECT 1) VALUES (1);\n",
+            ),
+            (
+                "autocommit off",
+                "SET autocommit = 0;\nCREATE TABLE a (id int);\nINSERT INTO a VALUES (1);\n",
+            ),
+            (
+                "temporary table",
+                "CREATE TEMPORARY TABLE a (id int);\nINSERT INTO a VALUES (1);\n",
+            ),
+        ];
+        for (name, script) in cases {
+            assert!(
+                fits(Driver::Mysql, script).is_none(),
+                "{name} must not load in parallel"
+            );
+        }
+    }
+
+    #[test]
+    fn drop_create_and_alter_follow_what_they_change() {
+        assert_eq!(
+            decide_phase("DROP TABLE IF EXISTS `a`", true, 2),
+            Decision::Pre
+        );
+        assert_eq!(decide_phase("TRUNCATE `a`", true, 2), Decision::Pre);
+        for sql in [
+            "DROP VIEW IF EXISTS v",
+            "DROP MATERIALIZED VIEW m",
+            "DROP TRIGGER t",
+            "DROP INDEX i",
+            "DROP FUNCTION f",
+            "DROP PROCEDURE p",
+            "CREATE FUNCTION f() RETURNS int RETURN 1",
+            "CREATE PROCEDURE p() SELECT 1",
+        ] {
+            assert_eq!(decide_phase(sql, false, 2), Decision::Pre, "{sql}");
+            assert_eq!(decide_phase(sql, true, 2), Decision::Post, "{sql}");
+        }
+        assert_eq!(
+            decide_phase("ALTER VIEW v AS SELECT 1", false, 2),
+            Decision::Post
+        );
+        assert_eq!(
+            decide_phase("ALTER MATERIALIZED VIEW m OWNER TO app", false, 2),
+            Decision::Post
+        );
+    }
+
+    fn stmts(sqls: &[&str]) -> Vec<SqlStmt> {
+        sqls.iter()
+            .enumerate()
+            .map(|(index, sql)| SqlStmt {
+                index,
+                line: index + 1,
+                sql: sql.to_string(),
+            })
+            .collect()
+    }
+
+    async fn count(conn: &mut Conn, table: &str) -> String {
+        conn.run(&format!("SELECT COUNT(*) FROM {table}"), 1, None)
+            .await
+            .unwrap()
+            .text_rows()[0][0]
+            .clone()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_batch_that_fails_as_a_whole_still_loads_one_statement_at_a_time() {
+        use sqlx::Connection;
+
+        let mut conn = Conn::Sqlite(
+            sqlx::SqliteConnection::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+            .await
+            .unwrap();
+        // The wrapping BEGIN fails inside an open transaction, but each INSERT is fine on its own.
+        conn.execute("BEGIN").await.unwrap();
+        let batch = stmts(&["INSERT INTO t VALUES (1)", "INSERT INTO t VALUES (2)"]);
+        let mut done = Vec::new();
+        run_batch(
+            &mut conn,
+            &batch,
+            true,
+            &mut String::new(),
+            &AtomicBool::new(false),
+            |ran| done.extend(ran.iter().map(|stmt| stmt.index)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(done, vec![0, 1]);
+        assert_eq!(count(&mut conn, "t").await, "2");
+
+        // A statement that fails on its own is the one reported, after the ones before it ran.
+        let batch = stmts(&[
+            "INSERT INTO t VALUES (3)",
+            "INSERT INTO t VALUES (1)",
+            "INSERT INTO t VALUES (4)",
+        ]);
+        let mut done = Vec::new();
+        let err = run_batch(
+            &mut conn,
+            &batch,
+            true,
+            &mut String::new(),
+            &AtomicBool::new(false),
+            |ran| done.extend(ran.iter().map(|stmt| stmt.index)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(done, vec![0]);
+        assert!(err.to_string().contains("Line 2"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_unwrapped_batch_leaves_the_files_transaction_open() {
+        use sqlx::Connection;
+
+        let mut conn = Conn::Sqlite(
+            sqlx::SqliteConnection::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+            .await
+            .unwrap();
+        conn.execute("BEGIN").await.unwrap();
+        conn.execute("INSERT INTO t VALUES (1)").await.unwrap();
+        let batch = stmts(&["INSERT INTO t VALUES (2)", "INSERT INTO t VALUES (3)"]);
+        run_batch(
+            &mut conn,
+            &batch,
+            false,
+            &mut String::new(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        conn.execute("ROLLBACK").await.unwrap();
+        assert_eq!(count(&mut conn, "t").await, "0");
     }
 }

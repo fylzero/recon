@@ -4,9 +4,8 @@ import { computed, onUnmounted, ref } from "vue";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
 import { useTransferJob } from "../composables/useTransfers";
-import { sendSystemNotification, windowFocused } from "../notifications";
 import { baseName } from "../platform";
-import { formatDuration, resumeAt, resumeChoice } from "../transfer";
+import { formatDuration, importStages, resumeAt, resumeChoice, runPhase, stagesPercent } from "../transfer";
 import type { ImportProgress, ImportResume, ImportResumePoint } from "../types";
 import ImportWorkDashboard from "./ImportWorkDashboard.vue";
 import Modal from "./Modal.vue";
@@ -23,7 +22,7 @@ const emit = defineEmits<{
   imported: [];
 }>();
 
-const { showToast, multithreadedImport, notifications } = useApp();
+const { showToast, multithreadedImport } = useApp();
 const job = useTransferJob(() => props.connectionId, "import");
 
 const running = ref(false);
@@ -31,27 +30,19 @@ const cancelling = ref(false);
 const error = ref("");
 const resumePoint = ref<ImportResumePoint | null>(null);
 const progress = ref<ImportProgress | null>(null);
+/** The last progress outside a reconnect, which reports every worker at 0. */
+const dashboard = ref<ImportProgress | null>(null);
+/** The run began by checking whether the file can load in parallel. */
+const checked = ref(false);
 let transferId = "";
 let stopProgress: UnlistenFn | null = null;
 
 const fileName = computed(() => baseName(props.path));
-const percent = computed(() => {
-  const current = progress.value;
-  if (!current) {
-    return 0;
-  }
-  const planning = current.phase === "planning" || !current.totalStatements;
-  const done = planning ? current.fileBytes : current.statements;
-  const total = planning ? current.fileTotalBytes : current.totalStatements;
-  return total ? Math.min(100, Math.round((done / total) * 100)) : 0;
-});
+const percent = computed(() => Math.round(stagesPercent(importStages(dashboard.value, checked.value))));
+const phase = computed(() => runPhase(progress.value));
+const checking = computed(() => progress.value?.phase === "scanning");
 const uncertain = computed(() => Boolean(resumePoint.value && resumePoint.value.to > resumePoint.value.from));
 const uncertainWord = computed(() => (resumePoint.value && resumePoint.value.to - resumePoint.value.from > 1 ? "them" : "it"));
-const continuation = computed(() =>
-  multithreadedImport.value
-    ? "Multithreaded import is on, so this import uses multiple threads. If the connection drops, Recon reconnects and picks up where it left off. Change it in Settings → General."
-    : "Multithreaded import is off, so if this import stops, start over rather than resume. Change it in Settings → General.",
-);
 
 function close() {
   if (running.value) {
@@ -69,10 +60,18 @@ async function start(resume: ImportResume | null = null) {
   error.value = "";
   resumePoint.value = null;
   progress.value = null;
+  dashboard.value = null;
+  checked.value = false;
   transferId = job.begin(`Importing ${fileName.value} into “${props.namespace}”`);
   stopProgress = await listen<ImportProgress>("import-progress", (event) => {
     if (event.payload.transferId === transferId) {
       progress.value = event.payload;
+      if (event.payload.phase === "scanning") {
+        checked.value = true;
+      }
+      if (event.payload.phase !== "reconnecting") {
+        dashboard.value = event.payload;
+      }
       job.progress(percent.value);
     }
   });
@@ -80,11 +79,7 @@ async function start(resume: ImportResume | null = null) {
     const result = await api.importSql(props.connectionId, transferId, props.namespace, props.path, resume);
     const statements = `${result.statements.toLocaleString()} ${result.statements === 1 ? "statement" : "statements"}`;
     const duration = formatDuration(result.durationMs);
-    const summary = `Imported ${fileName.value} into “${props.namespace}” in ${duration} (${statements})`;
-    showToast(summary);
-    if (windowFocused.value && notifications.value === "background") {
-      void sendSystemNotification(summary, "success", "Import Complete");
-    }
+    showToast(`Imported ${fileName.value} into “${props.namespace}” in ${duration} (${statements})`);
     emit("imported");
     emit("close");
   } catch (err) {
@@ -94,11 +89,7 @@ async function start(resume: ImportResume | null = null) {
     resumePoint.value = failure.resume;
     job.stopped();
     if (job.hidden.value) {
-      const hint = multithreadedImport.value
-        ? failure.resume
-          ? " Open the import to resume it."
-          : ""
-        : " Start over rather than resume.";
+      const hint = failure.resume ? " Open the import to resume it." : "";
       showToast(`Import into “${props.namespace}” stopped: ${error.value}${hint}`, "error");
     }
   } finally {
@@ -130,25 +121,33 @@ onUnmounted(() => stopProgress?.());
 <template>
   <Modal v-if="!job.hidden.value" :title="`Import into “${namespace}”`" :xwide="running" @close="close">
     <p class="transfer-file" :title="path">{{ fileName }}</p>
-    <p v-if="!running && !error && !resumePoint" class="muted tiny">
-      Runs every statement in the file against the {{ namespaceLabel.toLowerCase() }} “{{ namespace }}”, and
-      stops at the first error. Anything that ran before an error stays applied.
-      {{ continuation }}
+    <p class="muted tiny">
+      Runs every statement in the file against the {{ namespaceLabel.toLowerCase() }} “{{ namespace }}” and
+      stops at the first error. Anything that ran before an error stays applied. If the connection drops, Recon
+      reconnects and picks up where it left off.
+      <template v-if="multithreadedImport">
+        Multithreaded import is on, so Recon first checks whether the file can load over several connections.
+      </template>
     </p>
-    <div v-if="running" class="transfer-progress">
-      <ImportWorkDashboard :progress="progress" />
-      <p v-if="progress?.phase === 'reconnecting' && progress.error" class="muted tiny transfer-error" aria-live="polite">
+    <div v-if="running" class="transfer-progress" aria-live="polite">
+      <ImportWorkDashboard :progress="dashboard" :checked="checked" />
+      <p class="muted tiny transfer-status">
+        <span class="transfer-status-label">{{ cancelling ? "Cancelling…" : (phase ?? "Importing…") }}</span>
+        <span v-if="checking">{{ percent }}%</span>
+        <span v-else-if="progress">{{ progress.statements.toLocaleString() }} statements · {{ percent }}%</span>
+      </p>
+      <p v-if="progress?.phase === 'reconnecting' && progress.error" class="muted tiny transfer-error">
         {{ progress.error }}
       </p>
     </div>
     <p v-if="error" class="settings-error transfer-error">{{ error }}</p>
-    <p v-if="resumePoint && !running && multithreadedImport" class="muted tiny">{{ resumeChoice(resumePoint) }}</p>
+    <p v-if="resumePoint && !running" class="muted tiny">{{ resumeChoice(resumePoint) }}</p>
     <template #actions>
       <button v-if="running" class="ghost transfer-hide" type="button" @click="job.hide">Run in background</button>
       <button class="ghost" type="button" :disabled="cancelling" @click="cancel">
         {{ error && !running ? "Close" : "Cancel" }}
       </button>
-      <template v-if="resumePoint && !running && multithreadedImport">
+      <template v-if="resumePoint && !running">
         <template v-if="uncertain">
           <button class="ghost" type="button" @click="resume(resumePoint.from)">Run {{ uncertainWord }} again</button>
           <button :class="resumePoint.likelySaved ? 'primary' : 'ghost'" type="button" @click="resume(resumePoint.to)">
@@ -159,7 +158,7 @@ onUnmounted(() => stopProgress?.());
       </template>
       <button v-else-if="!error" class="primary" type="button" :disabled="running" @click="start()">
         <span v-if="running" class="spinner" aria-hidden="true" />
-        {{ running ? "Importing…" : "Import" }}
+        {{ checking ? "Checking…" : running ? "Importing…" : "Import" }}
       </button>
     </template>
   </Modal>

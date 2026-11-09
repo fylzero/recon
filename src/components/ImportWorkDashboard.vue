@@ -2,70 +2,28 @@
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import * as api from "../api";
+import { useApp } from "../composables/useApp";
+import { hasMachineStats } from "../platform";
+import { importStages, stagesPercent } from "../transfer";
 import type { ImportProgress, ImportWorkerProgress, MachineStats } from "../types";
-import { formatBytes } from "../transfer";
 
 const props = defineProps<{
   progress: ImportProgress | null;
+  /** The run began by checking whether the file can load in parallel. */
+  checked: boolean;
 }>();
 
-const WIDGETS_KEY = "recon.importDashboardWidgets";
 const THRESHOLDS_KEY = "recon.importTempThresholds";
-
-interface WidgetState {
-  donut: boolean;
-  clock: boolean;
-  temperature: boolean;
-  elapsed: boolean;
-  cores: boolean;
-  rate: boolean;
-  threads: boolean;
-}
 
 interface TempThresholds {
   goodMax: number;
   warnMax: number;
 }
 
-const DEFAULT_WIDGETS: WidgetState = {
-  donut: true,
-  clock: true,
-  temperature: true,
-  elapsed: true,
-  cores: true,
-  rate: true,
-  threads: true,
-};
-
 const DEFAULT_THRESHOLDS: TempThresholds = {
   goodMax: 60,
   warnMax: 80,
 };
-
-const WIDGET_ITEMS: { key: keyof WidgetState; label: string }[] = [
-  { key: "donut", label: "Donut" },
-  { key: "clock", label: "Clock" },
-  { key: "temperature", label: "Temp" },
-  { key: "elapsed", label: "Time" },
-  { key: "cores", label: "Cores EQ" },
-  { key: "rate", label: "Inserts/s" },
-  { key: "threads", label: "Threads" },
-];
-
-function loadWidgets(): WidgetState {
-  try {
-    const raw = JSON.parse(localStorage.getItem(WIDGETS_KEY) ?? "{}");
-    const next = { ...DEFAULT_WIDGETS };
-    for (const key of Object.keys(next) as (keyof WidgetState)[]) {
-      if (typeof raw?.[key] === "boolean") {
-        next[key] = raw[key];
-      }
-    }
-    return next;
-  } catch {
-    return { ...DEFAULT_WIDGETS };
-  }
-}
 
 function loadThresholds(): TempThresholds {
   try {
@@ -81,11 +39,9 @@ function loadThresholds(): TempThresholds {
   }
 }
 
-const widgets = ref<WidgetState>(loadWidgets());
 const thresholds = ref<TempThresholds>(loadThresholds());
 const editingThresholds = ref(false);
 
-watch(widgets, (val) => localStorage.setItem(WIDGETS_KEY, JSON.stringify(val)), { deep: true });
 watch(
   thresholds,
   (val) => {
@@ -97,22 +53,14 @@ watch(
   { deep: true },
 );
 
-function toggleWidget(key: keyof WidgetState) {
-  widgets.value[key] = !widgets.value[key];
-}
-
-// Keep widget definitions and toggle helper available for future UI controls
-void WIDGET_ITEMS;
-void toggleWidget;
-
-const preferenceReady = ref(false);
-const granted = ref(false);
+const { machineStats: granted, savePreferences, showToast } = useApp();
 const asking = ref(false);
 const stats = ref<MachineStats | null>(null);
 
 const startedAt = ref(Date.now());
 const nowMs = ref(Date.now());
-const phase1DurationMs = ref<number | null>(null);
+/** When each stage finished, in ms since the run started. */
+const stageEnds = ref<Record<string, number>>({});
 
 interface RateSample {
   rate: number;
@@ -131,81 +79,54 @@ let tickTimer: ReturnType<typeof setInterval> | null = null;
 let sampling = false;
 
 const workers = computed(() => [...(props.progress?.workers ?? [])].sort((a, b) => a.index - b.index));
-const planning = computed(() => !props.progress || props.progress.phase === "planning");
+const stages = computed(() => importStages(props.progress, props.checked));
+const activeStage = computed(() => stages.value.find((stage) => stage.percent < 100) ?? null);
+const totalPercent = computed(() => stagesPercent(stages.value));
 
 watch(
-  () => props.progress?.phase,
-  (phase) => {
-    if (phase && phase !== "planning" && phase1DurationMs.value === null) {
-      phase1DurationMs.value = Math.max(0, Date.now() - startedAt.value);
+  stages,
+  (list) => {
+    for (const stage of list) {
+      if (stage.percent >= 100 && stageEnds.value[stage.id] === undefined) {
+        stageEnds.value = { ...stageEnds.value, [stage.id]: Math.max(0, Date.now() - startedAt.value) };
+      }
     }
   },
   { immediate: true },
 );
 
-const phase1DurationText = computed(() => {
-  if (phase1DurationMs.value === null) {
+function stageTime(index: number) {
+  const end = stageEnds.value[stages.value[index].id];
+  if (end === undefined) {
     return "";
   }
-  const secs = phase1DurationMs.value / 1000;
-  return `${secs.toFixed(1)}s`;
+  const previous = index > 0 ? (stageEnds.value[stages.value[index - 1].id] ?? 0) : 0;
+  return `${(Math.max(0, end - previous) / 1000).toFixed(1)}s`;
+}
+
+// One ring around the clock, split into a segment per stage by weight.
+const RING_R = 66;
+const RING_CIRC = 2 * Math.PI * RING_R;
+const RING_GAP = 14;
+
+const segments = computed(() => {
+  const list = stages.value;
+  const weight = list.reduce((sum, stage) => sum + stage.weight, 0) || 1;
+  const gap = list.length > 1 ? RING_GAP : 0;
+  const usable = RING_CIRC - gap * list.length;
+  let start = 0;
+  return list.map((stage) => {
+    const length = (usable * stage.weight) / weight;
+    const segment = {
+      stage,
+      offset: -start,
+      length,
+      fill: (length * Math.min(100, Math.max(0, stage.percent))) / 100,
+    };
+    start += length + gap;
+    return segment;
+  });
 });
-
-const phase1Percent = computed(() => {
-  const current = props.progress;
-  if (!current) {
-    return 0;
-  }
-  if (current.phase !== "planning") {
-    return 100;
-  }
-  return percentOf(current.fileBytes, current.fileTotalBytes);
-});
-
-const phase2InsertCounts = computed(() => {
-  const current = props.progress;
-  if (!current || current.phase === "planning") {
-    return { insertsRun: 0, insertsLeft: 0, totalInserts: 0 };
-  }
-  let insertsRun = 0;
-  let totalInserts = 0;
-  for (const worker of current.workers) {
-    insertsRun += worker.statements;
-    totalInserts += worker.totalStatements;
-  }
-  if (totalInserts === 0 && current.totalStatements > 0) {
-    insertsRun = current.statements;
-    totalInserts = current.totalStatements;
-  }
-  insertsRun = Math.min(totalInserts, Math.max(0, insertsRun));
-  const insertsLeft = Math.max(0, totalInserts - insertsRun);
-  return { insertsRun, insertsLeft, totalInserts };
-});
-
-const phase2Percent = computed(() => {
-  const current = props.progress;
-  if (!current || current.phase === "planning") {
-    return 0;
-  }
-  const { insertsRun, insertsLeft } = phase2InsertCounts.value;
-  return percentOf(insertsRun, insertsRun + insertsLeft);
-});
-
-const totalPercent = computed(() => (planning.value ? phase1Percent.value : phase2Percent.value));
-
-// Concentric donut SVG geometry: center = (85, 85)
-// Phase 1 = inside track (r = 59), Phase 2 = outside track (r = 72)
-const DONUT_INNER_R = 59;
-const DONUT_OUTER_R = 72;
-const DONUT_INNER_CIRC = 2 * Math.PI * DONUT_INNER_R;
-const DONUT_OUTER_CIRC = 2 * Math.PI * DONUT_OUTER_R;
-
-const phase1ArcFill = computed(
-  () => (DONUT_INNER_CIRC * Math.min(100, Math.max(0, phase1Percent.value))) / 100,
-);
-const phase2ArcFill = computed(
-  () => (DONUT_OUTER_CIRC * Math.min(100, Math.max(0, phase2Percent.value))) / 100,
-);
 
 const elapsedSeconds = computed(() => Math.max(0, (nowMs.value - startedAt.value) / 1000));
 
@@ -220,26 +141,8 @@ const elapsedFormatted = computed(() => {
 const secondHandAngle = computed(() => (elapsedSeconds.value % 60) * 6);
 const minuteHandAngle = computed(() => ((elapsedSeconds.value / 60) % 60) * 6);
 
-const fileLabel = computed(() => {
-  const current = props.progress;
-  if (!current) {
-    return "";
-  }
-  return `${formatBytes(current.fileBytes)} / ${formatBytes(current.fileTotalBytes)}`;
-});
-
-const statementLabel = computed(() => {
-  const current = props.progress;
-  if (!current) {
-    return "";
-  }
-  return `${current.statements.toLocaleString()} / ${current.totalStatements.toLocaleString()} statements`;
-});
-void fileLabel;
-void statementLabel;
-
 const temperatureValue = computed(() => {
-  const value = stats.value?.temperatureCelsius ?? stats.value?.temperatureC;
+  const value = stats.value?.temperatureCelsius;
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 });
 
@@ -265,7 +168,7 @@ const temperatureLevel = computed<"good" | "warn" | "bad" | "muted">(() => {
 });
 
 const cores = computed(() => {
-  const list = stats.value?.cores ?? stats.value?.load;
+  const list = stats.value?.cores;
   return Array.isArray(list) && list.length ? list : null;
 });
 const EQ_SEGMENTS = 14;
@@ -369,9 +272,6 @@ function stateLabel(state: ImportWorkerProgress["state"]) {
   if (state === "waiting") {
     return "Waiting";
   }
-  if (state === "idle") {
-    return "Idle";
-  }
   if (state === "done") {
     return "Done";
   }
@@ -385,7 +285,7 @@ function sampleRate() {
   if (dt < 0.2) {
     return;
   }
-  const currentStmts = phase2InsertCounts.value.insertsRun;
+  const currentStmts = props.progress?.statements ?? 0;
   const delta = Math.max(0, currentStmts - lastStatements);
   const rate = dt > 0 ? delta / dt : 0;
   lastStatements = currentStmts;
@@ -403,11 +303,16 @@ function sampleRate() {
   rateSamples.value = next;
 }
 
-function stopPoll() {
+function stopStatsPoll() {
   if (statsTimer) {
     clearInterval(statsTimer);
     statsTimer = null;
   }
+  stats.value = null;
+}
+
+function stopPoll() {
+  stopStatsPoll();
   if (tickTimer) {
     clearInterval(tickTimer);
     tickTimer = null;
@@ -424,7 +329,9 @@ async function sample() {
     if (alive) {
       stats.value = next;
     }
-  } catch {
+  } catch (err) {
+    stopStatsPoll();
+    showToast(`Could not read machine stats: ${String(err)}`, "error");
   } finally {
     sampling = false;
   }
@@ -446,55 +353,47 @@ async function requestStats() {
   }
   asking.value = true;
   try {
-    const ok = await confirm("Show this machine's processor load and temperature while an import or restore runs?", {
+    const ok = await confirm("Show this machine's processor load and temperature while an import or restore runs? You can turn this off in Settings → General.", {
       title: "Machine stats",
       kind: "info",
       okLabel: "Grant",
       cancelLabel: "Don't allow",
     });
-    if (!ok || !alive) {
-      return;
+    if (ok) {
+      await savePreferences({ machineStats: true });
     }
-    await api.updatePreferences({ machineStats: true });
-    if (!alive) {
-      return;
-    }
-    granted.value = true;
-    startStatsPoll();
-  } catch {
+  } catch (err) {
+    showToast(`Could not turn on machine stats: ${String(err)}`, "error");
   } finally {
     asking.value = false;
   }
 }
 
+watch(granted, (on) => {
+  if (!alive) {
+    return;
+  }
+  if (on && hasMachineStats) {
+    startStatsPoll();
+  } else {
+    stopStatsPoll();
+  }
+});
+
 onMounted(() => {
   startedAt.value = Date.now();
   nowMs.value = startedAt.value;
   lastSampleMs = startedAt.value;
-  lastStatements = phase2InsertCounts.value.insertsRun;
+  lastStatements = props.progress?.statements ?? 0;
   rateSamples.value = [{ rate: 0, avg: 0 }];
 
   tickTimer = setInterval(() => {
     sampleRate();
   }, 500);
 
-  void api
-    .getState()
-    .then((data) => {
-      if (!alive) {
-        return;
-      }
-      preferenceReady.value = true;
-      if (data.machineStats) {
-        granted.value = true;
-        startStatsPoll();
-      }
-    })
-    .catch(() => {
-      if (alive) {
-        preferenceReady.value = true;
-      }
-    });
+  if (granted.value && hasMachineStats) {
+    startStatsPoll();
+  }
 });
 
 onUnmounted(() => {
@@ -505,7 +404,7 @@ onUnmounted(() => {
 
 <template>
   <div class="import-work">
-    <div v-if="preferenceReady && !granted" class="import-grant-row">
+    <div v-if="hasMachineStats && !granted" class="import-grant-row">
       <button
         class="ghost import-work-grant"
         type="button"
@@ -516,48 +415,34 @@ onUnmounted(() => {
       </button>
     </div>
 
-    <div class="import-dashboard-grid" :class="{ 'no-left-column': !widgets.donut && !widgets.clock }">
+    <div class="import-dashboard-grid">
       <!-- Left Column: Concentric Phase 1 (Inside) / Phase 2 (Outside) Donut + Center Clock Face -->
-      <div v-if="widgets.donut || widgets.clock" class="import-donut-column">
+      <div class="import-donut-column">
         <div class="import-donut-wrap">
           <svg viewBox="0 0 170 170" class="import-donut-svg" aria-label="Import progress donut">
-            <template v-if="widgets.donut">
-              <!-- Phase 2: Outside Track -->
+            <g v-for="segment in segments" :key="segment.stage.id" transform="rotate(-90 85 85)">
               <circle
                 cx="85"
                 cy="85"
-                :r="DONUT_OUTER_R"
-                class="import-donut-track import-donut-track-outer"
+                :r="RING_R"
+                class="import-donut-track"
+                :stroke-dasharray="`${segment.length} ${RING_CIRC}`"
+                :stroke-dashoffset="segment.offset"
               />
               <circle
+                v-if="segment.fill > 0"
                 cx="85"
                 cy="85"
-                :r="DONUT_OUTER_R"
-                class="import-donut-fill import-donut-fill-outer"
-                :stroke-dasharray="`${phase2ArcFill} ${DONUT_OUTER_CIRC}`"
-                transform="rotate(-90 85 85)"
+                :r="RING_R"
+                class="import-donut-fill"
+                :class="{ done: segment.stage.percent >= 100 }"
+                :stroke-dasharray="`${segment.fill} ${RING_CIRC}`"
+                :stroke-dashoffset="segment.offset"
               />
-
-              <!-- Phase 1: Inside Track -->
-              <circle
-                cx="85"
-                cy="85"
-                :r="DONUT_INNER_R"
-                class="import-donut-track import-donut-track-inner"
-              />
-              <circle
-                cx="85"
-                cy="85"
-                :r="DONUT_INNER_R"
-                class="import-donut-fill import-donut-fill-inner"
-                :class="{ done: !planning || phase1Percent >= 100 }"
-                :stroke-dasharray="`${phase1ArcFill} ${DONUT_INNER_CIRC}`"
-                transform="rotate(-90 85 85)"
-              />
-            </template>
+            </g>
 
             <!-- Clock Face in Donut Center -->
-            <g v-if="widgets.clock" class="import-clock-face">
+            <g class="import-clock-face">
               <circle cx="85" cy="85" r="46" class="import-clock-ring" />
               <line
                 v-for="tick in 12"
@@ -592,34 +477,24 @@ onUnmounted(() => {
                 {{ elapsedFormatted }}
               </text>
             </g>
-            <g v-else class="import-clock-face">
-              <text x="85" y="90" text-anchor="middle" class="import-donut-pct-only">
-                {{ Math.round(totalPercent) }}%
-              </text>
-            </g>
           </svg>
         </div>
 
-        <div v-if="widgets.donut" class="import-donut-legend">
-          <div class="import-donut-phase" :class="{ active: planning, done: !planning || phase1Percent >= 100 }">
+        <div class="import-donut-legend">
+          <div
+            v-for="(stage, index) in stages"
+            :key="stage.id"
+            class="import-donut-phase"
+            :class="{ active: stage === activeStage, done: stage.percent >= 100 }"
+          >
             <span class="import-phase-dot" />
             <div class="import-phase-text">
-              <span class="import-phase-title">Phase 1</span>
-              <span class="import-phase-desc">Create tables</span>
+              <span class="import-phase-title">{{ stage.title }}</span>
+              <span class="import-phase-desc">{{ stage.description }}</span>
             </div>
             <div class="import-phase-stat">
-              <strong>{{ Math.round(phase1Percent) }}%</strong>
-              <span v-if="phase1DurationText" class="import-phase-time">{{ phase1DurationText }}</span>
-            </div>
-          </div>
-          <div class="import-donut-phase" :class="{ active: !planning, done: phase2Percent >= 100 }">
-            <span class="import-phase-dot" />
-            <div class="import-phase-text">
-              <span class="import-phase-title">Phase 2</span>
-              <span class="import-phase-desc">Insert rows</span>
-            </div>
-            <div class="import-phase-stat">
-              <strong>{{ Math.round(phase2Percent) }}%</strong>
+              <strong>{{ Math.round(stage.percent) }}%</strong>
+              <span v-if="stageTime(index)" class="import-phase-time">{{ stageTime(index) }}</span>
             </div>
           </div>
         </div>
@@ -628,9 +503,9 @@ onUnmounted(() => {
       <!-- Right Column: Temperature, Time Spent, Equalizer Cores, Live Inserts/s Graph, Per-Thread Bars -->
       <div class="import-metrics-column">
         <!-- Top Metric Cards Row -->
-        <div v-if="widgets.temperature || widgets.elapsed" class="import-top-cards">
+        <div class="import-top-cards">
           <!-- Temperature Card with Adjustable Thresholds -->
-          <div v-if="widgets.temperature" class="import-metric-card">
+          <div v-if="hasMachineStats" class="import-metric-card">
             <div class="import-metric-head">
               <span class="import-work-k">CPU Temperature</span>
               <button
@@ -663,10 +538,10 @@ onUnmounted(() => {
           </div>
 
           <!-- Time Spent & Overall Throughput Card -->
-          <div v-if="widgets.elapsed" class="import-metric-card">
+          <div class="import-metric-card">
             <div class="import-metric-head">
               <span class="import-work-k">Time Spent</span>
-              <span class="import-work-k">{{ planning ? "Phase 1 · Create tables" : "Phase 2 · Insert rows" }}</span>
+              <span class="import-work-k">{{ activeStage?.title ?? "Finishing" }}</span>
             </div>
             <div class="import-metric-value">
               {{ elapsedFormatted }}
@@ -676,7 +551,7 @@ onUnmounted(() => {
         </div>
 
         <!-- Per-Core Equalizer Vertical Bar Graphs -->
-        <div v-if="widgets.cores" class="import-widget-box">
+        <div v-if="hasMachineStats" class="import-widget-box">
           <div class="import-widget-header">
             <span class="import-work-k">Per-Core CPU Performance</span>
             <span v-if="cores" class="import-work-k">{{ cores.length }} logical cores</span>
@@ -705,7 +580,7 @@ onUnmounted(() => {
         </div>
 
         <!-- Live Line Graph of Inserts per Second + Dotted Moving Average -->
-        <div v-if="widgets.rate" class="import-widget-box">
+        <div class="import-widget-box">
           <div class="import-widget-header">
             <span class="import-work-k">Inserts / sec</span>
             <div class="import-chart-legend">
@@ -733,7 +608,7 @@ onUnmounted(() => {
         </div>
 
         <!-- Per-Thread Progress Bars Below Core Bars -->
-        <div v-if="widgets.threads && workers.length" class="import-widget-box">
+        <div v-if="workers.length" class="import-widget-box">
           <div class="import-widget-header">
             <span class="import-work-k">Worker Threads ({{ workers.length }})</span>
           </div>

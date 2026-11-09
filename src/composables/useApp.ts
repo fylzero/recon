@@ -58,6 +58,7 @@ const sidebarWidth = ref(260);
 const maxAutoColumnWidth = ref(DEFAULT_MAX_AUTO_COLUMN_WIDTH);
 const autoApplyFilters = ref(true);
 const multithreadedImport = ref(true);
+const machineStats = ref(false);
 const notifications = ref<NotificationMode>("background");
 const windowState = ref<WindowState | null>(null);
 const toastMessage = ref("");
@@ -141,6 +142,7 @@ export function useApp() {
     maxAutoColumnWidth.value = data.maxAutoColumnWidth ?? DEFAULT_MAX_AUTO_COLUMN_WIDTH;
     autoApplyFilters.value = data.autoApplyFilters ?? true;
     multithreadedImport.value = data.multithreadedImport ?? true;
+    machineStats.value = data.machineStats ?? false;
     notifications.value = sanitizeNotificationMode(data.notifications);
     windowState.value = data.window ?? null;
   }
@@ -484,6 +486,7 @@ export function useApp() {
     maxAutoColumnWidth,
     autoApplyFilters,
     multithreadedImport,
+    machineStats,
     notifications,
     windowState,
     toastMessage,
