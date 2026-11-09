@@ -849,4 +849,89 @@ mod tests {
         let _ = conn.close().await;
         pool.close().await;
     }
+
+    /// `StdSocket::poll_ready` must not wait for a read when the write that
+    /// would unblock MySQL is already possible. sqlx 0.8.6 did, so a large
+    /// TLS statement sat in `execute` forever after the server had gone idle.
+    #[test]
+    fn tls_poll_ready_unblocks_when_either_direction_is_ready() {
+        use sqlx_core::io::ReadBuf;
+        use sqlx_core::net::tls::util::StdSocket;
+        use sqlx_core::net::Socket;
+        use std::io::{self, Read, Write};
+        use std::task::{Context, Poll, Waker};
+
+        #[derive(Clone, Copy)]
+        enum Ready {
+            Now,
+            Never,
+        }
+
+        struct Script {
+            read: Ready,
+            write: Ready,
+        }
+
+        impl Socket for Script {
+            fn try_read(&mut self, _buf: &mut dyn ReadBuf) -> io::Result<usize> {
+                Err(io::ErrorKind::WouldBlock.into())
+            }
+
+            fn try_write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::WouldBlock.into())
+            }
+
+            fn poll_read_ready(&mut self, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                match self.read {
+                    Ready::Now => Poll::Ready(Ok(())),
+                    Ready::Never => Poll::Pending,
+                }
+            }
+
+            fn poll_write_ready(&mut self, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                match self.write {
+                    Ready::Now => Poll::Ready(Ok(())),
+                    Ready::Never => Poll::Pending,
+                }
+            }
+
+            fn poll_shutdown(&mut self, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        fn blocked(script: Script) -> StdSocket<Script> {
+            let mut socket = StdSocket::new(script);
+            let mut buf = [0u8; 1];
+            assert_eq!(
+                socket.read(&mut buf).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+            assert_eq!(
+                socket.write(&[0]).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+            socket
+        }
+
+        let mut cx = Context::from_waker(Waker::noop());
+        // MySQL is waiting for the rest of the statement and will not send.
+        let mut write_ready = blocked(Script {
+            read: Ready::Never,
+            write: Ready::Now,
+        });
+        assert!(
+            write_ready.poll_ready(&mut cx).is_ready(),
+            "a writable socket must not stay parked on a read MySQL will never send"
+        );
+        // The response is already readable; the write interest must not swallow it.
+        let mut read_ready = blocked(Script {
+            read: Ready::Now,
+            write: Ready::Never,
+        });
+        assert!(
+            read_ready.poll_ready(&mut cx).is_ready(),
+            "a readable socket must not stay parked on a write"
+        );
+    }
 }

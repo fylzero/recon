@@ -48,7 +48,14 @@ dbus-secret-service = "4"
 keyring = { version = "3", features = ["windows-native"] }
 
 [dev-dependencies]
+sqlx-core = { version = "=0.8.6", default-features = false }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# sqlx 0.8.6 deadlocks a TLS connection when rustls wants to read and write at
+# once: poll_ready waits for both, so a large statement never finishes after
+# MySQL has already stopped reading. Backport of launchbadge/sqlx#4251.
+[patch.crates-io]
+sqlx-core = { path = "vendor/sqlx-core" }
 
 [profile.release]
 codegen-units = 1
