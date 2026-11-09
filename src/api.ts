@@ -16,6 +16,7 @@ import type {
   ImportResume,
   ImportRowsRequest,
   ImportRowsResult,
+  MachineStats,
   NamespaceList,
   PreferencesPatch,
   QueryLogEntry,
@@ -138,6 +139,10 @@ export function answerPrompt(id: string, answer: string | null) {
 
 export function updatePreferences(patch: PreferencesPatch) {
   return invoke<AppData>("update_preferences", { patch });
+}
+
+export function machineStats() {
+  return invoke<MachineStats>("machine_stats");
 }
 
 export function replaceAppData(data: AppData) {

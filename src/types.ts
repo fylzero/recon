@@ -132,6 +132,7 @@ export interface AppData {
   maxAutoColumnWidth?: number;
   autoApplyFilters?: boolean;
   notifications?: NotificationMode;
+  machineStats?: boolean;
   window?: WindowState;
 }
 
@@ -150,6 +151,7 @@ export interface PreferencesPatch {
   maxAutoColumnWidth?: number;
   autoApplyFilters?: boolean;
   notifications?: NotificationMode;
+  machineStats?: boolean;
 }
 
 export interface BytesCell {
@@ -484,16 +486,50 @@ export interface ImportResult {
   durationMs: number;
 }
 
+export interface ImportWorkerProgress {
+  index: number;
+  statements: number;
+  totalStatements: number;
+  state: "waiting" | "running" | "idle" | "done";
+}
+
 export interface ImportProgress {
   transferId: string;
   statements: number;
   bytes: number;
   totalBytes: number;
-  /** `skipping` past statements that already ran when resuming, or `reconnecting` after the connection dropped. */
-  phase: "running" | "skipping" | "reconnecting";
+  /** `planning` while the file is split, `running` during inserts, `finishing` for indexes and constraints, `skipping` past statements that already ran, or `reconnecting` after the connection dropped. */
+  phase: "planning" | "running" | "finishing" | "skipping" | "reconnecting";
   /** Failed reconnect attempts so far, with the last one's error. */
   attempt: number;
   error: string | null;
+  fileBytes: number;
+  fileTotalBytes: number;
+  /** 0 until the split has counted statements. */
+  totalStatements: number;
+  /** Phase 1 create-schema statements. Omitted until the backend lands the field. */
+  schemaStatements?: number;
+  schemaTotalStatements?: number;
+  indexStatements?: number;
+  indexTotalStatements?: number;
+  fkStatements?: number;
+  fkTotalStatements?: number;
+  viewStatements?: number;
+  viewTotalStatements?: number;
+  triggerStatements?: number;
+  triggerTotalStatements?: number;
+  workers: ImportWorkerProgress[];
+}
+
+/** Per-logical-core load and, when the machine exposes one, a Celsius temperature. */
+export interface MachineStats {
+  /** One number per logical core, 0–100, or empty when that reading is unavailable. */
+  cores: number[];
+  /** Degrees Celsius, or null when unavailable. */
+  temperatureCelsius: number | null;
+  /** Optional legacy aliases if present. */
+  load?: number[] | null;
+  temperatureC?: number | null;
 }
 
 export interface ImportBackend {
