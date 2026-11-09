@@ -3,7 +3,7 @@ import type { FilterKind } from "./filters/model";
 
 export type Driver = "mysql" | "postgres" | "sqlite" | "mssql";
 export type SslMode = "disable" | "prefer" | "require" | "verify-ca" | "verify-full";
-export type PasswordSource = "password" | "aws-iam" | "command";
+export type PasswordSource = "password" | "none" | "aws-iam" | "command";
 
 export const DRIVER_OPTIONS: { id: Driver; label: string; defaultPort: number }[] = [
   { id: "mysql", label: "MySQL", defaultPort: 3306 },
@@ -131,6 +131,7 @@ export interface AppData {
   sidebarWidth?: number;
   maxAutoColumnWidth?: number;
   autoApplyFilters?: boolean;
+  multithreadedImport?: boolean;
   notifications?: NotificationMode;
   machineStats?: boolean;
   window?: WindowState;
@@ -150,6 +151,7 @@ export interface PreferencesPatch {
   sidebarWidth?: number;
   maxAutoColumnWidth?: number;
   autoApplyFilters?: boolean;
+  multithreadedImport?: boolean;
   notifications?: NotificationMode;
   machineStats?: boolean;
 }

@@ -2300,9 +2300,6 @@ async function connect(withPassword: string | null = null) {
 }
 
 function submitPassword() {
-  if (!password.value) {
-    return;
-  }
   void connect(password.value);
 }
 
@@ -2774,7 +2771,7 @@ onUnmounted(() => {
           <p v-if="connectError" class="settings-error">{{ connectError }}</p>
           <div class="connect-actions">
             <button class="ghost" type="button" @click="editConnection">Edit connection</button>
-            <button class="primary" type="submit" :disabled="!password">Connect</button>
+            <button class="primary" type="submit">Connect</button>
           </div>
         </form>
         <template v-else>
@@ -2782,7 +2779,7 @@ onUnmounted(() => {
           <div class="connect-actions">
             <button class="ghost" type="button" @click="editConnection">Edit connection</button>
             <button
-              v-if="entry && entry.driver !== 'sqlite'"
+              v-if="entry && entry.driver !== 'sqlite' && (entry.passwordSource ?? 'password') !== 'none'"
               class="ghost"
               type="button"
               @click="status = 'password'"

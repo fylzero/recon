@@ -57,6 +57,7 @@ const queryRowLimit = ref(DEFAULT_QUERY_ROW_LIMIT);
 const sidebarWidth = ref(260);
 const maxAutoColumnWidth = ref(DEFAULT_MAX_AUTO_COLUMN_WIDTH);
 const autoApplyFilters = ref(true);
+const multithreadedImport = ref(true);
 const notifications = ref<NotificationMode>("background");
 const windowState = ref<WindowState | null>(null);
 const toastMessage = ref("");
@@ -139,6 +140,7 @@ export function useApp() {
     sidebarWidth.value = clampSidebar(data.sidebarWidth ?? 260);
     maxAutoColumnWidth.value = data.maxAutoColumnWidth ?? DEFAULT_MAX_AUTO_COLUMN_WIDTH;
     autoApplyFilters.value = data.autoApplyFilters ?? true;
+    multithreadedImport.value = data.multithreadedImport ?? true;
     notifications.value = sanitizeNotificationMode(data.notifications);
     windowState.value = data.window ?? null;
   }
@@ -165,19 +167,13 @@ export function useApp() {
    * for the window to regain focus so it is there when you come back.
    */
   function showToast(message: string, kind: "success" | "error" = "success") {
-    if (!message || !prefersSystemNotification(notifications.value)) {
-      showInAppToast(message, kind);
+    if (!message) {
       return;
     }
-    const mode = notifications.value;
-    if (mode === "background") {
-      showInAppToast(message, kind);
+    showInAppToast(message, kind);
+    if (prefersSystemNotification(notifications.value)) {
+      void sendSystemNotification(message, kind);
     }
-    void sendSystemNotification(message, kind).then((sent) => {
-      if (!sent && mode === "always") {
-        showInAppToast(message, kind);
-      }
-    });
   }
 
   function pauseToast() {
@@ -487,6 +483,7 @@ export function useApp() {
     sidebarWidth,
     maxAutoColumnWidth,
     autoApplyFilters,
+    multithreadedImport,
     notifications,
     windowState,
     toastMessage,

@@ -188,6 +188,8 @@ pub enum SshAuth {
 pub enum PasswordSource {
     #[default]
     Password,
+    /// Connect without supplying a database password.
+    None,
     /// A short-lived RDS token from `aws rds generate-db-auth-token`.
     AwsIam,
     /// Whatever a shell command prints.
@@ -196,7 +198,7 @@ pub enum PasswordSource {
 
 impl PasswordSource {
     pub fn is_fetched(self) -> bool {
-        self != PasswordSource::Password
+        matches!(self, PasswordSource::AwsIam | PasswordSource::Command)
     }
 }
 
@@ -362,9 +364,15 @@ pub struct AppData {
     /// Table filters reload the rows as they're edited, instead of waiting for Apply.
     #[serde(default = "default_auto_apply_filters")]
     pub auto_apply_filters: bool,
+    /// Import table data on more than one thread.
+    #[serde(default = "default_true")]
+    pub multithreaded_import: bool,
     /// When to use system notifications: "background", "always", or "off".
     #[serde(default = "default_notifications")]
     pub notifications: String,
+    /// Import and restore may show this machine's load and temperature.
+    #[serde(default)]
+    pub machine_stats: bool,
     #[serde(default)]
     pub window: Option<WindowState>,
 }
@@ -387,7 +395,9 @@ impl Default for AppData {
             sidebar_width: default_sidebar_width(),
             max_auto_column_width: default_max_auto_column_width(),
             auto_apply_filters: default_auto_apply_filters(),
+            multithreaded_import: default_true(),
             notifications: default_notifications(),
+            machine_stats: false,
             window: None,
         }
     }
@@ -433,7 +443,7 @@ impl AppData {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct PreferencesPatch {
     pub editor_font_family: Option<String>,
     pub editor_font_size: Option<f64>,
@@ -446,7 +456,9 @@ pub struct PreferencesPatch {
     pub sidebar_width: Option<u32>,
     pub max_auto_column_width: Option<u32>,
     pub auto_apply_filters: Option<bool>,
+    pub multithreaded_import: Option<bool>,
     pub notifications: Option<String>,
+    pub machine_stats: Option<bool>,
 }
 
 #[cfg(test)]
@@ -519,6 +531,15 @@ mod tests {
             serde_json::from_str(r#"{"name":"rds","driver":"mysql","passwordSource":"aws-iam"}"#)
                 .unwrap();
         assert_eq!(iam.password_source, PasswordSource::AwsIam);
+
+        let none: ConnectionEntry =
+            serde_json::from_str(r#"{"name":"local","driver":"postgres","passwordSource":"none"}"#)
+                .unwrap();
+        assert_eq!(none.password_source, PasswordSource::None);
+        assert_eq!(
+            serde_json::to_value(none).unwrap()["passwordSource"],
+            "none"
+        );
     }
 
     #[test]

@@ -670,17 +670,23 @@ mod tests {
     }
 
     async fn replay(conn: &mut Conn, sql: &str) {
-        let mut splitter = crate::db::sql_split::Splitter::new(Driver::Sqlite);
-        let mut statements = Vec::new();
-        for line in sql.as_bytes().split_inclusive(|byte| *byte == b'\n') {
-            splitter.push_bytes(line, &mut statements).unwrap();
-        }
-        splitter.finish(&mut statements);
-        for statement in &statements {
-            conn.execute(&statement.sql)
-                .await
-                .unwrap_or_else(|err| panic!("{err}: {}", statement.sql));
-        }
+        use std::collections::HashSet;
+        use std::sync::atomic::AtomicBool;
+
+        let cancel = AtomicBool::new(false);
+        crate::db::sql_load::load_sql(
+            conn,
+            Driver::Sqlite,
+            BufReader::new(std::io::Cursor::new(sql.as_bytes())),
+            1,
+            || async { Err::<Conn, String>("SQLite replay stays on one connection".into()) },
+            &cancel,
+            |_progress| {},
+            std::iter::empty::<&str>(),
+            &HashSet::new(),
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{err}"));
     }
 
     async fn names(conn: &mut Conn) -> Vec<String> {

@@ -37,6 +37,7 @@ const {
   queryRowLimit,
   maxAutoColumnWidth,
   autoApplyFilters,
+  multithreadedImport,
   notifications,
   savePreferences,
   previewPreferences,
@@ -196,6 +197,23 @@ function selectValue(event: Event) {
               @change="save({ autoApplyFilters: ($event.target as HTMLInputElement).checked })"
             />
             <span>{{ autoApplyFilters ? "On" : "Off" }}</span>
+          </label>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <h3>Multithreaded import</h3>
+            <p class="muted tiny">
+              Use multiple threads for fast import. Disable if your connection might fail during
+              import. Should be enabled for most cases.
+            </p>
+          </div>
+          <label class="settings-control checkbox-row">
+            <input
+              type="checkbox"
+              :checked="multithreadedImport"
+              @change="save({ multithreadedImport: ($event.target as HTMLInputElement).checked })"
+            />
+            <span>{{ multithreadedImport ? "On" : "Off" }}</span>
           </label>
         </div>
         <div class="settings-row">

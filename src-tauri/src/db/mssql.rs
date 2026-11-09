@@ -72,6 +72,10 @@ pub struct ColumnDefinition {
 }
 
 impl MssqlPool {
+    pub fn status(&self) -> deadpool::Status {
+        self.pool.status()
+    }
+
     pub async fn close(&self) {
         self.pool.close();
     }

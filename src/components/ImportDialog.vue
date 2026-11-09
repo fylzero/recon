@@ -4,9 +4,11 @@ import { computed, onUnmounted, ref } from "vue";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
 import { useTransferJob } from "../composables/useTransfers";
+import { sendSystemNotification, windowFocused } from "../notifications";
 import { baseName } from "../platform";
-import { resumeAt, resumeChoice, runPhase } from "../transfer";
+import { formatDuration, resumeAt, resumeChoice } from "../transfer";
 import type { ImportProgress, ImportResume, ImportResumePoint } from "../types";
+import ImportWorkDashboard from "./ImportWorkDashboard.vue";
 import Modal from "./Modal.vue";
 
 const props = defineProps<{
@@ -21,7 +23,7 @@ const emit = defineEmits<{
   imported: [];
 }>();
 
-const { showToast } = useApp();
+const { showToast, multithreadedImport, notifications } = useApp();
 const job = useTransferJob(() => props.connectionId, "import");
 
 const running = ref(false);
@@ -35,11 +37,21 @@ let stopProgress: UnlistenFn | null = null;
 const fileName = computed(() => baseName(props.path));
 const percent = computed(() => {
   const current = progress.value;
-  return current?.totalBytes ? Math.min(100, Math.round((current.bytes / current.totalBytes) * 100)) : 0;
+  if (!current) {
+    return 0;
+  }
+  const planning = current.phase === "planning" || !current.totalStatements;
+  const done = planning ? current.fileBytes : current.statements;
+  const total = planning ? current.fileTotalBytes : current.totalStatements;
+  return total ? Math.min(100, Math.round((done / total) * 100)) : 0;
 });
-const phase = computed(() => runPhase(progress.value));
 const uncertain = computed(() => Boolean(resumePoint.value && resumePoint.value.to > resumePoint.value.from));
 const uncertainWord = computed(() => (resumePoint.value && resumePoint.value.to - resumePoint.value.from > 1 ? "them" : "it"));
+const continuation = computed(() =>
+  multithreadedImport.value
+    ? "Multithreaded import is on, so this import uses multiple threads. If the connection drops, Recon reconnects and picks up where it left off. Change it in Settings → General."
+    : "Multithreaded import is off, so if this import stops, start over rather than resume. Change it in Settings → General.",
+);
 
 function close() {
   if (running.value) {
@@ -67,7 +79,12 @@ async function start(resume: ImportResume | null = null) {
   try {
     const result = await api.importSql(props.connectionId, transferId, props.namespace, props.path, resume);
     const statements = `${result.statements.toLocaleString()} ${result.statements === 1 ? "statement" : "statements"}`;
-    showToast(`Imported ${fileName.value} (${statements} in ${(result.durationMs / 1000).toFixed(1)}s)`);
+    const duration = formatDuration(result.durationMs);
+    const summary = `Imported ${fileName.value} into “${props.namespace}” in ${duration} (${statements})`;
+    showToast(summary);
+    if (windowFocused.value && notifications.value === "background") {
+      void sendSystemNotification(summary, "success", "Import Complete");
+    }
     emit("imported");
     emit("close");
   } catch (err) {
@@ -77,7 +94,11 @@ async function start(resume: ImportResume | null = null) {
     resumePoint.value = failure.resume;
     job.stopped();
     if (job.hidden.value) {
-      const hint = failure.resume ? " Open the import to resume it." : "";
+      const hint = multithreadedImport.value
+        ? failure.resume
+          ? " Open the import to resume it."
+          : ""
+        : " Start over rather than resume.";
       showToast(`Import into “${props.namespace}” stopped: ${error.value}${hint}`, "error");
     }
   } finally {
@@ -107,31 +128,27 @@ onUnmounted(() => stopProgress?.());
 </script>
 
 <template>
-  <Modal v-if="!job.hidden.value" :title="`Import into “${namespace}”`" @close="close">
+  <Modal v-if="!job.hidden.value" :title="`Import into “${namespace}”`" :xwide="running" @close="close">
     <p class="transfer-file" :title="path">{{ fileName }}</p>
-    <p class="muted tiny">
-      Runs every statement in the file against the {{ namespaceLabel.toLowerCase() }} “{{ namespace }}”, in
-      order, and stops at the first error. Anything that ran before an error stays applied. If the connection
-      drops, Recon reconnects and picks up where it left off.
+    <p v-if="!running && !error && !resumePoint" class="muted tiny">
+      Runs every statement in the file against the {{ namespaceLabel.toLowerCase() }} “{{ namespace }}”, and
+      stops at the first error. Anything that ran before an error stays applied.
+      {{ continuation }}
     </p>
-    <div v-if="running" class="transfer-progress" aria-live="polite">
-      <div class="transfer-bar"><span :style="{ width: `${percent}%` }" /></div>
-      <p class="muted tiny transfer-status">
-        <span class="transfer-status-label">{{ cancelling ? "Cancelling…" : (phase ?? "Importing…") }}</span>
-        <span v-if="progress">{{ progress.statements.toLocaleString() }} statements · {{ percent }}%</span>
-      </p>
-      <p v-if="progress?.phase === 'reconnecting' && progress.error" class="muted tiny transfer-error">
+    <div v-if="running" class="transfer-progress">
+      <ImportWorkDashboard :progress="progress" />
+      <p v-if="progress?.phase === 'reconnecting' && progress.error" class="muted tiny transfer-error" aria-live="polite">
         {{ progress.error }}
       </p>
     </div>
     <p v-if="error" class="settings-error transfer-error">{{ error }}</p>
-    <p v-if="resumePoint && !running" class="muted tiny">{{ resumeChoice(resumePoint) }}</p>
+    <p v-if="resumePoint && !running && multithreadedImport" class="muted tiny">{{ resumeChoice(resumePoint) }}</p>
     <template #actions>
       <button v-if="running" class="ghost transfer-hide" type="button" @click="job.hide">Run in background</button>
       <button class="ghost" type="button" :disabled="cancelling" @click="cancel">
         {{ error && !running ? "Close" : "Cancel" }}
       </button>
-      <template v-if="resumePoint && !running">
+      <template v-if="resumePoint && !running && multithreadedImport">
         <template v-if="uncertain">
           <button class="ghost" type="button" @click="resume(resumePoint.from)">Run {{ uncertainWord }} again</button>
           <button :class="resumePoint.likelySaved ? 'primary' : 'ghost'" type="button" @click="resume(resumePoint.to)">

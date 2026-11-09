@@ -70,12 +70,19 @@ export function ensureNotificationPermission(): Promise<boolean> {
   return permissionRequest;
 }
 
-export async function sendSystemNotification(body: string, kind: "success" | "error") {
+export async function sendSystemNotification(
+  body: string,
+  kind: "success" | "error",
+  title?: string,
+) {
   if (!(await ensureNotificationPermission())) {
     return false;
   }
   try {
-    sendNotification({ title: kind === "error" ? "Recon: action failed" : "Recon", body });
+    sendNotification({
+      title: title ?? (kind === "error" ? "Recon: action failed" : "Recon"),
+      body,
+    });
     return true;
   } catch {
     return false;

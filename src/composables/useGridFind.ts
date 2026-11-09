@@ -1,7 +1,12 @@
 import { computed, ref, watch } from "vue";
 import { cellText } from "../cells";
-import type { CellPosition } from "../components/DataGrid.vue";
 import type { RowValues } from "../types";
+
+/** Row and column of a grid cell. Same shape as `CellPosition` in DataGrid.vue. */
+interface CellPosition {
+  row: number;
+  col: number;
+}
 
 /** Past this many matches the grid stops counting, so huge results stay responsive. */
 export const MAX_FIND_MATCHES = 10_000;

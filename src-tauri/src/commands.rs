@@ -136,6 +136,15 @@ fn sanitize_password_source(entry: &mut ConnectionEntry) -> Result<(), String> {
             }
             entry.password_command.clear();
         }
+        PasswordSource::None => {
+            if !keeps_aws {
+                entry.aws_region.clear();
+                entry.aws_profile.clear();
+            }
+            entry.password_command.clear();
+            entry.save_password = false;
+            entry.cleartext_auth = false;
+        }
         PasswordSource::AwsIam => {
             entry.password_command.clear();
             if entry.aws_region.is_empty() {
@@ -740,8 +749,14 @@ pub fn update_preferences(
     if let Some(value) = patch.auto_apply_filters {
         data.auto_apply_filters = value;
     }
+    if let Some(value) = patch.multithreaded_import {
+        data.multithreaded_import = value;
+    }
     if let Some(value) = patch.notifications {
         data.notifications = sanitize_notifications(&value);
+    }
+    if let Some(machine_stats) = patch.machine_stats {
+        data.machine_stats = machine_stats;
     }
     persist::save(&app, &data)?;
     Ok(data.clone())
@@ -933,6 +948,24 @@ mod tests {
         assert_eq!(saved.password_command, "op read op://db/password");
         assert!(saved.aws_region.is_empty());
         assert!(!saved.save_password);
+    }
+
+    #[test]
+    fn no_password_drops_password_settings() {
+        let mut mysql = entry(Driver::Mysql);
+        mysql.password_source = PasswordSource::None;
+        mysql.save_password = true;
+        mysql.cleartext_auth = true;
+        mysql.aws_region = "us-east-1".into();
+        mysql.aws_profile = "prod".into();
+        mysql.password_command = "echo secret".into();
+        let saved = sanitize_connection(mysql).unwrap();
+        assert_eq!(saved.password_source, PasswordSource::None);
+        assert!(!saved.save_password);
+        assert!(!saved.cleartext_auth);
+        assert!(saved.aws_region.is_empty());
+        assert!(saved.aws_profile.is_empty());
+        assert!(saved.password_command.is_empty());
     }
 
     #[test]
