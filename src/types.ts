@@ -491,7 +491,7 @@ export interface ImportWorkerProgress {
   index: number;
   statements: number;
   totalStatements: number;
-  state: "waiting" | "running" | "done";
+  state: "waiting" | "running" | "idle" | "done";
 }
 
 export interface ImportProgress {
@@ -499,8 +499,8 @@ export interface ImportProgress {
   statements: number;
   bytes: number;
   totalBytes: number;
-  /** `planning` while the file is split, `running`, `skipping` past statements that already ran, or `reconnecting` after the connection dropped. */
-  phase: "planning" | "running" | "skipping" | "reconnecting";
+  /** `planning` while the file is split, `running` during inserts, `finishing` for indexes and constraints, `skipping` past statements that already ran, or `reconnecting` after the connection dropped. */
+  phase: "planning" | "running" | "finishing" | "skipping" | "reconnecting";
   /** Failed reconnect attempts so far, with the last one's error. */
   attempt: number;
   error: string | null;
@@ -508,6 +508,17 @@ export interface ImportProgress {
   fileTotalBytes: number;
   /** 0 until the split has counted statements. */
   totalStatements: number;
+  /** Phase 1 create-schema statements. Omitted until the backend lands the field. */
+  schemaStatements?: number;
+  schemaTotalStatements?: number;
+  indexStatements?: number;
+  indexTotalStatements?: number;
+  fkStatements?: number;
+  fkTotalStatements?: number;
+  viewStatements?: number;
+  viewTotalStatements?: number;
+  triggerStatements?: number;
+  triggerTotalStatements?: number;
   workers: ImportWorkerProgress[];
 }
 

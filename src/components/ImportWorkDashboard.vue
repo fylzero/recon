@@ -369,6 +369,9 @@ function stateLabel(state: ImportWorkerProgress["state"]) {
   if (state === "waiting") {
     return "Waiting";
   }
+  if (state === "idle") {
+    return "Idle";
+  }
   if (state === "done") {
     return "Done";
   }
