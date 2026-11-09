@@ -5,8 +5,8 @@ import * as api from "../api";
 import { useApp } from "../composables/useApp";
 import { useTransferJob } from "../composables/useTransfers";
 import { baseName } from "../platform";
-import { formatDuration, importStages, resumeAt, resumeChoice, runPhase, stagesPercent } from "../transfer";
-import type { ImportProgress, ImportResume, ImportResumePoint } from "../types";
+import { formatDuration, importStages, inOrderNote, resumeAt, resumeChoice, runPhase, stagesPercent } from "../transfer";
+import type { ImportInOrder, ImportProgress, ImportResume, ImportResumePoint } from "../types";
 import ImportWorkDashboard from "./ImportWorkDashboard.vue";
 import Modal from "./Modal.vue";
 
@@ -34,6 +34,7 @@ const progress = ref<ImportProgress | null>(null);
 const dashboard = ref<ImportProgress | null>(null);
 /** The run began by checking whether the file can load in parallel. */
 const checked = ref(false);
+const inOrder = ref<ImportInOrder | null>(null);
 let transferId = "";
 let stopProgress: UnlistenFn | null = null;
 
@@ -62,12 +63,16 @@ async function start(resume: ImportResume | null = null) {
   progress.value = null;
   dashboard.value = null;
   checked.value = false;
+  inOrder.value = null;
   transferId = job.begin(`Importing ${fileName.value} into “${props.namespace}”`);
   stopProgress = await listen<ImportProgress>("import-progress", (event) => {
     if (event.payload.transferId === transferId) {
       progress.value = event.payload;
       if (event.payload.phase === "scanning") {
         checked.value = true;
+      }
+      if (event.payload.inOrder) {
+        inOrder.value = event.payload.inOrder;
       }
       if (event.payload.phase !== "reconnecting") {
         dashboard.value = event.payload;
@@ -136,6 +141,7 @@ onUnmounted(() => stopProgress?.());
         <span v-if="checking">{{ percent }}%</span>
         <span v-else-if="progress">{{ progress.statements.toLocaleString() }} statements · {{ percent }}%</span>
       </p>
+      <p v-if="inOrder" class="muted tiny">{{ inOrderNote(inOrder) }}</p>
       <p v-if="progress?.phase === 'reconnecting' && progress.error" class="muted tiny transfer-error">
         {{ progress.error }}
       </p>

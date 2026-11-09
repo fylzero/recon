@@ -515,6 +515,16 @@ export interface ImportProgress {
   totalStatements: number;
   /** Empty for a run in file order. */
   workers: ImportWorkerProgress[];
+  /** Sent once, when a run that could have loaded in parallel settles on file order. */
+  inOrder?: ImportInOrder;
+}
+
+/** Why a run loads in file order. */
+export interface ImportInOrder {
+  /** The statement that rules out a parallel load, or null when it's the whole file. */
+  line: number | null;
+  /** Reads on from "line N", or stands alone without a line. */
+  reason: string;
 }
 
 /** Per-logical-core load and, when the machine exposes one, a Celsius temperature. */

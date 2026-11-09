@@ -1,6 +1,6 @@
 import { save } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
-import type { Driver, ImportProgress, ImportResume, ImportResumePoint, TabularOptions } from "./types";
+import type { Driver, ImportInOrder, ImportProgress, ImportResume, ImportResumePoint, TabularOptions } from "./types";
 
 export function fileSafe(name: string) {
   return name.replace(/[/\\:*?"<>|]+/g, "-");
@@ -168,6 +168,12 @@ export function runPhase(progress: ImportProgress | null) {
     return "Checking the file…";
   }
   return null;
+}
+
+/** Why a run loads in file order, for the line under its progress. */
+export function inOrderNote(why: ImportInOrder) {
+  const what = why.line === null ? why.reason : `line ${why.line.toLocaleString()} ${why.reason}`;
+  return `Running in order on one connection: ${what}.`;
 }
 
 /** One step of an import or restore, as the dashboard shows it. */

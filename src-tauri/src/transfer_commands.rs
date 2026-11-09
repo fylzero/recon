@@ -17,8 +17,8 @@ use crate::db::dump::{self, Dump, DumpOptions, DumpProgress, DumpSummary, DumpTa
 use crate::db::restore::{self, BackupInfo};
 use crate::db::resume::{self, Stop, Tracker};
 use crate::db::sql_load::{
-    load_sql, parallel_fit, LoadOptions, LoadSqlError, LoadTrack, LoadWork, LoadWorkerState,
-    ParallelFit,
+    load_sql, parallel_fit, starts_like_dump, FileFit, InOrder, LoadOptions, LoadSqlError,
+    LoadTrack, LoadWork, LoadWorkerState, NOT_A_DUMP,
 };
 use crate::db::sql_split::{is_copy_from_stdin, Splitter};
 use crate::db::tabular::TabularOptions;
@@ -578,6 +578,9 @@ struct ImportProgressEvent<'a> {
     progress: Progress,
     attempt: u32,
     error: Option<&'a str>,
+    /// Sent once, when a run that could have loaded in parallel settles on file order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    in_order: Option<&'a InOrder>,
 }
 
 fn emit_progress(
@@ -594,6 +597,20 @@ fn emit_progress(
             progress,
             attempt,
             error,
+            in_order: None,
+        },
+    );
+}
+
+fn emit_in_order(app: &AppHandle, transfer_id: &str, progress: Progress, why: &InOrder) {
+    let _ = app.emit(
+        IMPORT_PROGRESS_EVENT,
+        ImportProgressEvent {
+            transfer_id,
+            progress,
+            attempt: 0,
+            error: None,
+            in_order: Some(why),
         },
     );
 }
@@ -809,6 +826,19 @@ impl SqlFile {
                 idle_workers(workers)
             },
         }
+    }
+}
+
+fn scanned(file_bytes: u64, total: u64) -> Progress {
+    Progress {
+        statements: 0,
+        bytes: file_bytes,
+        total_bytes: total,
+        phase: "scanning",
+        file_bytes,
+        file_total_bytes: total,
+        total_statements: 0,
+        workers: Vec::new(),
     }
 }
 
@@ -1471,16 +1501,19 @@ impl Replay<'_> {
         }
     }
 
-    /// Reads the whole file to decide whether `load_sql` can run it in parallel.
-    async fn scan(
-        &self,
-        driver: Driver,
-        workers: usize,
-    ) -> Result<Option<ParallelFit>, ImportError> {
-        if workers <= 1 {
-            return Ok(None);
+    /**
+     * Reads the whole file to decide whether `load_sql` can run it in parallel,
+     * and tells the dialog why when it can't. Files that aren't a dump
+     * [`starts_like_dump`] knows aren't read past the head, so they're read once.
+     */
+    async fn scan(&self, driver: Driver) -> Result<FileFit, ImportError> {
+        let mut file = open_sql_file(self.path)?;
+        if !starts_like_dump(&mut file.reader)? {
+            let why = InOrder::file(NOT_A_DUMP);
+            let progress = file.progress(0, "running");
+            emit_in_order(self.app, self.transfer.transfer_id, progress, &why);
+            return Ok(FileFit::InOrder(why));
         }
-        let file = open_sql_file(self.path)?;
         let read = file.read.clone();
         let total = file.total_bytes;
         let cancel = self.transfer.cancel.clone();
@@ -1492,20 +1525,14 @@ impl Replay<'_> {
             tokio::select! {
                 joined = &mut scanning => {
                     let fit = joined.map_err(|err| format!("Could not read the SQL file: {err}"))?;
-                    return fit.map_err(|err| self.renamed(err).into());
+                    let fit = fit.map_err(|err| self.renamed(err))?;
+                    if let FileFit::InOrder(why) = &fit {
+                        emit_in_order(self.app, self.transfer.transfer_id, scanned(total, total), why);
+                    }
+                    return Ok(fit);
                 }
                 _ = ticks.tick() => {
-                    let file_bytes = read.load(Ordering::Relaxed);
-                    let progress = Progress {
-                        statements: 0,
-                        bytes: file_bytes,
-                        total_bytes: total,
-                        phase: "scanning",
-                        file_bytes,
-                        file_total_bytes: total,
-                        total_statements: 0,
-                        workers: Vec::new(),
-                    };
+                    let progress = scanned(read.load(Ordering::Relaxed), total);
                     emit_progress(self.app, self.transfer.transfer_id, progress, 0, None);
                 }
             }
@@ -1688,15 +1715,16 @@ impl Replay<'_> {
     ) -> Result<(), ImportError> {
         let driver = session.driver;
         let workers = sql_workers(driver);
-        let fit = match &resume {
-            Some(resume) => resume.parallel.then_some(ParallelFit {
-                split_tables: resume.split_tables,
-            }),
-            None if multithreaded => self.scan(driver, workers).await?,
+        let split_tables = match &resume {
+            Some(resume) => resume.parallel.then_some(resume.split_tables),
+            None if multithreaded && workers > 1 => match self.scan(driver).await? {
+                FileFit::Parallel => Some(true),
+                FileFit::InOrder(_) => None,
+            },
             None => None,
         };
-        let mut plan = match fit {
-            Some(fit) => {
+        let mut plan = match split_tables {
+            Some(split_tables) => {
                 let completed = match &resume {
                     Some(resume) => resumed_indexes(resume)?,
                     None => HashSet::new(),
@@ -1709,7 +1737,7 @@ impl Replay<'_> {
                 let mut run = Parallel {
                     options: LoadOptions {
                         workers,
-                        split_tables: fit.split_tables,
+                        split_tables,
                     },
                     completed,
                     session_indexes,

@@ -9,8 +9,8 @@
 //! statements on the coordinator in file order.
 //!
 //! That order differs from the file's, so [`parallel_fit`] reads a file first
-//! to check the result can't change. Files it turns down run in file order on
-//! one connection instead.
+//! to check the result can't change. Files it turns down, or that aren't a
+//! dump it knows, run in file order on one connection instead.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
@@ -417,8 +417,8 @@ pub(crate) struct LoadOptions {
     pub(crate) workers: usize,
     /**
      * Whether one table's rows may run on more than one connection at once.
-     * Only for dumps whose rows carry their own keys, as [`parallel_fit`]
-     * decides, since rows that take the next auto-increment value, or that
+     * Only for dumps whose rows carry their own keys, the only files
+     * [`parallel_fit`] lets through, since rows that take the next auto-increment value, or that
      * replace or ignore each other, depend on running in file order.
      */
     pub(crate) split_tables: bool,
@@ -623,11 +623,32 @@ fn between_statements(message: String) -> LoadSqlError {
 }
 
 /// What [`parallel_fit`] found.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ParallelFit {
-    /// See [`LoadOptions::split_tables`].
-    pub(crate) split_tables: bool,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FileFit {
+    Parallel,
+    InOrder(InOrder),
 }
+
+/// Why a file runs in file order.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct InOrder {
+    /// The statement that rules out a parallel load, if it was one statement.
+    pub(crate) line: Option<usize>,
+    /// Reads on from "line N", or stands alone without a line.
+    pub(crate) reason: String,
+}
+
+impl InOrder {
+    pub(crate) fn file(reason: &str) -> Self {
+        Self {
+            line: None,
+            reason: reason.to_string(),
+        }
+    }
+}
+
+pub(crate) const NOT_A_DUMP: &str =
+    "the file isn't from mysqldump, pg_dump or a Recon export, so it isn't checked";
 
 /// First lines of the dumps whose rows always carry their keys, so a table's rows may load in any order.
 const DUMP_HEADERS: [&str; 5] = [
@@ -640,22 +661,23 @@ const DUMP_HEADERS: [&str; 5] = [
 
 /**
  * Reads a whole SQL file and decides whether [`load_sql`] can load it with
- * several workers and get the same result as running it in file order.
- * `None` means it can't, or that `driver` has no parallel load.
+ * several workers, splitting tables, and get the same result as running it
+ * in file order. Only dumps [`starts_like_dump`] knows are read past the head.
  */
 pub(crate) fn parallel_fit<R: BufRead>(
     mut reader: R,
     driver: Driver,
     cancel: &AtomicBool,
-) -> Result<Option<ParallelFit>, String> {
+) -> Result<FileFit, String> {
     if !matches!(driver, Driver::Mysql | Driver::Postgres) {
-        return Ok(None);
+        return Ok(FileFit::InOrder(InOrder::file(
+            "this database loads over one connection",
+        )));
     }
-    let head = reader
-        .fill_buf()
-        .map_err(|err| format!("Could not read the SQL file: {err}"))?;
-    let known_dump = is_known_dump(&head[..head.len().min(4096)]);
-    let mut scan = OrderScan::new(driver, known_dump);
+    if !starts_like_dump(&mut reader)? {
+        return Ok(FileFit::InOrder(InOrder::file(NOT_A_DUMP)));
+    }
+    let mut scan = OrderScan::new(driver);
     let mut stream = Stream::new(reader, driver);
     while let Some(stmt) = stream.next_statement(cancel)? {
         if cancel.load(Ordering::Relaxed) {
@@ -667,22 +689,40 @@ pub(crate) fn parallel_fit<R: BufRead>(
                 .consume_copy(cancel, |_| Ok(()))
                 .map_err(|err| line_error(stmt.line, err))?;
         }
-        let fits = scan.visit(&stmt.sql, copy);
+        let fits = scan.visit(&stmt.sql, stmt.line, copy);
         stream.recycle(stmt.sql);
-        if !fits {
-            return Ok(None);
+        if let Err(reason) = fits {
+            return Ok(FileFit::InOrder(InOrder {
+                line: Some(stmt.line),
+                reason,
+            }));
         }
     }
-    Ok(Some(ParallelFit {
-        split_tables: known_dump,
+    Ok(FileFit::Parallel)
+}
+
+/// Whether the first lines of `reader` name a dump in [`DUMP_HEADERS`], without consuming them.
+pub(crate) fn starts_like_dump<R: BufRead>(reader: &mut R) -> Result<bool, String> {
+    let head = reader
+        .fill_buf()
+        .map_err(|err| format!("Could not read the SQL file: {err}"))?;
+    let head = String::from_utf8_lossy(&head[..head.len().min(4096)]);
+    Ok(head.lines().any(|line| {
+        let line = line.trim_start_matches('\u{feff}').trim_start();
+        DUMP_HEADERS.iter().any(|header| line.starts_with(header))
     }))
 }
 
-fn is_known_dump(head: &[u8]) -> bool {
-    String::from_utf8_lossy(head).lines().any(|line| {
-        let line = line.trim_start_matches('\u{feff}').trim_start();
-        DUMP_HEADERS.iter().any(|header| line.starts_with(header))
-    })
+fn grouped(line: usize) -> String {
+    let digits = line.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
 }
 
 /// The session settings that only change how statement text is read.
@@ -702,17 +742,15 @@ const CHARSET_VARS: [&str; 3] = [
  */
 struct OrderScan {
     driver: Driver,
-    known_dump: bool,
     seen_data: bool,
     /// A statement has been put off to phase 3.
     deferred: bool,
-    /// A deferred statement may depend on rows, so no more rows may follow.
-    tail_only: bool,
-    /// Session settings a deferred `SET` changed and hadn't put back yet.
-    dirty: HashSet<String>,
+    /// The line of a deferred statement that may depend on rows, so no more rows may follow.
+    tail_only: Option<usize>,
+    /// Session settings a deferred `SET` changed and hadn't put back yet, with its line.
+    dirty: HashMap<String, usize>,
     /// A deferred `SET` gave a user variable a value rows might read.
     deferred_user_vars: bool,
-    setval: bool,
     /// A deferred trigger whose table isn't known.
     any_trigger: bool,
     data_tables: HashSet<String>,
@@ -724,16 +762,14 @@ struct OrderScan {
 }
 
 impl OrderScan {
-    fn new(driver: Driver, known_dump: bool) -> Self {
+    fn new(driver: Driver) -> Self {
         Self {
             driver,
-            known_dump,
             seen_data: false,
             deferred: false,
-            tail_only: false,
-            dirty: HashSet::new(),
+            tail_only: None,
+            dirty: HashMap::new(),
             deferred_user_vars: false,
-            setval: false,
             any_trigger: false,
             data_tables: HashSet::new(),
             deferred_names: HashSet::new(),
@@ -756,73 +792,105 @@ impl OrderScan {
         true
     }
 
-    /// Whether the file still fits after `sql`.
-    fn visit(&mut self, sql: &str, copy: bool) -> bool {
+    /// `Err` holds why the file stops fitting at `sql`, read on from "line N".
+    fn visit(&mut self, sql: &str, line: usize, copy: bool) -> Result<(), String> {
         let class = resume::classify(self.driver, sql);
-        if matches!(class.tx, Tx::Rollback | Tx::Autocommit(_)) {
-            return false;
+        match class.tx {
+            Tx::Rollback => return Err("rolls back a transaction".into()),
+            Tx::Autocommit(_) => return Err("changes autocommit".into()),
+            _ => {}
         }
         let first = Words::new(sql).next().unwrap_or("");
         let never = ["ROLLBACK", "ABORT", "SAVEPOINT", "RELEASE"];
-        if never.iter().any(|word| first.eq_ignore_ascii_case(word)) || creates_temporary(sql) {
-            return false;
+        if never.iter().any(|word| first.eq_ignore_ascii_case(word)) {
+            return Err("rolls back or uses a savepoint".into());
+        }
+        if creates_temporary(sql) {
+            return Err("creates a temporary table".into());
         }
         let (decision, table) = decide_phase_with_table(sql, self.seen_data, 2);
         match decision {
-            Decision::Skip => true,
+            Decision::Skip => Ok(()),
             Decision::Data => self.data(sql, table, copy),
             Decision::Pre => self.pre(sql, first),
-            Decision::Post => self.post(sql, first),
+            Decision::Post => self.post(sql, line, first),
         }
     }
 
-    fn data(&mut self, sql: &str, table: Option<String>, copy: bool) -> bool {
+    fn data(&mut self, sql: &str, table: Option<String>, copy: bool) -> Result<(), String> {
         let Some(table) = table else {
-            return false;
+            return Err("inserts into a table Recon can't name".into());
         };
         if !copy && !plain_insert(sql) {
-            return false;
+            return Err("inserts rows from a query".into());
         }
-        let unsafe_now = self.tail_only
-            || !self.dirty.is_empty()
-            || (self.setval && !self.known_dump)
-            || (self.deferred_user_vars && mentions_user_var(sql))
-            || self.any_trigger
-            || self.trigger_tables.contains(&table)
-            || (self.driver == Driver::Postgres && self.fk_tables.contains(&table))
-            || (conflict_sensitive(sql) && self.deferred_names.contains(&table));
-        if unsafe_now {
-            return false;
+        if let Some(line) = self.tail_only {
+            return Err(format!(
+                "inserts rows after line {}, which may depend on the rows before it",
+                grouped(line)
+            ));
+        }
+        if let Some(line) = self.dirty.values().min() {
+            return Err(format!(
+                "inserts rows after line {} changes a session setting",
+                grouped(*line)
+            ));
+        }
+        if self.deferred_user_vars && mentions_user_var(sql) {
+            return Err("inserts rows that read a variable set after earlier rows".into());
+        }
+        if self.any_trigger || self.trigger_tables.contains(&table) {
+            return Err(format!("inserts into “{table}”, which has a trigger"));
+        }
+        if self.driver == Driver::Postgres && self.fk_tables.contains(&table) {
+            return Err(format!(
+                "inserts into “{table}” after its foreign key is in place"
+            ));
+        }
+        if conflict_sensitive(sql) && self.deferred_names.contains(&table) {
+            return Err(format!(
+                "replaces or skips rows in “{table}”, which an earlier statement uses"
+            ));
         }
         self.seen_data = true;
         self.data_tables.insert(table);
-        true
+        Ok(())
     }
 
-    fn pre(&mut self, sql: &str, first: &str) -> bool {
+    fn pre(&mut self, sql: &str, first: &str) -> Result<(), String> {
         collect_fk_tables(sql, &mut self.fk_tables);
         self.note_trigger(sql);
         if !self.seen_data && !self.deferred {
-            return true;
+            return Ok(());
         }
-        if self
+        if let Some(line) = self
             .dirty
             .iter()
-            .any(|name| !CHARSET_VARS.contains(&name.as_str()))
+            .filter(|(name, _)| !CHARSET_VARS.contains(&name.as_str()))
+            .map(|(_, line)| *line)
+            .min()
         {
-            return false;
+            return Err(format!(
+                "changes the schema after line {} changes a session setting",
+                grouped(line)
+            ));
         }
         if is_tx_begin(sql) || first.eq_ignore_ascii_case("COMMENT") {
-            return true;
+            return Ok(());
         }
         if first.eq_ignore_ascii_case("SET") {
-            return set_targets(sql).is_some_and(|targets| {
+            let harmless = set_targets(sql).is_some_and(|targets| {
                 targets.iter().all(|target| match target {
                     SetTarget::User => true,
                     SetTarget::Var { name, .. } => CHARSET_VARS.contains(&name.as_str()),
                     SetTarget::Ignored | SetTarget::Charset => false,
                 })
             });
+            return if harmless {
+                Ok(())
+            } else {
+                Err("changes a session setting between inserts".into())
+            };
         }
         let mut words = Words::new(sql);
         words.next();
@@ -845,7 +913,7 @@ impl OrderScan {
                 "TEXT",
             ];
             if harmless.iter().any(|word| is(word)) {
-                return true;
+                return Ok(());
             }
         }
         if first.eq_ignore_ascii_case("ALTER") {
@@ -860,57 +928,65 @@ impl OrderScan {
                 "AGGREGATE",
             ];
             if harmless.iter().any(|word| is(word)) {
-                return true;
+                return Ok(());
             }
         }
         let Some(table) = moved_table(self.driver, sql) else {
-            return false;
+            return Err(
+                "runs a statement between inserts that may depend on rows before it".into(),
+            );
         };
         if self.data_tables.contains(&table) {
-            return false;
+            return Err(format!("changes “{table}” after rows were loaded into it"));
         }
-        !self.deferred_names.contains(&table)
-            || (first.eq_ignore_ascii_case("ALTER") && leaves_columns(sql))
+        if self.deferred_names.contains(&table)
+            && !(first.eq_ignore_ascii_case("ALTER") && leaves_columns(sql))
+        {
+            return Err(format!(
+                "changes “{table}”, which an earlier statement uses"
+            ));
+        }
+        Ok(())
     }
 
-    fn post(&mut self, sql: &str, first: &str) -> bool {
+    fn post(&mut self, sql: &str, line: usize, first: &str) -> Result<(), String> {
         self.deferred = true;
         if first.eq_ignore_ascii_case("COMMIT")
             || (first.eq_ignore_ascii_case("END") && is_bare_end(sql))
         {
-            return true;
+            return Ok(());
         }
         self.deferred_names.extend(identifiers(sql));
         if first.eq_ignore_ascii_case("SET") {
             let Some(targets) = set_targets(sql) else {
-                self.tail_only = true;
-                return true;
+                self.tail_only.get_or_insert(line);
+                return Ok(());
             };
             for target in targets {
                 match target {
                     SetTarget::Ignored => {}
                     SetTarget::User => self.deferred_user_vars = true,
                     SetTarget::Charset => {
-                        self.dirty
-                            .extend(CHARSET_VARS.iter().map(|name| name.to_string()));
+                        for name in CHARSET_VARS {
+                            self.dirty.entry(name.to_string()).or_insert(line);
+                        }
                     }
                     SetTarget::Var { name, restores } => {
                         if restores {
                             self.dirty.remove(&name);
                         } else {
-                            self.dirty.insert(name);
+                            self.dirty.entry(name).or_insert(line);
                         }
                     }
                 }
             }
-            return true;
+            return Ok(());
         }
         if first.eq_ignore_ascii_case("SELECT") && is_setval(sql) {
-            self.setval = true;
-            return true;
+            return Ok(());
         }
         if self.note_trigger(sql) {
-            return true;
+            return Ok(());
         }
         if first.eq_ignore_ascii_case("ALTER") {
             let words: Vec<&str> = Words::new(sql).take(64).collect();
@@ -921,13 +997,13 @@ impl OrderScan {
                     }
                     None => self.any_trigger = true,
                 }
-                return true;
+                return Ok(());
             }
         }
         if !deferred_without_rows(sql, first) {
-            self.tail_only = true;
+            self.tail_only.get_or_insert(line);
         }
-        true
+        Ok(())
     }
 }
 
@@ -6607,13 +6683,24 @@ INSERT INTO `table_c` VALUES (100);\n\
         assert!(w1_own[0].sql.contains("table_b"));
     }
 
-    fn fits(driver: Driver, script: &str) -> Option<ParallelFit> {
+    fn fit(driver: Driver, script: &str) -> FileFit {
         parallel_fit(
             Cursor::new(script.as_bytes()),
             driver,
             &AtomicBool::new(false),
         )
         .unwrap()
+    }
+
+    fn fits(driver: Driver, script: &str) -> bool {
+        fit(driver, script) == FileFit::Parallel
+    }
+
+    fn in_order(driver: Driver, script: &str) -> InOrder {
+        match fit(driver, script) {
+            FileFit::InOrder(why) => why,
+            FileFit::Parallel => panic!("expected file order for:\n{script}"),
+        }
     }
 
     const MYSQLDUMP: &str = "-- MySQL dump 10.13  Distrib 8.0.36
@@ -6646,14 +6733,37 @@ UNLOCK TABLES;
 ";
 
     #[test]
-    fn mysqldump_output_loads_in_parallel_with_split_tables() {
-        let fit = fits(Driver::Mysql, MYSQLDUMP).expect("mysqldump output fits");
-        assert!(fit.split_tables);
-        // The same statements without a dump header still fit, but each table stays on one worker.
+    fn mysqldump_output_loads_in_parallel() {
+        assert!(fits(Driver::Mysql, MYSQLDUMP));
+        assert!(!fits(Driver::Sqlite, MYSQLDUMP));
+        assert!(!fits(Driver::Mssql, MYSQLDUMP));
+    }
+
+    #[test]
+    fn files_without_a_dump_header_are_not_read_past_the_head() {
         let headless = MYSQLDUMP.split_once('\n').unwrap().1;
-        assert!(!fits(Driver::Mysql, headless).unwrap().split_tables);
-        assert!(fits(Driver::Sqlite, MYSQLDUMP).is_none());
-        assert!(fits(Driver::Mssql, MYSQLDUMP).is_none());
+        assert_eq!(in_order(Driver::Mysql, headless), InOrder::file(NOT_A_DUMP));
+        let mut reader = Cursor::new(MYSQLDUMP.as_bytes());
+        assert!(starts_like_dump(&mut reader).unwrap());
+        assert_eq!(reader.position(), 0);
+        let bom = format!("\u{feff}{MYSQLDUMP}");
+        assert!(starts_like_dump(&mut Cursor::new(bom.as_bytes())).unwrap());
+    }
+
+    #[test]
+    fn reasons_name_the_earlier_line_that_rules_out_later_rows() {
+        let mut script = String::from("-- MySQL dump\nCREATE TABLE a (id int);\n");
+        script.push_str(&"INSERT INTO a VALUES (1);\n".repeat(1_200));
+        script.push_str("SET sql_mode = '';\nINSERT INTO a VALUES (2);\n");
+        let why = in_order(Driver::Mysql, &script);
+        assert_eq!(why.line, Some(1_204));
+        assert_eq!(
+            why.reason,
+            "inserts rows after line 1,203 changes a session setting"
+        );
+        assert_eq!(grouped(7), "7");
+        assert_eq!(grouped(1_000), "1,000");
+        assert_eq!(grouped(1_234_567), "1,234,567");
     }
 
     #[test]
@@ -6674,7 +6784,7 @@ INSERT INTO `posts` VALUES (1);
 /*!50013 DEFINER=`root`@`%` SQL SECURITY DEFINER */
 /*!50001 VIEW `names` AS select `users`.`name` AS `name` from `users` */;
 ";
-        assert!(fits(Driver::Mysql, script).is_some());
+        assert!(fits(Driver::Mysql, script));
     }
 
     #[test]
@@ -6705,11 +6815,7 @@ CREATE INDEX posts_user ON public.posts USING btree (user_id);
 ALTER TABLE ONLY public.posts ADD CONSTRAINT posts_user_fk FOREIGN KEY (user_id) REFERENCES public.users(id);
 REFRESH MATERIALIZED VIEW public.counts;
 ";
-        assert!(
-            fits(Driver::Postgres, script)
-                .expect("pg_dump output fits")
-                .split_tables
-        );
+        assert!(fits(Driver::Postgres, script), "pg_dump output fits");
     }
 
     #[test]
@@ -6718,57 +6824,80 @@ REFRESH MATERIALIZED VIEW public.counts;
             (
                 "USE after data",
                 "CREATE TABLE a (id int);\nINSERT INTO a VALUES (1);\nUSE other;\nCREATE TABLE b (id int);\nINSERT INTO b VALUES (1);\n",
+                6,
+                "inserts rows after line 4, which may depend on the rows before it",
             ),
             (
                 "UPDATE between INSERTs",
                 "CREATE TABLE a (id int);\nINSERT INTO a VALUES (1);\nUPDATE a SET id = 2;\nINSERT INTO a VALUES (1);\n",
+                5,
+                "inserts rows after line 4, which may depend on the rows before it",
             ),
             (
                 "TRUNCATE of a loaded table",
                 "CREATE TABLE a (id int);\nINSERT INTO a VALUES (1);\nTRUNCATE a;\nINSERT INTO a VALUES (2);\n",
+                4,
+                "changes “a” after rows were loaded into it",
             ),
             (
                 "DROP ... CASCADE after data",
                 "CREATE TABLE a (id int);\nINSERT INTO a VALUES (1);\nDROP TABLE b CASCADE;\nCREATE TABLE b (id int);\nINSERT INTO b VALUES (1);\n",
+                4,
+                "runs a statement between inserts that may depend on rows before it",
             ),
             (
                 "DROP of a loaded table",
                 "CREATE TABLE a (id int);\nINSERT INTO a VALUES (1);\nDROP TABLE a;\nCREATE TABLE a (id int);\nINSERT INTO a VALUES (2);\n",
+                4,
+                "changes “a” after rows were loaded into it",
             ),
             (
                 "ADD COLUMN between INSERTs",
                 "CREATE TABLE a (id int);\nINSERT INTO a VALUES (1);\nALTER TABLE a ADD COLUMN b int;\nINSERT INTO a VALUES (2, 3);\n",
+                5,
+                "inserts rows after line 4, which may depend on the rows before it",
             ),
             (
                 "trigger before data",
                 "CREATE TABLE a (id int);\nCREATE TRIGGER t BEFORE INSERT ON a FOR EACH ROW SET NEW.id = NEW.id + 1;\nINSERT INTO a VALUES (1);\n",
+                4,
+                "inserts into “a”, which has a trigger",
             ),
             (
                 "ROLLBACK",
                 "CREATE TABLE a (id int);\nBEGIN;\nINSERT INTO a VALUES (1);\nROLLBACK;\n",
+                5,
+                "rolls back a transaction",
             ),
             (
                 "INSERT ... SELECT",
                 "CREATE TABLE a (id int);\nCREATE TABLE b (id int);\nINSERT INTO a VALUES (1);\nINSERT INTO b SELECT id FROM a;\n",
+                5,
+                "inserts rows from a query",
             ),
             (
                 "insert into an unreadable table",
                 "CREATE TABLE a (id int);\nINSERT INTO (SELECT 1) VALUES (1);\n",
+                3,
+                "inserts into a table Recon can't name",
             ),
             (
                 "autocommit off",
                 "SET autocommit = 0;\nCREATE TABLE a (id int);\nINSERT INTO a VALUES (1);\n",
+                2,
+                "changes autocommit",
             ),
             (
                 "temporary table",
                 "CREATE TEMPORARY TABLE a (id int);\nINSERT INTO a VALUES (1);\n",
+                2,
+                "creates a temporary table",
             ),
         ];
-        for (name, script) in cases {
-            assert!(
-                fits(Driver::Mysql, script).is_none(),
-                "{name} must not load in parallel"
-            );
+        for (name, script, line, reason) in cases {
+            let why = in_order(Driver::Mysql, &format!("-- MySQL dump\n{script}"));
+            assert_eq!(why.line, Some(line), "{name}");
+            assert_eq!(why.reason, reason, "{name}");
         }
     }
 
