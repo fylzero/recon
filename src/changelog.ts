@@ -6,8 +6,19 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.14.0",
+    date: "November 9, 2026",
+    notes: [
+      "Choose No password under Authentication when a connection doesn't need one. Recon doesn't fetch a password or store one.",
+      "Imports load through a phased SQL loader that can use multiple workers.",
+      "New Multithreaded import setting in General, on by default. On, imports run in parallel and reconnect and resume; off, a single connection runs the import inside a transaction that rolls back and you start over, while a Postgres restore stays one transaction either way.",
+      "While a SQL import or restore runs, the dialog shows each loader thread, how much of the file has been read, and then how many statements have finished. Show machine stats asks before it shows processor load and temperature, and remembers when you choose Grant.",
+      "Importing a large statement into MySQL over TLS no longer stalls partway.",
+    ],
+  },
+  {
     version: "1.13.0",
-    date: "Unreleased",
+    date: "November 5, 2026",
     notes: [
       "SQL Server 2022 and newer can be connected, browsed, edited, exported, and restored. Sign in with a SQL Server login. A named instance connects on its own port, which SQL Server Configuration Manager shows.",
     ],
@@ -17,10 +28,6 @@ export const CHANGELOG: ChangelogRelease[] = [
     date: "October 27, 2026",
     notes: [
       "Create a table with the New table button next to Filter tables. Enter a name, and Recon creates the table with an auto-incrementing id primary key and opens it on the Structure tab so you can add more columns. When the sidebar is narrow, the button shows just a +.",
-      "Choose No password under Authentication when a connection doesn't need one. Recon doesn't fetch a password or store one.",
-      "Imports load through a phased SQL loader that can use multiple workers.",
-      "New Multithreaded import setting in General, on by default. On, imports run in parallel and reconnect and resume; off, a single connection runs the import inside a transaction that rolls back and you start over, while a Postgres restore stays one transaction either way.",
-      "While a SQL import or restore runs, the dialog shows each loader thread, how much of the file has been read, and then how many statements have finished. Show machine stats asks before it shows processor load and temperature, and remembers when you choose Grant.",
     ],
   },
   {
