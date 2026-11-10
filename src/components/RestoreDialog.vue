@@ -9,6 +9,7 @@ import { formatDuration, importStages, resumeAt, resumeChoice, runPhase, stagesP
 import type { BackupInfo, Driver, ImportProgress, ImportResume, ImportResumePoint } from "../types";
 import ImportWorkDashboard from "./ImportWorkDashboard.vue";
 import Modal from "./Modal.vue";
+import TransferRoute from "./TransferRoute.vue";
 
 const props = defineProps<{
   connectionId: string;
@@ -159,34 +160,54 @@ onUnmounted(() => stopProgress?.());
 </script>
 
 <template>
-  <Modal v-if="!job.hidden.value" :title="`Restore ${label} “${namespace}”`" :xwide="running" @close="close">
-    <p class="transfer-file" :title="path">{{ fileName }}</p>
-    <p class="muted tiny">
-      Backup of “{{ info.namespace || namespace }}”<template v-if="info.server"> from {{ info.server }}</template>,
-      made {{ created }}.
-    </p>
-    <p v-if="renamed" class="muted tiny">
-      It was made from “{{ info.namespace }}” and will be restored into “{{ namespace }}”.
-    </p>
-    <div class="transfer-warning" role="alert">
-      <strong>Everything in “{{ namespace }}” will be deleted</strong>
-      <p>
-        Its tables, views, and routines are replaced with the ones in this backup. {{ loss }}
-        {{ partial }}
+  <Modal v-if="!job.hidden.value" :title="`Restore ${label}`" :xwide="running" @close="close">
+    <template v-if="running" #aside>
+      <TransferRoute
+        :file="fileName"
+        :path="path"
+        file-label="Recon backup"
+        :target="namespace"
+        :target-label="namespaceLabel"
+        :driver="driver"
+      />
+    </template>
+    <TransferRoute
+      v-if="!running"
+      :file="fileName"
+      :path="path"
+      file-label="Recon backup"
+      :target="namespace"
+      :target-label="namespaceLabel"
+      :driver="driver"
+    />
+    <template v-if="!running">
+      <p class="muted tiny">
+        Backup of “{{ info.namespace || namespace }}”<template v-if="info.server"> from {{ info.server }}</template>,
+        made {{ created }}.
       </p>
-      <template v-if="info.skipped.length">
+      <p v-if="renamed" class="muted tiny">
+        It was made from “{{ info.namespace }}” and will be restored into “{{ namespace }}”.
+      </p>
+      <div class="transfer-warning" role="alert">
+        <strong>Everything in “{{ namespace }}” will be deleted</strong>
         <p>
-          These tables and routines are not in this backup. Any with these names in “{{ namespace }}” will be deleted:
+          Its tables, views, and routines are replaced with the ones in this backup. {{ loss }}
+          {{ partial }}
         </p>
-        <ul>
-          <li v-for="item in info.skipped" :key="item">{{ item }}</li>
-        </ul>
-      </template>
-    </div>
-    <label class="checkbox-row">
-      <input v-model="understood" type="checkbox" :disabled="running || Boolean(resumePoint)" />
-      I understand everything in “{{ namespace }}” will be deleted
-    </label>
+        <template v-if="info.skipped.length">
+          <p>
+            These tables and routines are not in this backup. Any with these names in “{{ namespace }}” will be deleted:
+          </p>
+          <ul>
+            <li v-for="item in info.skipped" :key="item">{{ item }}</li>
+          </ul>
+        </template>
+      </div>
+      <label class="checkbox-row">
+        <input v-model="understood" type="checkbox" :disabled="Boolean(resumePoint)" />
+        I understand everything in “{{ namespace }}” will be deleted
+      </label>
+    </template>
     <div v-if="running" class="transfer-progress" aria-live="polite">
       <ImportWorkDashboard :progress="dashboard" />
       <p class="muted tiny transfer-status">

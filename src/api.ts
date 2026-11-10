@@ -366,8 +366,9 @@ export function importSql(
   namespace: string,
   path: string,
   resume: ImportResume | null = null,
+  multithreaded: boolean | null = null,
 ) {
-  return invoke<ImportResult>("import_sql", { connectionId, transferId, namespace, path, resume });
+  return invoke<ImportResult>("import_sql", { connectionId, transferId, namespace, path, resume, multithreaded });
 }
 
 /** What `importSql` and `restoreDatabase` reject with, which can say where to resume. */

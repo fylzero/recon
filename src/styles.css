@@ -357,6 +357,13 @@ button.commit:hover:not(:disabled) {
   margin-bottom: 0.85rem;
 }
 
+.modal-title-split {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
 .modal-body {
   display: flex;
   flex-direction: column;
@@ -2642,15 +2649,6 @@ button.link-button:hover:not(:disabled) {
 }
 
 .transfer-summary,
-.transfer-file {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.transfer-file {
-  font-weight: 600;
-}
-
 .transfer-format {
   align-self: flex-start;
 }
@@ -2792,6 +2790,76 @@ button.link-button:hover:not(:disabled) {
 .transfer-status-label ~ span {
   flex-shrink: 0;
   white-space: nowrap;
+}
+
+.transfer-route {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  padding: 0.25rem 0;
+}
+
+.transfer-route + .checkbox-row {
+  align-self: center;
+}
+
+.modal-title-split .transfer-route {
+  padding: 0;
+  font-weight: 400;
+}
+
+.transfer-route-end {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.transfer-route-end:last-child {
+  min-width: 8rem;
+}
+
+.transfer-route-icon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 7px;
+  background: var(--bg-hover);
+  color: var(--muted);
+}
+
+.transfer-route-icon svg {
+  width: 1.15rem;
+  height: 1.15rem;
+}
+
+.transfer-route-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.transfer-route-text strong {
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.transfer-route-text span {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.transfer-route-arrow {
+  flex: none;
+  width: 1.1rem;
+  height: 1.1rem;
+  color: var(--muted);
 }
 
 .transfer-warning {

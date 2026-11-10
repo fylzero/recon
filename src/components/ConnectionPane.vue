@@ -3561,6 +3561,7 @@ onUnmounted(() => {
       <ImportDialog
         v-if="importTarget"
         :connection-id="sessionId"
+        :driver="driver"
         :namespace="importTarget.namespace"
         :namespace-label="namespaceLabel"
         :path="importTarget.path"

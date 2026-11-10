@@ -1917,8 +1917,8 @@ fn check_resume(resume: Option<&Resume>, fingerprint: &str, path: &str) -> Resul
  * first error. Nothing is wrapped in a transaction, so statements before a
  * failure stay applied. If the connection drops, it reconnects and picks up
  * where it stopped, and `resume` picks up a run that stopped for good. With
- * multithreaded import on, a file whose result can't depend on statement
- * order loads over several connections.
+ * multithreaded import on, a dump [`starts_like_dump`] knows loads over
+ * several connections. `multithreaded` overrides the setting for this run.
  */
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
@@ -1931,8 +1931,9 @@ pub async fn import_sql(
     namespace: String,
     path: String,
     resume: Option<Resume>,
+    multithreaded: Option<bool>,
 ) -> Result<ImportResult, ImportError> {
-    let multithreaded = multithreaded_import(&app);
+    let multithreaded = multithreaded.unwrap_or_else(|| multithreaded_import(&app));
     let mut session = session_for_run(&sessions, &connection_id, resume.as_ref()).await?;
     let fingerprint = fingerprint(&path)?;
     check_resume(resume.as_ref(), &fingerprint, &path)?;

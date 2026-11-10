@@ -6,12 +6,14 @@ import { useApp } from "../composables/useApp";
 import { useTransferJob } from "../composables/useTransfers";
 import { baseName } from "../platform";
 import { formatDuration, importStages, resumeAt, resumeChoice, runPhase, stagesPercent } from "../transfer";
-import type { ImportProgress, ImportResume, ImportResumePoint } from "../types";
+import type { Driver, ImportProgress, ImportResume, ImportResumePoint } from "../types";
 import ImportWorkDashboard from "./ImportWorkDashboard.vue";
 import Modal from "./Modal.vue";
+import TransferRoute from "./TransferRoute.vue";
 
 const props = defineProps<{
   connectionId: string;
+  driver: Driver;
   namespace: string;
   namespaceLabel: string;
   path: string;
@@ -38,6 +40,9 @@ let transferId = "";
 let stopProgress: UnlistenFn | null = null;
 
 const fileName = computed(() => baseName(props.path));
+const canThread = computed(() => props.driver === "mysql" || props.driver === "postgres");
+/** For this import only. It starts from the setting in General. */
+const multithreaded = ref(multithreadedImport.value);
 const percent = computed(() => Math.round(stagesPercent(importStages(dashboard.value))));
 const phase = computed(() => runPhase(progress.value));
 const uncertain = computed(() => Boolean(resumePoint.value && resumePoint.value.to > resumePoint.value.from));
@@ -75,7 +80,7 @@ async function start(resume: ImportResume | null = null) {
     }
   });
   try {
-    const result = await api.importSql(props.connectionId, transferId, props.namespace, props.path, resume);
+    const result = await api.importSql(props.connectionId, transferId, props.namespace, props.path, resume, multithreaded.value);
     const statements = `${result.statements.toLocaleString()} ${result.statements === 1 ? "statement" : "statements"}`;
     const duration = formatDuration(result.durationMs);
     showToast(`Imported ${fileName.value} into “${props.namespace}” in ${duration} (${statements})`);
@@ -118,16 +123,34 @@ onUnmounted(() => stopProgress?.());
 </script>
 
 <template>
-  <Modal v-if="!job.hidden.value" :title="`Import into “${namespace}”`" :xwide="running" @close="close">
-    <p class="transfer-file" :title="path">{{ fileName }}</p>
-    <p class="muted tiny">
-      Runs every statement in the file against the {{ namespaceLabel.toLowerCase() }} “{{ namespace }}” and
-      stops at the first error. Anything that ran before an error stays applied. If the connection drops, Recon
-      reconnects and picks up where it left off.
-      <template v-if="multithreadedImport">
-        Multithreaded import is on, so mysqldump, pg_dump, and Recon files load over several connections.
-      </template>
-    </p>
+  <Modal v-if="!job.hidden.value" title="Import SQL file" :xwide="running" @close="close">
+    <template v-if="running" #aside>
+      <TransferRoute
+        :file="fileName"
+        :path="path"
+        :file-label="/\.gz$/i.test(fileName) ? 'Gzipped SQL file' : 'SQL file'"
+        :target="namespace"
+        :target-label="namespaceLabel"
+        :driver="driver"
+      />
+    </template>
+    <TransferRoute
+      v-if="!running"
+      :file="fileName"
+      :path="path"
+      :file-label="/\.gz$/i.test(fileName) ? 'Gzipped SQL file' : 'SQL file'"
+      :target="namespace"
+      :target-label="namespaceLabel"
+      :driver="driver"
+    />
+    <label
+      v-if="!running && canThread"
+      class="checkbox-row"
+      title="Loads mysqldump, pg_dump, and Recon files over one connection per processor core. Set the default in General settings."
+    >
+      <input v-model="multithreaded" type="checkbox" :disabled="Boolean(resumePoint)" />
+      Multithreaded import
+    </label>
     <div v-if="running" class="transfer-progress" aria-live="polite">
       <ImportWorkDashboard :progress="dashboard" />
       <p class="muted tiny transfer-status">
