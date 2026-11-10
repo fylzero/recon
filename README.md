@@ -255,6 +255,12 @@ This command:
 
 **Note**: The **first** `tauri dev` (or `tauri build`) downloads crates and compiles from scratch, including the MySQL, PostgreSQL, SQLite, and SQL Server drivers. This often takes several minutes. Subsequent runs are much faster.
 
+| Database | Connection details |
+| --- | --- |
+| MySQL / MariaDB | Host, port (3306), user, authentication (password, no password, AWS IAM, or password command), database, SSL mode |
+| PostgreSQL | Host, port (5432), user, authentication (password, no password, AWS IAM, or password command), database, SSL mode |
+| SQLite | A database file on disk (Recon can create a new one) |
+
 ### Building a release
 
 Build a production app bundle:

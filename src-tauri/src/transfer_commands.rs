@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -10,11 +10,16 @@ use flate2::bufread::MultiGzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
+use crate::commands::AppState;
 use crate::db::dump::{self, Dump, DumpOptions, DumpProgress, DumpSummary, DumpTable};
 use crate::db::restore::{self, BackupInfo};
 use crate::db::resume::{self, Stop, Tracker};
+use crate::db::sql_load::{
+    load_sql, starts_like_dump, LoadOptions, LoadSqlError, LoadTrack, LoadWork, LoadWorkerState,
+    NOT_A_DUMP,
+};
 use crate::db::sql_split::{is_copy_from_stdin, Splitter};
 use crate::db::tabular::TabularOptions;
 use crate::db::{
@@ -29,8 +34,8 @@ use crate::tabular_commands;
 pub(crate) const EXPORT_PROGRESS_EVENT: &str = "export-progress";
 pub(crate) const IMPORT_PROGRESS_EVENT: &str = "import-progress";
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(120);
-pub(crate) const READ_BUFFER: usize = 256 * 1024;
-const COPY_CHUNK: usize = 256 * 1024;
+pub(crate) const READ_BUFFER: usize = 1024 * 1024;
+const COPY_CHUNK: usize = 1024 * 1024;
 pub(crate) const IMPORT_CANCELLED: &str = "Import cancelled.";
 const RESTORE_CANCELLED: &str = "Restore cancelled.";
 /// How long an import waits for a dropped connection to come back before stopping to let the user resume later.
@@ -486,13 +491,23 @@ pub struct ResumePoint {
     pub backend: Option<Backend>,
     /// Running the uncertain statements again hit rows they add, so they were most likely saved.
     pub likely_saved: bool,
+    /// The run loaded the file with `load_sql`, so a resumed run must too, with the same `split_tables`.
+    pub parallel: bool,
+    pub split_tables: bool,
+    /**
+     * For a parallel run, the statements that finished, as half-open index
+     * ranges. Workers finish out of file order, so `from` alone can't say.
+     */
+    pub done: Vec<[u64; 2]>,
+    /// For a parallel run, the statements between `from` and `to` that may or may not have been saved.
+    pub uncertain: Vec<u64>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportError {
     pub message: String,
-    pub resume: Option<ResumePoint>,
+    pub resume: Option<Box<ResumePoint>>,
 }
 
 impl From<String> for ImportError {
@@ -513,17 +528,45 @@ pub struct Resume {
     pub fingerprint: String,
     #[serde(default)]
     pub backend: Option<Backend>,
+    #[serde(default)]
+    pub parallel: bool,
+    #[serde(default)]
+    pub split_tables: bool,
+    /// `ResumePoint::done`.
+    #[serde(default)]
+    pub done: Vec<[u64; 2]>,
+    /// The uncertain statements to treat as saved, when the user chose to skip past them.
+    #[serde(default)]
+    pub skipped: Vec<u64>,
 }
 
 /// How far a file run has got.
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Progress {
     statements: u64,
     bytes: u64,
     total_bytes: u64,
-    /// `running`, `skipping` past statements that already ran, or `reconnecting`.
+    /**
+     * `planning` while the file is split, `running`, `skipping` past statements that already
+     * ran, or `reconnecting`.
+     */
     phase: &'static str,
+    file_bytes: u64,
+    file_total_bytes: u64,
+    /// 0 until the split has counted statements.
+    total_statements: u64,
+    workers: Vec<WorkerProgress>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkerProgress {
+    index: usize,
+    statements: u64,
+    total_statements: u64,
+    /// `waiting`, `running`, or `done`.
+    state: &'static str,
 }
 
 #[derive(Clone, Serialize)]
@@ -534,6 +577,9 @@ struct ImportProgressEvent<'a> {
     progress: Progress,
     attempt: u32,
     error: Option<&'a str>,
+    /// Sent once, when a run that could have loaded in parallel settles on file order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    in_order: Option<&'a str>,
 }
 
 fn emit_progress(
@@ -550,21 +596,137 @@ fn emit_progress(
             progress,
             attempt,
             error,
+            in_order: None,
         },
     );
 }
 
+fn emit_in_order(app: &AppHandle, transfer_id: &str, progress: Progress, why: &str) {
+    let _ = app.emit(
+        IMPORT_PROGRESS_EVENT,
+        ImportProgressEvent {
+            transfer_id,
+            progress,
+            attempt: 0,
+            error: None,
+            in_order: Some(why),
+        },
+    );
+}
+
+fn idle_workers(workers: usize) -> Vec<WorkerProgress> {
+    (0..workers.max(1))
+        .map(|index| WorkerProgress {
+            index,
+            statements: 0,
+            total_statements: 0,
+            state: LoadWorkerState::Waiting.as_str(),
+        })
+        .collect()
+}
+
+fn worker_rows(work: &LoadWork) -> Vec<WorkerProgress> {
+    work.workers
+        .iter()
+        .map(|worker| WorkerProgress {
+            index: worker.index,
+            statements: worker.statements,
+            total_statements: worker.total_statements,
+            state: worker.state.as_str(),
+        })
+        .collect()
+}
+
+struct ProgressGate {
+    planning: bool,
+    inserts_done: bool,
+    throttle: Throttle,
+}
+
+struct PlanningWatch {
+    gate: Arc<Mutex<ProgressGate>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl PlanningWatch {
+    fn start(
+        app: AppHandle,
+        transfer_id: String,
+        file_read: Arc<AtomicU64>,
+        file_total: u64,
+        track: LoadTrack,
+        gate: Arc<Mutex<ProgressGate>>,
+    ) -> Self {
+        let thread_gate = gate.clone();
+        let thread = std::thread::spawn(move || loop {
+            let mut gate = thread_gate.lock().unwrap_or_else(|err| err.into_inner());
+            if !gate.planning {
+                break;
+            }
+            if gate.throttle.ready(false) {
+                let work = track.snapshot();
+                emit_progress(
+                    &app,
+                    &transfer_id,
+                    Progress {
+                        statements: work.statements,
+                        bytes: 0,
+                        total_bytes: 0,
+                        phase: "planning",
+                        file_bytes: file_read.load(Ordering::Relaxed),
+                        file_total_bytes: file_total,
+                        total_statements: work.total_statements,
+                        workers: worker_rows(&work),
+                    },
+                    0,
+                    None,
+                );
+            }
+            drop(gate);
+            std::thread::sleep(Duration::from_millis(40));
+        });
+        Self {
+            gate,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for PlanningWatch {
+    fn drop(&mut self) {
+        self.gate
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .planning = false;
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 /// Counts bytes read from the file itself, so progress tracks the file size even when it's gzipped.
+/// Counts the bytes taken from `inner`, not what it has buffered ahead, so progress doesn't jump by a whole buffer.
 struct Counting<R> {
     inner: R,
     count: Arc<AtomicU64>,
 }
 
-impl<R: Read> Read for Counting<R> {
+impl<R: BufRead> Read for Counting<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let read = self.inner.read(buf)?;
         self.count.fetch_add(read as u64, Ordering::Relaxed);
         Ok(read)
+    }
+}
+
+impl<R: BufRead> BufRead for Counting<R> {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        self.inner.fill_buf()
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.inner.consume(amount);
+        self.count.fetch_add(amount as u64, Ordering::Relaxed);
     }
 }
 
@@ -644,11 +806,24 @@ pub(crate) struct SqlFile {
 
 impl SqlFile {
     fn progress(&self, statements: u64, phase: &'static str) -> Progress {
+        self.progress_for(statements, phase, 0)
+    }
+
+    fn progress_for(&self, statements: u64, phase: &'static str, workers: usize) -> Progress {
+        let file_bytes = self.read.load(Ordering::Relaxed);
         Progress {
             statements,
-            bytes: self.read.load(Ordering::Relaxed),
+            bytes: file_bytes,
             total_bytes: self.total_bytes,
             phase,
+            file_bytes,
+            file_total_bytes: self.total_bytes,
+            total_statements: 0,
+            workers: if workers == 0 {
+                Vec::new()
+            } else {
+                idle_workers(workers)
+            },
         }
     }
 }
@@ -658,13 +833,10 @@ pub(crate) fn open_sql_file(path: &str) -> Result<SqlFile, String> {
     let file = File::open(path).map_err(|err| format!("Could not open {name}: {err}"))?;
     let total_bytes = file.metadata().map(|meta| meta.len()).unwrap_or(0);
     let read = Arc::new(AtomicU64::new(0));
-    let mut counted = BufReader::with_capacity(
-        READ_BUFFER,
-        Counting {
-            inner: file,
-            count: read.clone(),
-        },
-    );
+    let mut counted = Counting {
+        inner: BufReader::with_capacity(READ_BUFFER, file),
+        count: read.clone(),
+    };
     let gzipped = counted
         .fill_buf()
         .map_err(|err| format!("Could not read {name}: {err}"))?
@@ -683,6 +855,63 @@ pub(crate) fn open_sql_file(path: &str) -> Result<SqlFile, String> {
         read,
         total_bytes,
     })
+}
+
+/// How many connections `load_sql` may use. One per logical CPU core on MySQL and Postgres.
+fn sql_workers(driver: Driver) -> usize {
+    match driver {
+        Driver::Sqlite | Driver::Mssql => 1,
+        Driver::Mysql | Driver::Postgres => std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1),
+    }
+}
+
+/// The multithreaded-import flag stored on app data. Its default, false, lives on that field.
+fn multithreaded_import(app: &AppHandle) -> bool {
+    let state = app.state::<AppState>();
+    let enabled = match state.data.lock() {
+        Ok(data) => data.multithreaded_import,
+        Err(poisoned) => poisoned.into_inner().multithreaded_import,
+    };
+    enabled
+}
+
+/**
+ * Session setup for each extra worker. `load_sql` runs this on those
+ * connections only, not on the coordinator, and then repeats the dump's own
+ * session statements, so every connection ends up with the dump's settings.
+ */
+fn worker_preamble(driver: Driver, namespace: &str) -> Vec<String> {
+    (!namespace.is_empty())
+        .then(|| dialect(driver).use_namespace_sql(namespace))
+        .flatten()
+        .into_iter()
+        .collect()
+}
+
+/// Gives the coordinator, which builds the indexes after the rows, more memory to sort with.
+async fn tune_import_connection(conn: &mut Conn, driver: Driver) {
+    if driver == Driver::Postgres {
+        let _ = conn
+            .execute("SET SESSION maintenance_work_mem = '256MB'")
+            .await;
+    }
+}
+
+/// Indexes to pass as `skip_completed`. Session statements are left out so a new connection runs them again.
+fn finished_skip(completed: &HashSet<usize>, session_indexes: &HashSet<usize>) -> HashSet<usize> {
+    if completed.is_empty() {
+        HashSet::new()
+    } else {
+        completed.difference(session_indexes).copied().collect()
+    }
+}
+
+/// The source line a `load_sql` failure names, when the message has one.
+fn statement_line(message: &str) -> Option<usize> {
+    let rest = message.strip_prefix("Line ")?;
+    rest.split(':').next()?.trim().parse().ok()
 }
 
 /// Changes when the file does, so a resumed run never skips ahead in a different file.
@@ -890,6 +1119,304 @@ fn uncertain(stop: &Stop) -> String {
     )
 }
 
+/// Aborts the thread that copies a user cancel onto the flag `load_sql` watches.
+struct CancelWatch {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for CancelWatch {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            thread.thread().unpark();
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Walks the file in the same statement order `load_sql` indexes, including `COPY` data as one statement.
+fn visit_statements(
+    path: &str,
+    driver: Driver,
+    mut visit: impl FnMut(usize, &crate::db::sql_split::Statement) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut file = open_sql_file(path)?;
+    let mut splitter = Splitter::new(driver);
+    let mut pending = Vec::new();
+    let mut line = Vec::new();
+    let mut index = 0usize;
+    loop {
+        let size = read_line(&mut *file.reader, &mut line)?;
+        if size == 0 {
+            splitter.finish(&mut pending);
+        } else {
+            splitter.push_bytes(&line, &mut pending)?;
+        }
+        for statement in std::mem::take(&mut pending) {
+            let copy = driver == Driver::Postgres && is_copy_from_stdin(&statement.sql);
+            if copy {
+                skip_copy_data(&mut *file.reader, &mut splitter)?;
+            }
+            visit(index, &statement)?;
+            index += 1;
+        }
+        if size == 0 {
+            return Ok(());
+        }
+    }
+}
+
+fn session_statement_indexes(path: &str, driver: Driver) -> Result<HashSet<usize>, String> {
+    let mut session_indexes = HashSet::new();
+    visit_statements(path, driver, |index, statement| {
+        if resume::classify(driver, &statement.sql).session {
+            session_indexes.insert(index);
+        }
+        Ok(())
+    })?;
+    Ok(session_indexes)
+}
+
+/**
+ * Records a dropped `load_sql` attempt.
+ *
+ * Each finished statement already committed on its own connection, so
+ * finished indexes stay in `completed` and only the ones in flight leave it.
+ * Each of those may or may not have committed before the drop, so the stop
+ * spans them all. With none in flight, the stop is the first statement that
+ * hasn't finished. Session indexes are remembered so the next skip set leaves
+ * them out. Returns the stop and the lines of its uncertain statements.
+ */
+fn note_lost_statements(
+    path: &str,
+    driver: Driver,
+    completed: &mut HashSet<usize>,
+    session_indexes: &mut HashSet<usize>,
+    in_flight: &[usize],
+) -> Result<(Stop, HashSet<usize>), String> {
+    for index in in_flight {
+        completed.remove(index);
+    }
+    let lost: HashSet<usize> = in_flight.iter().copied().collect();
+    let mut stop: Option<Stop> = None;
+    let mut first_pending: Option<Stop> = None;
+    let mut retry_lines = HashSet::new();
+    visit_statements(path, driver, |index, statement| {
+        let class = resume::classify(driver, &statement.sql);
+        if class.session {
+            session_indexes.insert(index);
+        }
+        let at = index as u64;
+        if lost.contains(&index) {
+            let mut tracker = Tracker::new(driver);
+            tracker.before(at, statement.line, &class);
+            let one = tracker.stop(at, &class);
+            retry_lines.insert(statement.line);
+            match stop.as_mut() {
+                Some(stop) => stop.absorb(one),
+                None => stop = Some(one),
+            }
+        } else if first_pending.is_none() && !completed.contains(&index) {
+            first_pending = Some(Stop::at(at, statement.line));
+        }
+        Ok(())
+    })?;
+    let stop = stop
+        .or(first_pending)
+        .unwrap_or_else(|| Stop::at(completed.len() as u64, 0));
+    Ok((stop, retry_lines))
+}
+
+/// Statement indexes as half-open ranges, for a `ResumePoint`.
+fn index_ranges(indexes: &HashSet<usize>) -> Vec<[u64; 2]> {
+    let mut sorted: Vec<u64> = indexes.iter().map(|&index| index as u64).collect();
+    sorted.sort_unstable();
+    let mut ranges: Vec<[u64; 2]> = Vec::new();
+    for index in sorted {
+        match ranges.last_mut() {
+            Some(range) if range[1] == index => range[1] = index + 1,
+            _ => ranges.push([index, index + 1]),
+        }
+    }
+    ranges
+}
+
+/// The statements a resumed parallel run already has, from its `Resume`.
+fn resumed_indexes(resume: &Resume) -> Result<HashSet<usize>, String> {
+    let too_many = || String::from("This import has run too many statements to resume.");
+    let mut completed = HashSet::new();
+    for &[start, end] in &resume.done {
+        for index in start..end {
+            completed.insert(usize::try_from(index).map_err(|_| too_many())?);
+        }
+    }
+    for &index in &resume.skipped {
+        completed.insert(usize::try_from(index).map_err(|_| too_many())?);
+    }
+    Ok(completed)
+}
+
+/// Stops other workers without treating `load_sql`'s own cancel as the user cancelling.
+fn bridge_cancel(transfer: &Transfer<'_>) -> (Arc<AtomicBool>, CancelWatch) {
+    let gate = Arc::new(AtomicBool::new(transfer.cancelled()));
+    let user = transfer.cancel.clone();
+    let gate_for_watch = gate.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_for_watch = stop.clone();
+    // OS thread rather than a tokio task: `load_sql` splits the file synchronously and would starve a task on the same runtime.
+    let thread = std::thread::spawn(move || loop {
+        if user.load(Ordering::Relaxed) {
+            gate_for_watch.store(true, Ordering::Relaxed);
+            break;
+        }
+        if gate_for_watch.load(Ordering::Relaxed) || stop_for_watch.load(Ordering::Relaxed) {
+            break;
+        }
+        std::thread::park_timeout(Duration::from_millis(20));
+    });
+    (
+        gate,
+        CancelWatch {
+            stop,
+            thread: Some(thread),
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn load_dump(
+    app: &AppHandle,
+    transfer: &Transfer<'_>,
+    conn: &mut Conn,
+    pool: &db::Pool,
+    driver: Driver,
+    file: &mut SqlFile,
+    options: LoadOptions,
+    headroom: Option<&db::RaisedMax>,
+    preamble: Vec<String>,
+    skip: &HashSet<usize>,
+    completed: &mut HashSet<usize>,
+    executed: &mut u64,
+) -> Result<(), LoadSqlError> {
+    let (gate, _watch) = bridge_cancel(transfer);
+    let headroom = headroom.cloned();
+    let pool = pool.clone();
+    let open_worker = move || {
+        let pool = pool.clone();
+        let headroom = headroom.clone();
+        async move {
+            match &headroom {
+                Some(slot) => slot.detached().await,
+                None => pool.detached().await,
+            }
+        }
+    };
+    let app = app.clone();
+    let transfer_id = transfer.transfer_id.to_string();
+    let file_read = file.read.clone();
+    let file_total = file.total_bytes;
+    let track = LoadTrack::planning(options.workers);
+    let progress_gate = Arc::new(Mutex::new(ProgressGate {
+        planning: true,
+        inserts_done: false,
+        throttle: Throttle(None),
+    }));
+    let _planning = PlanningWatch::start(
+        app.clone(),
+        transfer_id.clone(),
+        file_read.clone(),
+        file_total,
+        track.clone(),
+        progress_gate.clone(),
+    );
+    let report_track = track.clone();
+    load_sql(
+        conn,
+        driver,
+        &mut *file.reader,
+        options,
+        open_worker,
+        gate.as_ref(),
+        move |progress| {
+            if let Some(index) = progress.statement_index {
+                completed.insert(index);
+            }
+            *executed = progress.statements;
+            let mut gate = progress_gate.lock().unwrap_or_else(|err| err.into_inner());
+            if gate.planning && progress.statement_index.is_some() {
+                return;
+            }
+            let was_planning = std::mem::replace(&mut gate.planning, false);
+            let work = report_track.snapshot();
+            let just_finished_inserts = !gate.inserts_done
+                && work.total_statements > 0
+                && work.statements >= work.total_statements;
+            if just_finished_inserts {
+                gate.inserts_done = true;
+            }
+            let finished = progress.total_bytes > 0 && progress.bytes >= progress.total_bytes;
+            if gate
+                .throttle
+                .ready(was_planning || just_finished_inserts || finished)
+            {
+                let file_bytes = file_read.load(Ordering::Relaxed);
+                emit_progress(
+                    &app,
+                    &transfer_id,
+                    Progress {
+                        statements: work.statements,
+                        bytes: progress.bytes,
+                        total_bytes: progress.total_bytes,
+                        phase: "running",
+                        file_bytes,
+                        file_total_bytes: file_total,
+                        total_statements: work.total_statements,
+                        workers: worker_rows(&work),
+                    },
+                    0,
+                    None,
+                );
+            }
+        },
+        preamble,
+        skip,
+        Some(track),
+    )
+    .await
+}
+
+/// How a run loads its file. A resumed run keeps the plan it stopped with, since the two count progress differently.
+enum Plan {
+    /// Statement by statement in file order on one connection, so `Stop::from` is where to pick up.
+    Sequential,
+    /// With `load_sql` over several connections, which finish statements out of order.
+    Parallel(Parallel),
+}
+
+struct Parallel {
+    options: LoadOptions,
+    /// Every statement that finished, across attempts.
+    completed: HashSet<usize>,
+    session_indexes: HashSet<usize>,
+    /// The statements the last drop left uncertain.
+    uncertain: Vec<u64>,
+    /// Lines of those statements, to tell whether a later failure is one of them running again.
+    retry_lines: HashSet<usize>,
+    /// Pool room for the extra connections.
+    headroom: Option<db::RaisedMax>,
+}
+
+impl Parallel {
+    async fn raise(&mut self, session: &Session) {
+        if let Some(old) = self.headroom.take() {
+            old.close().await;
+        }
+        let extras = self.options.workers.saturating_sub(1);
+        self.headroom = (extras > 0).then(|| session.pool.raise_max(extras as u32));
+    }
+}
+
 /**
  * Runs a file on its own connection. When the connection drops, it waits for
  * the connection to come back and picks up where the file stopped. Anything
@@ -908,26 +1435,63 @@ struct Replay<'a> {
 }
 
 impl Replay<'_> {
-    fn interrupted(&self, message: String, stop: &Stop, backend: Option<Backend>) -> ImportError {
+    fn interrupted(
+        &self,
+        message: String,
+        stop: &Stop,
+        backend: Option<Backend>,
+        plan: &Plan,
+    ) -> ImportError {
+        let (finished, parallel, split_tables, done, uncertain) = match plan {
+            Plan::Sequential => (stop.from, false, false, Vec::new(), Vec::new()),
+            Plan::Parallel(run) => (
+                run.completed.len() as u64,
+                true,
+                run.options.split_tables,
+                index_ranges(&run.completed),
+                run.uncertain.clone(),
+            ),
+        };
         ImportError {
-            message: with_statements_run(message, stop.from),
-            resume: Some(ResumePoint {
+            message: with_statements_run(message, finished),
+            resume: Some(Box::new(ResumePoint {
                 from: stop.from,
                 to: stop.to,
                 line: stop.line,
                 fingerprint: self.fingerprint.clone(),
                 backend,
                 likely_saved: false,
-            }),
+                parallel,
+                split_tables,
+                done,
+                uncertain,
+            })),
         }
     }
 
     fn renamed(&self, message: String) -> String {
-        if message == IMPORT_CANCELLED {
-            self.cancelled.to_string()
-        } else {
-            message
+        match message.strip_suffix(IMPORT_CANCELLED) {
+            Some(prefix) => format!("{prefix}{}", self.cancelled),
+            None => message,
         }
+    }
+
+    fn progress(&self, file: &SqlFile, statements: u64, plan: &Plan) -> Progress {
+        match plan {
+            Plan::Sequential => file.progress(statements, "running"),
+            Plan::Parallel(run) => file.progress_for(statements, "running", run.options.workers),
+        }
+    }
+
+    /// Whether `load_sql` may run the file in parallel, telling the dialog why when it may not.
+    fn parallel(&self) -> Result<bool, ImportError> {
+        let mut file = open_sql_file(self.path)?;
+        if starts_like_dump(&mut file.reader)? {
+            return Ok(true);
+        }
+        let progress = file.progress(0, "running");
+        emit_in_order(self.app, self.transfer.transfer_id, progress, NOT_A_DUMP);
+        Ok(false)
     }
 
     /// Tries to reconnect with growing pauses, for up to `RECONNECT_FOR`.
@@ -943,7 +1507,7 @@ impl Replay<'_> {
             ..progress
         };
         let transfer_id = self.transfer.transfer_id;
-        emit_progress(self.app, transfer_id, progress, 0, None);
+        emit_progress(self.app, transfer_id, progress.clone(), 0, None);
         loop {
             if self.transfer.cancelled() {
                 return Err(self.cancelled.into());
@@ -961,7 +1525,7 @@ impl Replay<'_> {
                     RECONNECT_FOR.as_secs() / 60
                 ));
             }
-            emit_progress(self.app, transfer_id, progress, attempt, Some(&err));
+            emit_progress(self.app, transfer_id, progress.clone(), attempt, Some(&err));
             let until = Instant::now() + delay;
             while Instant::now() < until {
                 if self.transfer.cancelled() {
@@ -975,13 +1539,15 @@ impl Replay<'_> {
     /**
      * One connection's worth of the run: connects, ends the connection a
      * dropped attempt left behind, checks that the uncertain statements in
-     * `check` can run again, and runs the file from statement `skip`.
+     * `check` can run again, and runs the file from statement `skip`, or
+     * past the statements a parallel run already finished.
      */
     #[allow(clippy::too_many_arguments)]
     async fn attempt(
         &self,
         session: &Session,
         file: &mut SqlFile,
+        plan: &mut Plan,
         skip: u64,
         check: Option<&Stop>,
         reset: &mut bool,
@@ -1022,33 +1588,140 @@ impl Replay<'_> {
                 *reset = false;
                 self.transfer.cancel.store(false, Ordering::Relaxed);
             }
-            let mut tracker = Tracker::new(driver);
-            let transfer_id = self.transfer.transfer_id;
-            let mut report = |progress| emit_progress(self.app, transfer_id, progress, 0, None);
-            run_sql_file(
-                &mut report,
-                &mut conn,
-                driver,
+            let run = match plan {
+                Plan::Sequential => {
+                    let mut tracker = Tracker::new(driver);
+                    let transfer_id = self.transfer.transfer_id;
+                    let mut report =
+                        |progress| emit_progress(self.app, transfer_id, progress, 0, None);
+                    return run_sql_file(
+                        &mut report,
+                        &mut conn,
+                        driver,
+                        self.transfer,
+                        file,
+                        skip,
+                        &mut tracker,
+                        executed,
+                    )
+                    .await;
+                }
+                Plan::Parallel(run) => run,
+            };
+            tune_import_connection(&mut conn, driver).await;
+            let finished = finished_skip(&run.completed, &run.session_indexes);
+            let loaded = load_dump(
+                self.app,
                 self.transfer,
+                &mut conn,
+                &session.pool,
+                driver,
                 file,
-                skip,
-                &mut tracker,
+                run.options,
+                run.headroom.as_ref(),
+                worker_preamble(driver, self.namespace),
+                &finished,
+                &mut run.completed,
                 executed,
             )
-            .await
+            .await;
+            match loaded {
+                Ok(()) => Ok(()),
+                Err(LoadSqlError::Failed(message)) => Err(RunError::Failed(message, *executed)),
+                Err(LoadSqlError::LostConnection(lost)) => {
+                    let (stop, lines) = note_lost_statements(
+                        self.path,
+                        driver,
+                        &mut run.completed,
+                        &mut run.session_indexes,
+                        &lost.in_flight,
+                    )
+                    .map_err(|err| {
+                        RunError::Failed(format!("{}\n\n{err}", lost.source), *executed)
+                    })?;
+                    run.uncertain = lost.in_flight.iter().map(|&index| index as u64).collect();
+                    run.retry_lines = lines;
+                    let message = if stop.line > 0 {
+                        format!("Line {}: {}", stop.line, lost.source)
+                    } else {
+                        lost.source
+                    };
+                    Err(RunError::Lost(message, Some(stop)))
+                }
+            }
         }
         .await;
         conn.close().await;
         result
     }
 
-    /// With `reset`, empties the namespace first, unless this resumes a run that already did.
+    /**
+     * Runs the file in parallel when `multithreaded` is on and the file allows
+     * it, otherwise in file order. With `reset`, empties the namespace first,
+     * unless this resumes a run that already did.
+     */
     async fn run(
+        &self,
+        session: &mut Arc<Session>,
+        resume: Option<Resume>,
+        reset: bool,
+        executed: &mut u64,
+        multithreaded: bool,
+    ) -> Result<(), ImportError> {
+        let driver = session.driver;
+        let workers = sql_workers(driver);
+        let split_tables = match &resume {
+            Some(resume) => resume.parallel.then_some(resume.split_tables),
+            None if multithreaded && workers > 1 => self.parallel()?.then_some(true),
+            None => None,
+        };
+        let mut plan = match split_tables {
+            Some(split_tables) => {
+                let completed = match &resume {
+                    Some(resume) => resumed_indexes(resume)?,
+                    None => HashSet::new(),
+                };
+                let session_indexes = if completed.is_empty() {
+                    HashSet::new()
+                } else {
+                    session_statement_indexes(self.path, driver)?
+                };
+                let mut run = Parallel {
+                    options: LoadOptions {
+                        workers,
+                        split_tables,
+                    },
+                    completed,
+                    session_indexes,
+                    uncertain: Vec::new(),
+                    retry_lines: HashSet::new(),
+                    headroom: None,
+                };
+                run.raise(session).await;
+                Plan::Parallel(run)
+            }
+            None => Plan::Sequential,
+        };
+        let result = self
+            .replay(session, resume, reset, executed, &mut plan)
+            .await;
+        if let Plan::Parallel(Parallel {
+            headroom: Some(headroom),
+            ..
+        }) = &plan
+        {
+            headroom.close().await;
+        }
+        result
+    }
+
+    async fn replay(
         &self,
         session: &mut Arc<Session>,
         resume: Option<Resume>,
         mut reset: bool,
         executed: &mut u64,
+        plan: &mut Plan,
     ) -> Result<(), ImportError> {
         let resumable = session.driver != Driver::Sqlite;
         let (mut at, mut backend) = match resume {
@@ -1072,16 +1745,21 @@ impl Replay<'_> {
             }
             let mut file = open_sql_file(self.path)?;
             if resumable && session.is_lost() {
-                *session = self
-                    .reconnect(session, file.progress(at.from, "running"))
-                    .await
-                    .map_err(|err| self.interrupted(err, &at, backend.clone()))?;
+                let progress = self.progress(&file, at.from, plan);
+                *session = match self.reconnect(session, progress).await {
+                    Ok(next) => next,
+                    Err(err) => return Err(self.interrupted(err, &at, backend, plan)),
+                };
+                if let Plan::Parallel(run) = plan {
+                    run.raise(session).await;
+                }
             }
             let checking = check.take();
             let outcome = self
                 .attempt(
                     session,
                     &mut file,
+                    plan,
                     at.from,
                     checking.as_ref(),
                     &mut reset,
@@ -1093,26 +1771,37 @@ impl Replay<'_> {
                 Ok(()) => return Ok(()),
                 Err(RunError::Unsure) => {
                     let message = format!("{dropped}\n\n{}", uncertain(&at));
-                    return Err(self.interrupted(message, &at, backend));
+                    return Err(self.interrupted(message, &at, backend, plan));
                 }
                 Err(RunError::Failed(message, index)) => {
+                    let cancelled = message.contains(IMPORT_CANCELLED);
+                    let line = statement_line(&message);
                     let message = self.renamed(message);
-                    let retried = |stop: &&Stop| (stop.from..stop.to).contains(&index);
-                    if let Some(stop) = retrying.as_ref().filter(retried) {
-                        let saved = likely_saved(&message);
-                        let reason = if saved {
-                            "A row it adds is already there, so it most likely ran before the connection dropped."
-                        } else {
-                            "It may have already run before the connection dropped."
-                        };
-                        let mut err =
-                            self.interrupted(format!("{message}\n\n{reason}"), stop, backend);
-                        if let Some(point) = err.resume.as_mut() {
-                            point.likely_saved = saved;
+                    let hit = |stop: &&Stop| match (&*plan, line) {
+                        (Plan::Parallel(run), Some(line)) => run.retry_lines.contains(&line),
+                        _ => (stop.from..stop.to).contains(&index),
+                    };
+                    if !cancelled {
+                        if let Some(stop) = retrying.as_ref().filter(hit) {
+                            let saved = likely_saved(&message);
+                            let reason = if saved {
+                                "A row it adds is already there, so it most likely ran before the connection dropped."
+                            } else {
+                                "It may have already run before the connection dropped."
+                            };
+                            let message = format!("{message}\n\n{reason}");
+                            let mut err = self.interrupted(message, stop, backend, plan);
+                            if let Some(point) = err.resume.as_mut() {
+                                point.likely_saved = saved;
+                            }
+                            return Err(err);
                         }
-                        return Err(err);
                     }
-                    return Err(with_statements_run(message, index).into());
+                    let finished = match plan {
+                        Plan::Sequential => index,
+                        Plan::Parallel(run) => run.completed.len() as u64,
+                    };
+                    return Err(with_statements_run(message, finished).into());
                 }
                 Err(RunError::Lost(message, stop)) => (message, stop),
             };
@@ -1122,7 +1811,7 @@ impl Replay<'_> {
             stalled = if stop.is_some() { 0 } else { stalled + 1 };
             let mut stop = stop.unwrap_or_else(|| at.clone());
             if stalled >= MAX_STALLED {
-                return Err(self.interrupted(message, &stop, backend));
+                return Err(self.interrupted(message, &stop, backend, plan));
             }
             if let Some(mut previous) = retrying.take() {
                 if stop.from == previous.from {
@@ -1130,20 +1819,27 @@ impl Replay<'_> {
                     stop = previous;
                 }
             }
-            let progress = file.progress(*executed, "running");
+            let progress = self.progress(&file, *executed, plan);
             *session = match self.reconnect(session, progress).await {
                 Ok(next) => next,
                 Err(err) => {
-                    return Err(self.interrupted(format!("{message}\n\n{err}"), &stop, backend))
+                    let message = format!("{message}\n\n{err}");
+                    return Err(self.interrupted(message, &stop, backend, plan));
                 }
             };
+            if let Plan::Parallel(run) = plan {
+                run.raise(session).await;
+            }
             if stop.uncertain() {
                 if !stop.repeatable {
                     let message = format!("{message}\n\n{}", uncertain(&stop));
-                    return Err(self.interrupted(message, &stop, backend));
+                    return Err(self.interrupted(message, &stop, backend, plan));
                 }
                 check = Some(stop.clone());
                 retrying = Some(stop.clone());
+            } else if let Plan::Parallel(run) = plan {
+                run.uncertain.clear();
+                run.retry_lines.clear();
             }
             dropped = message;
             at = stop;
@@ -1217,11 +1913,12 @@ fn check_resume(resume: Option<&Resume>, fingerprint: &str, path: &str) -> Resul
 }
 
 /**
- * Runs a .sql or gzipped .sql file statement by statement on its own
- * connection, stopping at the first error. Nothing is wrapped in a
- * transaction, so statements before a failure stay applied. If the
- * connection drops, it reconnects and picks up where it stopped, and
- * `resume` picks up a run that stopped for good.
+ * Runs a .sql or gzipped .sql file on its own connection, stopping at the
+ * first error. Nothing is wrapped in a transaction, so statements before a
+ * failure stay applied. If the connection drops, it reconnects and picks up
+ * where it stopped, and `resume` picks up a run that stopped for good. With
+ * multithreaded import on, a dump [`starts_like_dump`] knows loads over
+ * several connections. `multithreaded` overrides the setting for this run.
  */
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
@@ -1234,7 +1931,9 @@ pub async fn import_sql(
     namespace: String,
     path: String,
     resume: Option<Resume>,
+    multithreaded: Option<bool>,
 ) -> Result<ImportResult, ImportError> {
+    let multithreaded = multithreaded.unwrap_or_else(|| multithreaded_import(&app));
     let mut session = session_for_run(&sessions, &connection_id, resume.as_ref()).await?;
     let fingerprint = fingerprint(&path)?;
     check_resume(resume.as_ref(), &fingerprint, &path)?;
@@ -1251,7 +1950,9 @@ pub async fn import_sql(
         fingerprint,
         cancelled: IMPORT_CANCELLED,
     };
-    let outcome = replay.run(&mut session, resume, false, &mut executed).await;
+    let outcome = replay
+        .run(&mut session, resume, false, &mut executed, multithreaded)
+        .await;
     let sql = format!(
         "-- Imported {} ({executed} statements)",
         file_name(Path::new(&path))
@@ -1322,11 +2023,11 @@ async fn restore_in_transaction(
 }
 
 /**
- * Clears the namespace and replays a backup into it on one connection. On
- * Postgres and SQL Server both happen in a single transaction, so a failure or
- * cancel leaves everything as it was. Elsewhere DDL commits as it goes, so cancelling is
- * ignored while clearing, where stopping would leave the namespace empty, and
- * a dropped connection picks up where it stopped like an import does.
+ * Clears the namespace and replays a backup into it. On Postgres and SQL
+ * Server both happen in a single transaction on one connection, so a failure
+ * or cancel leaves everything as it was. Elsewhere DDL commits as it goes, so
+ * cancelling is ignored while clearing, where stopping would leave the
+ * namespace empty, and the replay runs like an import does.
  */
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
@@ -1340,6 +2041,7 @@ pub async fn restore_database(
     path: String,
     resume: Option<Resume>,
 ) -> Result<ImportResult, ImportError> {
+    let multithreaded = multithreaded_import(&app);
     let mut session = session_for_run(&sessions, &connection_id, resume.as_ref()).await?;
     let driver = session.driver;
     let info = read_backup_info(path.clone())?;
@@ -1382,7 +2084,9 @@ pub async fn restore_database(
             fingerprint,
             cancelled: RESTORE_CANCELLED,
         };
-        replay.run(&mut session, resume, true, &mut executed).await
+        replay
+            .run(&mut session, resume, true, &mut executed, multithreaded)
+            .await
     };
 
     if outcome.is_ok() {
@@ -1640,5 +2344,85 @@ mod tests {
             .unwrap();
         killer.close().await;
         admin.pool.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bridge_cancel_propagates_while_runtime_thread_is_blocked() {
+        let store = TransferStore::default();
+        let transfer = store.start("planning-cancel");
+        let (gate, _watch) = bridge_cancel(&transfer);
+
+        let canceller = std::thread::spawn({
+            let user = transfer.cancel.clone();
+            move || {
+                std::thread::sleep(Duration::from_millis(30));
+                user.store(true, Ordering::Relaxed);
+            }
+        });
+
+        let started = Instant::now();
+        while !gate.load(Ordering::Relaxed) {
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "cancel did not reach the planning gate while the runtime thread was busy"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        canceller.join().unwrap();
+    }
+
+    #[test]
+    fn sql_workers_follows_logical_cpu_cores() {
+        let cores = std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1);
+        assert_eq!(sql_workers(Driver::Mysql), cores);
+        assert_eq!(sql_workers(Driver::Postgres), cores);
+        assert_eq!(sql_workers(Driver::Sqlite), 1);
+        assert_eq!(sql_workers(Driver::Mssql), 1);
+    }
+
+    #[test]
+    fn finished_statements_round_trip_through_a_resume_point() {
+        let done: HashSet<usize> = [0, 1, 2, 5, 7, 8].into_iter().collect();
+        let ranges = index_ranges(&done);
+        assert_eq!(ranges, vec![[0, 3], [5, 6], [7, 9]]);
+        let resume = Resume {
+            skip: 3,
+            line: 4,
+            fingerprint: String::new(),
+            backend: None,
+            parallel: true,
+            split_tables: false,
+            done: ranges,
+            skipped: vec![4],
+        };
+        let mut expected = done.clone();
+        expected.insert(4);
+        assert_eq!(resumed_indexes(&resume).unwrap(), expected);
+    }
+
+    #[test]
+    fn statements_in_flight_on_several_workers_join_into_one_stop() {
+        let path = write_file(
+            "in-flight.sql",
+            "CREATE TABLE a (id int PRIMARY KEY);\nINSERT INTO a VALUES (1);\nCREATE TABLE b (id int PRIMARY KEY);\nINSERT INTO b VALUES (1);\nINSERT INTO a VALUES (2);\n",
+        );
+        let path = path.to_str().unwrap();
+        let mut completed: HashSet<usize> = [0, 2, 4].into_iter().collect();
+        let mut sessions = HashSet::new();
+        let (stop, retry_lines) =
+            note_lost_statements(path, Driver::Mysql, &mut completed, &mut sessions, &[3, 1])
+                .unwrap();
+        assert_eq!((stop.from, stop.to, stop.line), (1, 4, 2));
+        assert_eq!(retry_lines, [2, 4].into_iter().collect());
+        assert_eq!(completed, [0, 2, 4].into_iter().collect());
+
+        // With nothing in flight, the run picks up at the first statement that hasn't finished.
+        let mut completed: HashSet<usize> = [0, 1].into_iter().collect();
+        let (stop, retry_lines) =
+            note_lost_statements(path, Driver::Mysql, &mut completed, &mut sessions, &[]).unwrap();
+        assert_eq!((stop.from, stop.to, stop.line), (2, 2, 3));
+        assert!(retry_lines.is_empty());
     }
 }

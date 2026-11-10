@@ -1,6 +1,6 @@
 [package]
 name = "Recon"
-version = "1.13.0"
+version = "1.14.0"
 description = "A database client for MySQL, PostgreSQL, SQLite, and SQL Server"
 authors = ["RazorKode LLC"]
 license = "MIT"
@@ -32,6 +32,7 @@ sqlx = { version = "0.8", default-features = false, features = [
 ] }
 futures-util = { version = "0.3", features = ["io"] }
 flate2 = "1"
+memchr = "2"
 russh = { version = "0.63", default-features = false, features = ["ring", "rsa", "flate2"] }
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-notification = "2"
@@ -50,7 +51,14 @@ dbus-secret-service = "4"
 keyring = { version = "3", features = ["windows-native"] }
 
 [dev-dependencies]
+sqlx-core = { version = "=0.8.6", default-features = false }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# sqlx 0.8.6 deadlocks a TLS connection when rustls wants to read and write at
+# once: poll_ready waits for both, so a large statement never finishes after
+# MySQL has already stopped reading. Backport of launchbadge/sqlx#4251.
+[patch.crates-io]
+sqlx-core = { path = "vendor/sqlx-core" }
 
 [profile.release]
 codegen-units = 1

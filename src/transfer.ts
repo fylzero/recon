@@ -105,9 +105,40 @@ export function formatBytes(bytes: number) {
   return `${unit ? value.toFixed(1) : value} ${units[unit]}`;
 }
 
+/** Formats a transfer duration in milliseconds for completion toasts, matching the dashboard clock when >= 1 minute. */
+export function formatDuration(durationMs: number) {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) {
+    return "0.0s";
+  }
+  if (durationMs < 100) {
+    return `${Math.max(1, Math.round(durationMs))}ms`;
+  }
+  const totalSeconds = durationMs / 1000;
+  if (totalSeconds < 60) {
+    return `${totalSeconds.toFixed(1)}s`;
+  }
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const secText = seconds.toFixed(1).padStart(4, "0");
+  if (hours > 0) {
+    return `${hours}h ${minutes}m ${secText}s`;
+  }
+  return `${minutes}m ${secText}s`;
+}
+
 /** Picks a stopped import or restore up again, from `point.from` to run the uncertain statements again or `point.to` to skip them. */
 export function resumeAt(point: ImportResumePoint, skip: number): ImportResume {
-  return { skip, line: point.line, fingerprint: point.fingerprint, backend: point.backend };
+  return {
+    skip,
+    line: point.line,
+    fingerprint: point.fingerprint,
+    backend: point.backend,
+    parallel: point.parallel,
+    splitTables: point.splitTables,
+    done: point.done,
+    skipped: skip === point.from ? [] : point.uncertain,
+  };
 }
 
 /** Explains what resuming from `point` does, and the choice to make when some statements may or may not have run. */
@@ -134,6 +165,72 @@ export function runPhase(progress: ImportProgress | null) {
     return "Skipping what already ran…";
   }
   return null;
+}
+
+/** One step of an import or restore, as the dashboard shows it. */
+export interface ImportStage {
+  id: "read" | "rows" | "statements";
+  title: string;
+  description?: string;
+  percent: number;
+  /** Its share of the whole run, relative to the other stages. */
+  weight: number;
+}
+
+function share(done: number, total: number) {
+  return total > 0 ? Math.min(100, Math.max(0, (done / total) * 100)) : 0;
+}
+
+/** The steps of a run, from its latest progress. */
+export function importStages(progress: ImportProgress | null): ImportStage[] {
+  const stages: ImportStage[] = [];
+  if (!progress) {
+    stages.push({ id: "statements", title: "Import", description: "Starting", percent: 0, weight: 7 });
+    return stages;
+  }
+  if (!progress.workers.length) {
+    stages.push({
+      id: "statements",
+      title: "Run statements",
+      percent: share(progress.bytes, progress.totalBytes),
+      weight: 7,
+    });
+    return stages;
+  }
+  const planning = progress.phase === "planning";
+  let run = 0;
+  let total = 0;
+  for (const worker of progress.workers) {
+    run += worker.statements;
+    total += worker.totalStatements;
+  }
+  if (!total) {
+    run = progress.statements;
+    total = progress.totalStatements;
+  }
+  stages.push({
+    id: "read",
+    title: "Read file",
+    description: "Sort rows by table and create the tables",
+    percent: planning ? share(progress.fileBytes, progress.fileTotalBytes) : 100,
+    weight: 1,
+  });
+  stages.push({
+    id: "rows",
+    title: "Insert rows",
+    percent: planning ? 0 : share(run, total),
+    weight: 6,
+  });
+  return stages;
+}
+
+/** The whole run's percent across `stages`, by weight. */
+export function stagesPercent(stages: ImportStage[]) {
+  const weight = stages.reduce((sum, stage) => sum + stage.weight, 0);
+  if (!weight) {
+    return 0;
+  }
+  return stages.reduce((sum, stage) => sum + stage.percent * stage.weight, 0) / weight;
 }
 
 /** What a backup never includes, whatever the dumper manages to write. */

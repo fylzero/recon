@@ -5,6 +5,9 @@ export const isWindows = typeof navigator !== "undefined" && /Win/.test(navigato
 
 export const altKeyName = isMac ? "Option" : "Alt";
 
+/** Whether the backend can read processor load and temperature here. It has readers for macOS and Linux only. */
+export const hasMachineStats = !isWindows;
+
 export const fileManagerName = isMac ? "Finder" : isWindows ? "File Explorer" : "File Manager";
 
 export const secretStoreName = isMac ? "Keychain" : isWindows ? "Credential Manager" : "keyring";

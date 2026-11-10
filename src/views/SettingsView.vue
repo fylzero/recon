@@ -5,7 +5,9 @@ import {
   type SettingsSection,
   useTabs,
 } from "../composables/useTabs";
+import AppearanceSettingsView from "./settings/AppearanceSettingsView.vue";
 import GeneralSettingsView from "./settings/GeneralSettingsView.vue";
+import ImportExportSettingsView from "./settings/ImportExportSettingsView.vue";
 import WindowSettingsView from "./settings/WindowSettingsView.vue";
 
 const JsonSettingsView = defineAsyncComponent({
@@ -22,6 +24,8 @@ const { settingsSection, openSettings } = useTabs();
 
 const preferenceSections: { id: SettingsSection; label: string }[] = [
   { id: "general", label: "General" },
+  { id: "appearance", label: "Appearance" },
+  { id: "import-export", label: "Import & Export" },
   { id: "window", label: "Window" },
   { id: "json", label: "JSON" },
 ];
@@ -48,6 +52,18 @@ const current = computed(() =>
           <path d="M4 12h10" />
           <path d="M4 18h13" />
         </svg>
+        <svg v-else-if="item.id === 'appearance'" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 19 10 5l6 14" />
+          <path d="M6.5 14h7" />
+          <path d="M17 19v-6" />
+          <path d="M20 19v-6" />
+        </svg>
+        <svg v-else-if="item.id === 'import-export'" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M7 4v16" />
+          <path d="m3 16 4 4 4-4" />
+          <path d="M17 20V4" />
+          <path d="m13 8 4-4 4 4" />
+        </svg>
         <svg v-else-if="item.id === 'window'" viewBox="0 0 24 24" aria-hidden="true">
           <rect x="3.5" y="5.5" width="17" height="13" rx="1.5" />
           <path d="M3.5 9h17" />
@@ -61,6 +77,8 @@ const current = computed(() =>
     </nav>
     <div class="settings-content" :class="{ fill: current === 'json' }">
       <GeneralSettingsView v-if="current === 'general'" />
+      <AppearanceSettingsView v-if="current === 'appearance'" />
+      <ImportExportSettingsView v-if="current === 'import-export'" />
       <WindowSettingsView v-if="current === 'window'" />
       <JsonSettingsView v-if="current === 'json'" />
     </div>

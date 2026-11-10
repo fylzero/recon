@@ -7,11 +7,11 @@ use tauri::{AppHandle, State};
 use crate::db::tls;
 use crate::models::{
     sanitize_color, sanitize_font_family, sanitize_font_size, sanitize_list_font_family,
-    sanitize_notifications, AppData, ConnectionEntry, ConnectionGroup, Driver, PasswordSource,
-    PreferencesPatch, SavedQuery, SshAuth, SshTunnel, DEFAULT_EDITOR_FONT_SIZE,
-    DEFAULT_GRID_FONT_SIZE, DEFAULT_LIST_FONT_SIZE, DEFAULT_SSH_PORT, MAX_AUTO_COLUMN_WIDTH_MAX,
-    MAX_AUTO_COLUMN_WIDTH_MIN, PAGE_SIZE_MAX, PAGE_SIZE_MIN, QUERY_ROW_LIMIT_MAX,
-    QUERY_ROW_LIMIT_MIN, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
+    sanitize_notifications, sanitize_temperature_unit, AppData, ConnectionEntry, ConnectionGroup,
+    Driver, PasswordSource, PreferencesPatch, SavedQuery, SshAuth, SshTunnel,
+    DEFAULT_EDITOR_FONT_SIZE, DEFAULT_GRID_FONT_SIZE, DEFAULT_LIST_FONT_SIZE, DEFAULT_SSH_PORT,
+    MAX_AUTO_COLUMN_WIDTH_MAX, MAX_AUTO_COLUMN_WIDTH_MIN, PAGE_SIZE_MAX, PAGE_SIZE_MIN,
+    QUERY_ROW_LIMIT_MAX, QUERY_ROW_LIMIT_MIN, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
 };
 use crate::{persist, query_log, secrets};
 
@@ -135,6 +135,15 @@ fn sanitize_password_source(entry: &mut ConnectionEntry) -> Result<(), String> {
                 entry.aws_profile.clear();
             }
             entry.password_command.clear();
+        }
+        PasswordSource::None => {
+            if !keeps_aws {
+                entry.aws_region.clear();
+                entry.aws_profile.clear();
+            }
+            entry.password_command.clear();
+            entry.save_password = false;
+            entry.cleartext_auth = false;
         }
         PasswordSource::AwsIam => {
             entry.password_command.clear();
@@ -287,6 +296,7 @@ fn sanitize_app_data(mut data: AppData) -> Result<AppData, String> {
         .max_auto_column_width
         .clamp(MAX_AUTO_COLUMN_WIDTH_MIN, MAX_AUTO_COLUMN_WIDTH_MAX);
     data.notifications = sanitize_notifications(&data.notifications);
+    data.temperature_unit = sanitize_temperature_unit(&data.temperature_unit);
     if let Some(window) = &mut data.window {
         window.width = window.width.max(crate::models::MIN_WINDOW_WIDTH);
         window.height = window.height.max(crate::models::MIN_WINDOW_HEIGHT);
@@ -740,8 +750,17 @@ pub fn update_preferences(
     if let Some(value) = patch.auto_apply_filters {
         data.auto_apply_filters = value;
     }
+    if let Some(value) = patch.multithreaded_import {
+        data.multithreaded_import = value;
+    }
     if let Some(value) = patch.notifications {
         data.notifications = sanitize_notifications(&value);
+    }
+    if let Some(machine_stats) = patch.machine_stats {
+        data.machine_stats = machine_stats;
+    }
+    if let Some(value) = patch.temperature_unit {
+        data.temperature_unit = sanitize_temperature_unit(&value);
     }
     persist::save(&app, &data)?;
     Ok(data.clone())
@@ -933,6 +952,24 @@ mod tests {
         assert_eq!(saved.password_command, "op read op://db/password");
         assert!(saved.aws_region.is_empty());
         assert!(!saved.save_password);
+    }
+
+    #[test]
+    fn no_password_drops_password_settings() {
+        let mut mysql = entry(Driver::Mysql);
+        mysql.password_source = PasswordSource::None;
+        mysql.save_password = true;
+        mysql.cleartext_auth = true;
+        mysql.aws_region = "us-east-1".into();
+        mysql.aws_profile = "prod".into();
+        mysql.password_command = "echo secret".into();
+        let saved = sanitize_connection(mysql).unwrap();
+        assert_eq!(saved.password_source, PasswordSource::None);
+        assert!(!saved.save_password);
+        assert!(!saved.cleartext_auth);
+        assert!(saved.aws_region.is_empty());
+        assert!(saved.aws_profile.is_empty());
+        assert!(saved.password_command.is_empty());
     }
 
     #[test]

@@ -3,7 +3,7 @@ import type { FilterKind } from "./filters/model";
 
 export type Driver = "mysql" | "postgres" | "sqlite" | "mssql";
 export type SslMode = "disable" | "prefer" | "require" | "verify-ca" | "verify-full";
-export type PasswordSource = "password" | "aws-iam" | "command";
+export type PasswordSource = "password" | "none" | "aws-iam" | "command";
 
 export const DRIVER_OPTIONS: { id: Driver; label: string; defaultPort: number }[] = [
   { id: "mysql", label: "MySQL", defaultPort: 3306 },
@@ -131,11 +131,16 @@ export interface AppData {
   sidebarWidth?: number;
   maxAutoColumnWidth?: number;
   autoApplyFilters?: boolean;
+  multithreadedImport?: boolean;
   notifications?: NotificationMode;
+  machineStats?: boolean;
+  temperatureUnit?: TemperatureUnit;
   window?: WindowState;
 }
 
 export type NotificationMode = "background" | "always" | "off";
+
+export type TemperatureUnit = "fahrenheit" | "celsius";
 
 export interface PreferencesPatch {
   editorFontFamily?: string;
@@ -149,7 +154,10 @@ export interface PreferencesPatch {
   sidebarWidth?: number;
   maxAutoColumnWidth?: number;
   autoApplyFilters?: boolean;
+  multithreadedImport?: boolean;
   notifications?: NotificationMode;
+  machineStats?: boolean;
+  temperatureUnit?: TemperatureUnit;
 }
 
 export interface BytesCell {
@@ -484,16 +492,42 @@ export interface ImportResult {
   durationMs: number;
 }
 
+export interface ImportWorkerProgress {
+  index: number;
+  statements: number;
+  totalStatements: number;
+  state: "waiting" | "running" | "done";
+}
+
 export interface ImportProgress {
   transferId: string;
   statements: number;
   bytes: number;
   totalBytes: number;
-  /** `skipping` past statements that already ran when resuming, or `reconnecting` after the connection dropped. */
-  phase: "running" | "skipping" | "reconnecting";
+  /**
+   * `planning` while the file is split, `running`, `skipping` past statements that already ran, or
+   * `reconnecting` after the connection dropped.
+   */
+  phase: "planning" | "running" | "skipping" | "reconnecting";
   /** Failed reconnect attempts so far, with the last one's error. */
   attempt: number;
   error: string | null;
+  fileBytes: number;
+  fileTotalBytes: number;
+  /** 0 until the split has counted statements, and always for a run in file order. */
+  totalStatements: number;
+  /** Empty for a run in file order. */
+  workers: ImportWorkerProgress[];
+  /** Why a run that could have loaded in parallel runs in file order. Sent once, before it starts. */
+  inOrder?: string;
+}
+
+/** Per-logical-core load and, when the machine exposes one, a Celsius temperature. */
+export interface MachineStats {
+  /** One number per logical core, 0–100, or empty when that reading is unavailable. */
+  cores: number[];
+  /** Degrees Celsius, or null when unavailable. */
+  temperatureCelsius: number | null;
 }
 
 export interface ImportBackend {
@@ -511,6 +545,13 @@ export interface ImportResumePoint {
   fingerprint: string;
   backend: ImportBackend | null;
   likelySaved: boolean;
+  /** The run loaded the file over several connections, so a resumed run must too. */
+  parallel: boolean;
+  splitTables: boolean;
+  /** For a parallel run, the statements that finished, as half-open index ranges. */
+  done: [number, number][];
+  /** For a parallel run, the statements between `from` and `to` that may or may not have been saved. */
+  uncertain: number[];
 }
 
 export interface ImportResume {
@@ -518,6 +559,11 @@ export interface ImportResume {
   line: number;
   fingerprint: string;
   backend: ImportBackend | null;
+  parallel: boolean;
+  splitTables: boolean;
+  done: [number, number][];
+  /** The uncertain statements to treat as saved, when skipping past them. */
+  skipped: number[];
 }
 
 export interface ImportFailure {

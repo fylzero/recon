@@ -5,6 +5,7 @@ defineProps<{
   title: string;
   wide?: boolean;
   medium?: boolean;
+  xwide?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -44,8 +45,12 @@ onUnmounted(() => {
 <template>
   <Teleport to="body">
     <div class="modal-layer" @pointerdown="onBackdropDown" @click="onBackdropClick">
-      <div class="modal" :class="{ wide, medium }" role="dialog" aria-modal="true">
-        <div class="modal-title">{{ title }}</div>
+      <div class="modal" :class="{ wide, medium, xwide }" role="dialog" aria-modal="true">
+        <div v-if="$slots.aside" class="modal-title modal-title-split">
+          <span>{{ title }}</span>
+          <slot name="aside" />
+        </div>
+        <div v-else class="modal-title">{{ title }}</div>
         <div class="modal-body">
           <slot />
         </div>

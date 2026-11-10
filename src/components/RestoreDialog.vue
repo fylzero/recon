@@ -5,9 +5,11 @@ import * as api from "../api";
 import { useApp } from "../composables/useApp";
 import { useTransferJob } from "../composables/useTransfers";
 import { baseName } from "../platform";
-import { resumeAt, resumeChoice, runPhase } from "../transfer";
+import { formatDuration, importStages, resumeAt, resumeChoice, runPhase, stagesPercent } from "../transfer";
 import type { BackupInfo, Driver, ImportProgress, ImportResume, ImportResumePoint } from "../types";
+import ImportWorkDashboard from "./ImportWorkDashboard.vue";
 import Modal from "./Modal.vue";
+import TransferRoute from "./TransferRoute.vue";
 
 const props = defineProps<{
   connectionId: string;
@@ -34,6 +36,8 @@ const resumePoint = ref<ImportResumePoint | null>(null);
 /** Resuming skips clearing, so the status starts at replaying rather than "Clearing…". */
 const resuming = ref(false);
 const progress = ref<ImportProgress | null>(null);
+/** The last progress outside a reconnect, which reports every worker at 0. */
+const dashboard = ref<ImportProgress | null>(null);
 let transferId = "";
 let stopProgress: UnlistenFn | null = null;
 
@@ -64,10 +68,7 @@ const partial = computed(() =>
 );
 /** Clearing can't be stopped halfway outside Postgres, so cancelling waits until the replay starts. */
 const canCancel = computed(() => !running.value || atomic.value || resuming.value || progress.value !== null);
-const percent = computed(() => {
-  const current = progress.value;
-  return current?.totalBytes ? Math.min(100, Math.round((current.bytes / current.totalBytes) * 100)) : 0;
-});
+const percent = computed(() => Math.round(stagesPercent(importStages(dashboard.value))));
 const phase = computed(() => runPhase(progress.value));
 const uncertain = computed(() => Boolean(resumePoint.value && resumePoint.value.to > resumePoint.value.from));
 const uncertainWord = computed(() => (resumePoint.value && resumePoint.value.to - resumePoint.value.from > 1 ? "them" : "it"));
@@ -75,7 +76,7 @@ const statusLabel = computed(() => {
   if (cancelling.value) {
     return "Cancelling…";
   }
-  return phase.value ?? (progress.value || resuming.value ? "Restoring…" : "Clearing…");
+  return phase.value ?? (progress.value || resuming.value ? "" : "Clearing…");
 });
 
 function close() {
@@ -95,17 +96,22 @@ async function start(resume: ImportResume | null = null) {
   error.value = "";
   resumePoint.value = null;
   progress.value = null;
+  dashboard.value = null;
   transferId = job.begin(`Restoring “${props.namespace}” from ${fileName.value}`);
   stopProgress = await listen<ImportProgress>("import-progress", (event) => {
     if (event.payload.transferId === transferId) {
       progress.value = event.payload;
+      if (event.payload.phase !== "reconnecting") {
+        dashboard.value = event.payload;
+      }
       job.progress(percent.value);
     }
   });
   try {
     const result = await api.restoreDatabase(props.connectionId, transferId, props.namespace, props.path, resume);
     const statements = `${result.statements.toLocaleString()} ${result.statements === 1 ? "statement" : "statements"}`;
-    showToast(`Restored “${props.namespace}” from ${fileName.value} (${statements} in ${(result.durationMs / 1000).toFixed(1)}s)`);
+    const duration = formatDuration(result.durationMs);
+    showToast(`Restored “${props.namespace}” from ${fileName.value} in ${duration} (${statements})`);
     emit("restored");
     emit("close");
   } catch (err) {
@@ -154,40 +160,57 @@ onUnmounted(() => stopProgress?.());
 </script>
 
 <template>
-  <Modal v-if="!job.hidden.value" :title="`Restore ${label} “${namespace}”`" @close="close">
-    <p class="transfer-file" :title="path">{{ fileName }}</p>
-    <p class="muted tiny">
-      Backup of “{{ info.namespace || namespace }}”<template v-if="info.server"> from {{ info.server }}</template>,
-      made {{ created }}.
-    </p>
-    <p v-if="renamed" class="muted tiny">
-      It was made from “{{ info.namespace }}” and will be restored into “{{ namespace }}”.
-    </p>
-    <div class="transfer-warning" role="alert">
-      <strong>Everything in “{{ namespace }}” will be deleted</strong>
-      <p>
-        Its tables, views, and routines are replaced with the ones in this backup. {{ loss }}
-        {{ partial }}
+  <Modal v-if="!job.hidden.value" :title="`Restore ${label}`" :xwide="running" @close="close">
+    <template v-if="running" #aside>
+      <TransferRoute
+        :file="fileName"
+        :path="path"
+        file-label="Recon backup"
+        :target="namespace"
+        :target-label="namespaceLabel"
+        :driver="driver"
+      />
+    </template>
+    <TransferRoute
+      v-if="!running"
+      :file="fileName"
+      :path="path"
+      file-label="Recon backup"
+      :target="namespace"
+      :target-label="namespaceLabel"
+      :driver="driver"
+    />
+    <template v-if="!running">
+      <p class="muted tiny">
+        Backup of “{{ info.namespace || namespace }}”<template v-if="info.server"> from {{ info.server }}</template>,
+        made {{ created }}.
       </p>
-      <template v-if="info.skipped.length">
+      <p v-if="renamed" class="muted tiny">
+        It was made from “{{ info.namespace }}” and will be restored into “{{ namespace }}”.
+      </p>
+      <div class="transfer-warning" role="alert">
+        <strong>Everything in “{{ namespace }}” will be deleted</strong>
         <p>
-          These tables and routines are not in this backup. Any with these names in “{{ namespace }}” will be deleted:
+          Its tables, views, and routines are replaced with the ones in this backup. {{ loss }}
+          {{ partial }}
         </p>
-        <ul>
-          <li v-for="item in info.skipped" :key="item">{{ item }}</li>
-        </ul>
-      </template>
-    </div>
-    <label class="checkbox-row">
-      <input v-model="understood" type="checkbox" :disabled="running || Boolean(resumePoint)" />
-      I understand everything in “{{ namespace }}” will be deleted
-    </label>
+        <template v-if="info.skipped.length">
+          <p>
+            These tables and routines are not in this backup. Any with these names in “{{ namespace }}” will be deleted:
+          </p>
+          <ul>
+            <li v-for="item in info.skipped" :key="item">{{ item }}</li>
+          </ul>
+        </template>
+      </div>
+      <label class="checkbox-row">
+        <input v-model="understood" type="checkbox" :disabled="Boolean(resumePoint)" />
+        I understand everything in “{{ namespace }}” will be deleted
+      </label>
+    </template>
     <div v-if="running" class="transfer-progress" aria-live="polite">
-      <div class="transfer-bar"><span :style="{ width: `${percent}%` }" /></div>
-      <p class="muted tiny transfer-status">
-        <span class="transfer-status-label">{{ statusLabel }}</span>
-        <span v-if="progress">{{ progress.statements.toLocaleString() }} statements · {{ percent }}%</span>
-      </p>
+      <ImportWorkDashboard :progress="dashboard" />
+      <p v-if="statusLabel" class="muted tiny">{{ statusLabel }}</p>
       <p v-if="progress?.phase === 'reconnecting' && progress.error" class="muted tiny transfer-error">
         {{ progress.error }}
       </p>

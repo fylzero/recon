@@ -5,12 +5,15 @@ import * as api from "../api";
 import { useApp } from "../composables/useApp";
 import { useTransferJob } from "../composables/useTransfers";
 import { baseName } from "../platform";
-import { resumeAt, resumeChoice, runPhase } from "../transfer";
-import type { ImportProgress, ImportResume, ImportResumePoint } from "../types";
+import { formatDuration, importStages, resumeAt, resumeChoice, runPhase, stagesPercent } from "../transfer";
+import type { Driver, ImportProgress, ImportResume, ImportResumePoint } from "../types";
+import ImportWorkDashboard from "./ImportWorkDashboard.vue";
 import Modal from "./Modal.vue";
+import TransferRoute from "./TransferRoute.vue";
 
 const props = defineProps<{
   connectionId: string;
+  driver: Driver;
   namespace: string;
   namespaceLabel: string;
   path: string;
@@ -21,7 +24,7 @@ const emit = defineEmits<{
   imported: [];
 }>();
 
-const { showToast } = useApp();
+const { showToast, multithreadedImport } = useApp();
 const job = useTransferJob(() => props.connectionId, "import");
 
 const running = ref(false);
@@ -29,14 +32,18 @@ const cancelling = ref(false);
 const error = ref("");
 const resumePoint = ref<ImportResumePoint | null>(null);
 const progress = ref<ImportProgress | null>(null);
+/** The last progress outside a reconnect, which reports every worker at 0. */
+const dashboard = ref<ImportProgress | null>(null);
+/** Why the run loads in file order, when it could have loaded in parallel. */
+const inOrder = ref("");
 let transferId = "";
 let stopProgress: UnlistenFn | null = null;
 
 const fileName = computed(() => baseName(props.path));
-const percent = computed(() => {
-  const current = progress.value;
-  return current?.totalBytes ? Math.min(100, Math.round((current.bytes / current.totalBytes) * 100)) : 0;
-});
+const canThread = computed(() => props.driver === "mysql" || props.driver === "postgres");
+/** For this import only. It starts from the setting in General. */
+const multithreaded = ref(multithreadedImport.value);
+const percent = computed(() => Math.round(stagesPercent(importStages(dashboard.value))));
 const phase = computed(() => runPhase(progress.value));
 const uncertain = computed(() => Boolean(resumePoint.value && resumePoint.value.to > resumePoint.value.from));
 const uncertainWord = computed(() => (resumePoint.value && resumePoint.value.to - resumePoint.value.from > 1 ? "them" : "it"));
@@ -57,17 +64,26 @@ async function start(resume: ImportResume | null = null) {
   error.value = "";
   resumePoint.value = null;
   progress.value = null;
+  dashboard.value = null;
+  inOrder.value = "";
   transferId = job.begin(`Importing ${fileName.value} into “${props.namespace}”`);
   stopProgress = await listen<ImportProgress>("import-progress", (event) => {
     if (event.payload.transferId === transferId) {
       progress.value = event.payload;
+      if (event.payload.inOrder) {
+        inOrder.value = event.payload.inOrder;
+      }
+      if (event.payload.phase !== "reconnecting") {
+        dashboard.value = event.payload;
+      }
       job.progress(percent.value);
     }
   });
   try {
-    const result = await api.importSql(props.connectionId, transferId, props.namespace, props.path, resume);
+    const result = await api.importSql(props.connectionId, transferId, props.namespace, props.path, resume, multithreaded.value);
     const statements = `${result.statements.toLocaleString()} ${result.statements === 1 ? "statement" : "statements"}`;
-    showToast(`Imported ${fileName.value} (${statements} in ${(result.durationMs / 1000).toFixed(1)}s)`);
+    const duration = formatDuration(result.durationMs);
+    showToast(`Imported ${fileName.value} into “${props.namespace}” in ${duration} (${statements})`);
     emit("imported");
     emit("close");
   } catch (err) {
@@ -107,19 +123,38 @@ onUnmounted(() => stopProgress?.());
 </script>
 
 <template>
-  <Modal v-if="!job.hidden.value" :title="`Import into “${namespace}”`" @close="close">
-    <p class="transfer-file" :title="path">{{ fileName }}</p>
-    <p class="muted tiny">
-      Runs every statement in the file against the {{ namespaceLabel.toLowerCase() }} “{{ namespace }}”, in
-      order, and stops at the first error. Anything that ran before an error stays applied. If the connection
-      drops, Recon reconnects and picks up where it left off.
-    </p>
+  <Modal v-if="!job.hidden.value" title="Import SQL file" :xwide="running" @close="close">
+    <template v-if="running" #aside>
+      <TransferRoute
+        :file="fileName"
+        :path="path"
+        :file-label="/\.gz$/i.test(fileName) ? 'Gzipped SQL file' : 'SQL file'"
+        :target="namespace"
+        :target-label="namespaceLabel"
+        :driver="driver"
+      />
+    </template>
+    <TransferRoute
+      v-if="!running"
+      :file="fileName"
+      :path="path"
+      :file-label="/\.gz$/i.test(fileName) ? 'Gzipped SQL file' : 'SQL file'"
+      :target="namespace"
+      :target-label="namespaceLabel"
+      :driver="driver"
+    />
+    <label
+      v-if="!running && canThread"
+      class="checkbox-row"
+      title="Loads mysqldump, pg_dump, and Recon files over one connection per processor core. Set the default in General settings."
+    >
+      <input v-model="multithreaded" type="checkbox" :disabled="Boolean(resumePoint)" />
+      Multithreaded import
+    </label>
     <div v-if="running" class="transfer-progress" aria-live="polite">
-      <div class="transfer-bar"><span :style="{ width: `${percent}%` }" /></div>
-      <p class="muted tiny transfer-status">
-        <span class="transfer-status-label">{{ cancelling ? "Cancelling…" : (phase ?? "Importing…") }}</span>
-        <span v-if="progress">{{ progress.statements.toLocaleString() }} statements · {{ percent }}%</span>
-      </p>
+      <ImportWorkDashboard :progress="dashboard" />
+      <p v-if="cancelling || phase" class="muted tiny">{{ cancelling ? "Cancelling…" : phase }}</p>
+      <p v-if="inOrder" class="muted tiny">Running in order on one connection: {{ inOrder }}.</p>
       <p v-if="progress?.phase === 'reconnecting' && progress.error" class="muted tiny transfer-error">
         {{ progress.error }}
       </p>

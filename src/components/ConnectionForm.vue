@@ -42,11 +42,18 @@ const { formState, closeConnectionForm } = useConnectionForm();
 const initial = formState.value?.connection ?? null;
 const editing = Boolean(initial?.id);
 
+function defaultUser(id: Driver) {
+  if (id === "postgres") return "postgres";
+  if (id === "mssql") return "sa";
+  if (id === "mysql") return "root";
+  return "";
+}
+
 const driver = ref<Driver>(initial?.driver ?? "mysql");
 const name = ref(initial?.name ?? "");
 const host = ref(initial?.host ?? "127.0.0.1");
 const port = ref<number>(initial?.port || 3306);
-const user = ref(initial?.user ?? "");
+const user = ref(initial?.user ?? defaultUser(driver.value));
 const password = ref("");
 const savePassword = ref(initial?.savePassword ?? true);
 const database = ref(initial?.database ?? "");
@@ -130,7 +137,9 @@ const usesIam = computed(() => !isSqlite.value && passwordSource.value === "aws-
 const usesCommand = computed(() => !isSqlite.value && passwordSource.value === "command");
 const typesPassword = computed(() => !isSqlite.value && passwordSource.value === "password");
 
-const usesCleartext = computed(() => driver.value === "mysql" && (cleartextAuth.value || usesIam.value));
+const usesCleartext = computed(
+  () => driver.value === "mysql" && passwordSource.value !== "none" && (cleartextAuth.value || usesIam.value),
+);
 
 const requiresTls = computed(() => ["require", "verify-ca", "verify-full"].includes(sslMode.value));
 const verifiesCertificate = computed(() => sslMode.value === "verify-ca" || sslMode.value === "verify-full");
@@ -229,10 +238,14 @@ const passwordPlaceholder = computed(() => {
 
 watch(driver, (next, previous) => {
   testResult.value = null;
-  const previousDefault = DRIVER_OPTIONS.find((option) => option.id === previous)?.defaultPort;
-  const nextDefault = DRIVER_OPTIONS.find((option) => option.id === next)?.defaultPort ?? 0;
-  if (next !== "sqlite" && (!port.value || port.value === previousDefault)) {
-    port.value = nextDefault;
+  const previousOption = DRIVER_OPTIONS.find((option) => option.id === previous);
+  const nextOption = DRIVER_OPTIONS.find((option) => option.id === next);
+  if (next !== "sqlite" && (!port.value || port.value === previousOption?.defaultPort)) {
+    port.value = nextOption?.defaultPort ?? 0;
+  }
+  const previousUser = defaultUser(previous);
+  if (next !== "sqlite" && (!user.value.trim() || user.value === previousUser)) {
+    user.value = defaultUser(next);
   }
   if (next === "mssql" && passwordSource.value === "aws-iam") {
     passwordSource.value = "password";
@@ -395,7 +408,12 @@ onMounted(async () => {
   nameInput.value?.focus();
   void loadSshKeys();
   void loadSshHosts();
-  if (initial?.id && initial.driver !== "sqlite" && initial.savePassword) {
+  if (
+    initial?.id &&
+    initial.driver !== "sqlite" &&
+    (initial.passwordSource ?? "password") === "password" &&
+    initial.savePassword
+  ) {
     try {
       hasSavedPassword.value = await api.hasSavedPassword(initial.id);
     } catch {
@@ -642,13 +660,14 @@ async function submit(connectAfter: boolean) {
               type="text"
               spellcheck="false"
               autocomplete="off"
-              :placeholder="driver === 'postgres' ? 'postgres' : driver === 'mssql' ? 'sa' : 'root'"
+              :placeholder="defaultUser(driver)"
             />
           </label>
           <label class="modal-label">
             <span class="muted tiny">Authentication</span>
             <select v-model="passwordSource">
               <option value="password">Password</option>
+              <option value="none">No password</option>
               <option v-if="driver !== 'mssql'" value="aws-iam">AWS IAM</option>
               <option value="command">Password command</option>
             </select>
@@ -680,7 +699,12 @@ async function submit(connectAfter: boolean) {
               Recon connects. For SSO profiles, run aws sso login first. IAM logins need SSL.
             </p>
           </template>
-          <template v-else>
+          <template v-else-if="passwordSource === 'none'">
+            <p class="muted tiny span-2 ssh-hint">
+              Connects without a password, and doesn't store or ask for one.
+            </p>
+          </template>
+          <template v-else-if="passwordSource === 'command'">
             <label class="modal-label span-2">
               <span class="muted tiny">Command</span>
               <input
@@ -793,7 +817,7 @@ async function submit(connectAfter: boolean) {
               only. For SSO profiles, run aws sso login first.
             </p>
           </template>
-          <template v-if="driver === 'mysql' && passwordSource !== 'aws-iam'">
+          <template v-if="driver === 'mysql' && passwordSource !== 'aws-iam' && passwordSource !== 'none'">
             <label class="checkbox-row span-2">
               <input v-model="cleartextAuth" type="checkbox" />
               <span>Send password in clear text</span>
