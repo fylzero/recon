@@ -488,11 +488,21 @@ onUnmounted(() => {
             <span class="import-phase-dot" />
             <div class="import-phase-text">
               <span class="import-phase-title">{{ stage.title }}</span>
-              <span class="import-phase-desc">{{ stage.description }}</span>
+              <span v-if="stage.description" class="import-phase-desc">{{ stage.description }}</span>
             </div>
             <div class="import-phase-stat">
               <strong>{{ Math.round(stage.percent) }}%</strong>
               <span v-if="stageTime(index)" class="import-phase-time">{{ stageTime(index) }}</span>
+            </div>
+          </div>
+          <div v-if="progress" class="import-donut-facts">
+            <div>
+              <span>Connections</span>
+              <span>{{ Math.max(1, progress.workers.length) }}</span>
+            </div>
+            <div v-if="progress.statements > 0">
+              <span>Statements</span>
+              <span>{{ progress.statements.toLocaleString() }}</span>
             </div>
           </div>
         </div>

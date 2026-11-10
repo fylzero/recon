@@ -5772,6 +5772,23 @@ body.dragging-tab * {
   color: var(--muted);
 }
 
+.import-donut-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.08rem;
+  margin-top: calc(0.08rem - 0.45rem);
+  padding-left: calc(7px + 0.45rem);
+  font-size: 11px;
+  line-height: 1.25;
+  color: var(--muted);
+}
+
+.import-donut-facts div {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.45rem;
+}
+
 .import-phase-dot {
   width: 7px;
   height: 7px;

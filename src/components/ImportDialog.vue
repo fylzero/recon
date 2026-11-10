@@ -153,10 +153,7 @@ onUnmounted(() => stopProgress?.());
     </label>
     <div v-if="running" class="transfer-progress" aria-live="polite">
       <ImportWorkDashboard :progress="dashboard" />
-      <p class="muted tiny transfer-status">
-        <span class="transfer-status-label">{{ cancelling ? "Cancelling…" : (phase ?? "Importing…") }}</span>
-        <span v-if="progress">{{ progress.statements.toLocaleString() }} statements · {{ percent }}%</span>
-      </p>
+      <p v-if="cancelling || phase" class="muted tiny">{{ cancelling ? "Cancelling…" : phase }}</p>
       <p v-if="inOrder" class="muted tiny">Running in order on one connection: {{ inOrder }}.</p>
       <p v-if="progress?.phase === 'reconnecting' && progress.error" class="muted tiny transfer-error">
         {{ progress.error }}

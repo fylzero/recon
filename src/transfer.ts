@@ -171,7 +171,7 @@ export function runPhase(progress: ImportProgress | null) {
 export interface ImportStage {
   id: "read" | "rows" | "statements";
   title: string;
-  description: string;
+  description?: string;
   percent: number;
   /** Its share of the whole run, relative to the other stages. */
   weight: number;
@@ -192,7 +192,6 @@ export function importStages(progress: ImportProgress | null): ImportStage[] {
     stages.push({
       id: "statements",
       title: "Run statements",
-      description: "One at a time, in order",
       percent: share(progress.bytes, progress.totalBytes),
       weight: 7,
     });
@@ -219,7 +218,6 @@ export function importStages(progress: ImportProgress | null): ImportStage[] {
   stages.push({
     id: "rows",
     title: "Insert rows",
-    description: `Over ${progress.workers.length} connections`,
     percent: planning ? 0 : share(run, total),
     weight: 6,
   });

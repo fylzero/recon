@@ -76,7 +76,7 @@ const statusLabel = computed(() => {
   if (cancelling.value) {
     return "Cancelling…";
   }
-  return phase.value ?? (progress.value || resuming.value ? "Restoring…" : "Clearing…");
+  return phase.value ?? (progress.value || resuming.value ? "" : "Clearing…");
 });
 
 function close() {
@@ -210,10 +210,7 @@ onUnmounted(() => stopProgress?.());
     </template>
     <div v-if="running" class="transfer-progress" aria-live="polite">
       <ImportWorkDashboard :progress="dashboard" />
-      <p class="muted tiny transfer-status">
-        <span class="transfer-status-label">{{ statusLabel }}</span>
-        <span v-if="progress">{{ progress.statements.toLocaleString() }} statements · {{ percent }}%</span>
-      </p>
+      <p v-if="statusLabel" class="muted tiny">{{ statusLabel }}</p>
       <p v-if="progress?.phase === 'reconnecting' && progress.error" class="muted tiny transfer-error">
         {{ progress.error }}
       </p>
