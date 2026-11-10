@@ -811,6 +811,23 @@ mod tests {
     }
 
     #[test]
+    fn temperatures_default_to_fahrenheit() {
+        use crate::models::{AppData, PreferencesPatch};
+
+        use crate::models::sanitize_temperature_unit;
+
+        let parsed: AppData = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed.temperature_unit, "fahrenheit");
+        let stored = serde_json::to_value(AppData::default()).unwrap();
+        assert_eq!(stored["temperatureUnit"], "fahrenheit");
+        let celsius: PreferencesPatch =
+            serde_json::from_str(r#"{"temperatureUnit":"celsius"}"#).unwrap();
+        assert_eq!(celsius.temperature_unit.as_deref(), Some("celsius"));
+        assert_eq!(sanitize_temperature_unit(" celsius "), "celsius");
+        assert_eq!(sanitize_temperature_unit("kelvin"), "fahrenheit");
+    }
+
+    #[test]
     fn utilization_is_busy_share_of_ticks() {
         assert_eq!(utilization(25, 100), 75.0);
         assert_eq!(utilization(0, 0), 0.0);

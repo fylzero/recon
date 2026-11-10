@@ -10,8 +10,9 @@ export const CHANGELOG: ChangelogRelease[] = [
     date: "November 9, 2026",
     notes: [
       "Choose No password under Authentication when a connection doesn't need one. Recon doesn't fetch a password or store one.",
-      "New Multithreaded import setting in General, on by default. On, a MySQL or Postgres import or MySQL restore loads mysqldump, pg_dump and Recon files over one connection per processor core. Other files still run in order, and the import says so. Either way, a dropped connection reconnects and resumes.",
-      "While a SQL import or restore runs, the dialog shows each stage on one progress ring, with elapsed time and statements per second, and each connection's progress when it loads in parallel. On macOS and Linux it can also show processor load and temperature once you allow it, which you can turn off again in General.",
+      "Settings are split into General, Appearance, Import & Export, Window, and JSON. Fonts and text sizes are under Appearance.",
+      "New Multithreaded import setting in Import & Export, on by default. On, a MySQL or Postgres import or MySQL restore loads mysqldump, pg_dump and Recon files over one connection per processor core. Other files still run in order, and the import says so. Either way, a dropped connection reconnects and resumes. The import and restore dialogs can turn it off or on for that one run without changing the setting.",
+      "While a SQL import or restore runs, the dialog shows each stage on one progress ring, with elapsed time and statements per second, and each connection's progress when it loads in parallel. On macOS and Linux it can also show processor load and temperature once you allow it, which you can turn off again in Import & Export. Temperatures show in °F by default. Choose Celsius under Temperature unit.",
       "Importing a large statement into MySQL over TLS no longer stalls partway.",
     ],
   },

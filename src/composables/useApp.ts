@@ -6,6 +6,7 @@ import type {
   ConnectionEntry,
   ConnectionGroup,
   NotificationMode,
+  TemperatureUnit,
   PreferencesPatch,
   SavedQuery,
   WindowState,
@@ -59,6 +60,7 @@ const maxAutoColumnWidth = ref(DEFAULT_MAX_AUTO_COLUMN_WIDTH);
 const autoApplyFilters = ref(true);
 const multithreadedImport = ref(true);
 const machineStats = ref(false);
+const temperatureUnit = ref<TemperatureUnit>("fahrenheit");
 const notifications = ref<NotificationMode>("background");
 const windowState = ref<WindowState | null>(null);
 const toastMessage = ref("");
@@ -143,6 +145,7 @@ export function useApp() {
     autoApplyFilters.value = data.autoApplyFilters ?? true;
     multithreadedImport.value = data.multithreadedImport ?? true;
     machineStats.value = data.machineStats ?? false;
+    temperatureUnit.value = data.temperatureUnit === "celsius" ? "celsius" : "fahrenheit";
     notifications.value = sanitizeNotificationMode(data.notifications);
     windowState.value = data.window ?? null;
   }
@@ -487,6 +490,7 @@ export function useApp() {
     autoApplyFilters,
     multithreadedImport,
     machineStats,
+    temperatureUnit,
     notifications,
     windowState,
     toastMessage,

@@ -134,10 +134,13 @@ export interface AppData {
   multithreadedImport?: boolean;
   notifications?: NotificationMode;
   machineStats?: boolean;
+  temperatureUnit?: TemperatureUnit;
   window?: WindowState;
 }
 
 export type NotificationMode = "background" | "always" | "off";
+
+export type TemperatureUnit = "fahrenheit" | "celsius";
 
 export interface PreferencesPatch {
   editorFontFamily?: string;
@@ -154,6 +157,7 @@ export interface PreferencesPatch {
   multithreadedImport?: boolean;
   notifications?: NotificationMode;
   machineStats?: boolean;
+  temperatureUnit?: TemperatureUnit;
 }
 
 export interface BytesCell {

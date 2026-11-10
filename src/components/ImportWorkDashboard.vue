@@ -51,7 +51,35 @@ watch(
   { deep: true },
 );
 
-const { machineStats: granted, savePreferences, showToast } = useApp();
+const { machineStats: granted, temperatureUnit, savePreferences, showToast } = useApp();
+
+const celsius = computed(() => temperatureUnit.value === "celsius");
+
+const unit = computed(() => (celsius.value ? "°C" : "°F"));
+
+/** `degrees` Celsius in the unit the user reads temperatures in. */
+function shown(degrees: number) {
+  return celsius.value ? degrees : (degrees * 9) / 5 + 32;
+}
+
+function fromShown(value: number) {
+  return celsius.value ? value : ((value - 32) * 5) / 9;
+}
+
+/** The thresholds stay in Celsius, so changing the unit doesn't move them. */
+function thresholdField(key: keyof TempThresholds) {
+  return computed({
+    get: () => Math.round(shown(thresholds.value[key])),
+    set: (value: number) => {
+      if (Number.isFinite(value)) {
+        thresholds.value[key] = fromShown(value);
+      }
+    },
+  });
+}
+
+const goodMaxShown = thresholdField("goodMax");
+const warnMaxShown = thresholdField("warnMax");
 const asking = ref(false);
 const stats = ref<MachineStats | null>(null);
 
@@ -148,7 +176,7 @@ const temperatureText = computed(() => {
   if (temperatureValue.value === null) {
     return "Unavailable";
   }
-  return `${temperatureValue.value.toLocaleString(undefined, { maximumFractionDigits: 1 })}°C`;
+  return `${shown(temperatureValue.value).toLocaleString(undefined, { maximumFractionDigits: 1 })}${unit.value}`;
 });
 
 const temperatureLevel = computed<"good" | "warn" | "bad" | "muted">(() => {
@@ -519,10 +547,10 @@ onUnmounted(() => {
               <button
                 type="button"
                 class="import-threshold-btn"
-                :title="`Thresholds: Green < ${thresholds.goodMax}°C, Yellow ${thresholds.goodMax}–${thresholds.warnMax}°C, Red > ${thresholds.warnMax}°C`"
+                :title="`Thresholds: Green < ${goodMaxShown}${unit}, Yellow ${goodMaxShown}–${warnMaxShown}${unit}, Red > ${warnMaxShown}${unit}`"
                 @click="editingThresholds = !editingThresholds"
               >
-                &lt;{{ thresholds.goodMax }}° / {{ thresholds.warnMax }}°C ⚙
+                &lt;{{ goodMaxShown }}° / {{ warnMaxShown }}{{ unit }} ⚙
               </button>
             </div>
             <div class="import-metric-value" :class="`temp-${temperatureLevel}`">
@@ -534,13 +562,13 @@ onUnmounted(() => {
             <div v-if="editingThresholds" class="import-threshold-editor">
               <label>
                 <span class="temp-good">Green &lt;</span>
-                <input v-model.number="thresholds.goodMax" type="number" min="25" max="105" step="1" />
-                <span>°C</span>
+                <input v-model.number="goodMaxShown" type="number" step="1" />
+                <span>{{ unit }}</span>
               </label>
               <label>
                 <span class="temp-bad">Red &gt;</span>
-                <input v-model.number="thresholds.warnMax" type="number" min="35" max="120" step="1" />
-                <span>°C</span>
+                <input v-model.number="warnMaxShown" type="number" step="1" />
+                <span>{{ unit }}</span>
               </label>
             </div>
           </div>
@@ -561,7 +589,7 @@ onUnmounted(() => {
         <!-- Per-Core Equalizer Vertical Bar Graphs -->
         <div v-if="hasMachineStats" class="import-widget-box">
           <div class="import-widget-header">
-            <span class="import-work-k">Per-Core CPU Performance</span>
+            <span class="import-work-k">CPU Performance</span>
             <span v-if="cores" class="import-work-k">{{ cores.length }} logical cores</span>
             <span v-else class="import-work-k">{{ granted ? "Sampling…" : "Stats permission required" }}</span>
           </div>
@@ -579,7 +607,7 @@ onUnmounted(() => {
                 />
               </div>
               <span class="import-eq-pct">{{ formatLoad(load) }}</span>
-              <span class="import-eq-label">C{{ index + 1 }}</span>
+              <span class="import-eq-label">{{ index + 1 }}</span>
             </div>
           </div>
           <p v-else class="import-work-empty muted tiny">

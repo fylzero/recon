@@ -52,6 +52,17 @@ pub fn sanitize_notifications(value: &str) -> String {
     }
 }
 
+fn default_temperature_unit() -> String {
+    "fahrenheit".into()
+}
+
+pub fn sanitize_temperature_unit(value: &str) -> String {
+    match value.trim() {
+        "celsius" => "celsius".into(),
+        _ => default_temperature_unit(),
+    }
+}
+
 fn default_header_color() -> String {
     "#16323c".into()
 }
@@ -373,6 +384,9 @@ pub struct AppData {
     /// Import and restore may show this machine's load and temperature.
     #[serde(default)]
     pub machine_stats: bool,
+    /// Unit for machine temperatures: "fahrenheit" or "celsius".
+    #[serde(default = "default_temperature_unit")]
+    pub temperature_unit: String,
     #[serde(default)]
     pub window: Option<WindowState>,
 }
@@ -398,6 +412,7 @@ impl Default for AppData {
             multithreaded_import: true,
             notifications: default_notifications(),
             machine_stats: false,
+            temperature_unit: default_temperature_unit(),
             window: None,
         }
     }
@@ -459,6 +474,7 @@ pub struct PreferencesPatch {
     pub multithreaded_import: Option<bool>,
     pub notifications: Option<String>,
     pub machine_stats: Option<bool>,
+    pub temperature_unit: Option<String>,
 }
 
 #[cfg(test)]
