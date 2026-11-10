@@ -1,6 +1,6 @@
 import { save } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
-import type { Driver, ImportInOrder, ImportProgress, ImportResume, ImportResumePoint, TabularOptions } from "./types";
+import type { Driver, ImportProgress, ImportResume, ImportResumePoint, TabularOptions } from "./types";
 
 export function fileSafe(name: string) {
   return name.replace(/[/\\:*?"<>|]+/g, "-");
@@ -164,21 +164,12 @@ export function runPhase(progress: ImportProgress | null) {
   if (progress?.phase === "skipping") {
     return "Skipping what already ran…";
   }
-  if (progress?.phase === "scanning") {
-    return "Checking the file…";
-  }
   return null;
-}
-
-/** Why a run loads in file order, for the line under its progress. */
-export function inOrderNote(why: ImportInOrder) {
-  const what = why.line === null ? why.reason : `line ${why.line.toLocaleString()} ${why.reason}`;
-  return `Running in order on one connection: ${what}.`;
 }
 
 /** One step of an import or restore, as the dashboard shows it. */
 export interface ImportStage {
-  id: "check" | "schema" | "rows" | "statements";
+  id: "schema" | "rows" | "statements";
   title: string;
   description: string;
   percent: number;
@@ -190,24 +181,11 @@ function share(done: number, total: number) {
   return total > 0 ? Math.min(100, Math.max(0, (done / total) * 100)) : 0;
 }
 
-/**
- * The steps of a run, from its latest progress. `checked` when the run began
- * by checking whether the file can load in parallel.
- */
-export function importStages(progress: ImportProgress | null, checked: boolean): ImportStage[] {
+/** The steps of a run, from its latest progress. */
+export function importStages(progress: ImportProgress | null): ImportStage[] {
   const stages: ImportStage[] = [];
-  const phase = progress?.phase;
-  if (checked) {
-    stages.push({
-      id: "check",
-      title: "Check",
-      description: "Read the file",
-      percent: phase === "scanning" ? share(progress?.fileBytes ?? 0, progress?.fileTotalBytes ?? 0) : 100,
-      weight: 1,
-    });
-  }
-  if (!progress || phase === "scanning") {
-    stages.push({ id: "statements", title: "Import", description: "Waiting for the check", percent: 0, weight: 7 });
+  if (!progress) {
+    stages.push({ id: "statements", title: "Import", description: "Starting", percent: 0, weight: 7 });
     return stages;
   }
   if (!progress.workers.length) {
@@ -220,7 +198,7 @@ export function importStages(progress: ImportProgress | null, checked: boolean):
     });
     return stages;
   }
-  const planning = phase === "planning";
+  const planning = progress.phase === "planning";
   let run = 0;
   let total = 0;
   for (const worker of progress.workers) {

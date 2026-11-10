@@ -17,8 +17,8 @@ use crate::db::dump::{self, Dump, DumpOptions, DumpProgress, DumpSummary, DumpTa
 use crate::db::restore::{self, BackupInfo};
 use crate::db::resume::{self, Stop, Tracker};
 use crate::db::sql_load::{
-    load_sql, parallel_fit, starts_like_dump, FileFit, InOrder, LoadOptions, LoadSqlError,
-    LoadTrack, LoadWork, LoadWorkerState, NOT_A_DUMP,
+    load_sql, starts_like_dump, LoadOptions, LoadSqlError, LoadTrack, LoadWork, LoadWorkerState,
+    NOT_A_DUMP,
 };
 use crate::db::sql_split::{is_copy_from_stdin, Splitter};
 use crate::db::tabular::TabularOptions;
@@ -548,8 +548,7 @@ struct Progress {
     bytes: u64,
     total_bytes: u64,
     /**
-     * `scanning` while the file is checked for a parallel load, `planning`
-     * while it is split, `running`, `skipping` past statements that already
+     * `planning` while the file is split, `running`, `skipping` past statements that already
      * ran, or `reconnecting`.
      */
     phase: &'static str,
@@ -580,7 +579,7 @@ struct ImportProgressEvent<'a> {
     error: Option<&'a str>,
     /// Sent once, when a run that could have loaded in parallel settles on file order.
     #[serde(skip_serializing_if = "Option::is_none")]
-    in_order: Option<&'a InOrder>,
+    in_order: Option<&'a str>,
 }
 
 fn emit_progress(
@@ -602,7 +601,7 @@ fn emit_progress(
     );
 }
 
-fn emit_in_order(app: &AppHandle, transfer_id: &str, progress: Progress, why: &InOrder) {
+fn emit_in_order(app: &AppHandle, transfer_id: &str, progress: Progress, why: &str) {
     let _ = app.emit(
         IMPORT_PROGRESS_EVENT,
         ImportProgressEvent {
@@ -829,19 +828,6 @@ impl SqlFile {
     }
 }
 
-fn scanned(file_bytes: u64, total: u64) -> Progress {
-    Progress {
-        statements: 0,
-        bytes: file_bytes,
-        total_bytes: total,
-        phase: "scanning",
-        file_bytes,
-        file_total_bytes: total,
-        total_statements: 0,
-        workers: Vec::new(),
-    }
-}
-
 pub(crate) fn open_sql_file(path: &str) -> Result<SqlFile, String> {
     let name = file_name(Path::new(path));
     let file = File::open(path).map_err(|err| format!("Could not open {name}: {err}"))?;
@@ -871,17 +857,13 @@ pub(crate) fn open_sql_file(path: &str) -> Result<SqlFile, String> {
     })
 }
 
-/// Most connections a parallel load opens, so a many-core machine doesn't crowd the server.
-const MAX_WORKERS: usize = 8;
-
-/// How many connections `load_sql` may use. One per logical CPU core, up to `MAX_WORKERS`, on MySQL and Postgres.
+/// How many connections `load_sql` may use. One per logical CPU core on MySQL and Postgres.
 fn sql_workers(driver: Driver) -> usize {
     match driver {
         Driver::Sqlite | Driver::Mssql => 1,
         Driver::Mysql | Driver::Postgres => std::thread::available_parallelism()
             .map(|count| count.get())
-            .unwrap_or(1)
-            .clamp(1, MAX_WORKERS),
+            .unwrap_or(1),
     }
 }
 
@@ -1501,42 +1483,15 @@ impl Replay<'_> {
         }
     }
 
-    /**
-     * Reads the whole file to decide whether `load_sql` can run it in parallel,
-     * and tells the dialog why when it can't. Files that aren't a dump
-     * [`starts_like_dump`] knows aren't read past the head, so they're read once.
-     */
-    async fn scan(&self, driver: Driver) -> Result<FileFit, ImportError> {
+    /// Whether `load_sql` may run the file in parallel, telling the dialog why when it may not.
+    fn parallel(&self) -> Result<bool, ImportError> {
         let mut file = open_sql_file(self.path)?;
-        if !starts_like_dump(&mut file.reader)? {
-            let why = InOrder::file(NOT_A_DUMP);
-            let progress = file.progress(0, "running");
-            emit_in_order(self.app, self.transfer.transfer_id, progress, &why);
-            return Ok(FileFit::InOrder(why));
+        if starts_like_dump(&mut file.reader)? {
+            return Ok(true);
         }
-        let read = file.read.clone();
-        let total = file.total_bytes;
-        let cancel = self.transfer.cancel.clone();
-        let reader = file.reader;
-        let mut scanning =
-            tokio::task::spawn_blocking(move || parallel_fit(reader, driver, &cancel));
-        let mut ticks = tokio::time::interval(PROGRESS_INTERVAL);
-        loop {
-            tokio::select! {
-                joined = &mut scanning => {
-                    let fit = joined.map_err(|err| format!("Could not read the SQL file: {err}"))?;
-                    let fit = fit.map_err(|err| self.renamed(err))?;
-                    if let FileFit::InOrder(why) = &fit {
-                        emit_in_order(self.app, self.transfer.transfer_id, scanned(total, total), why);
-                    }
-                    return Ok(fit);
-                }
-                _ = ticks.tick() => {
-                    let progress = scanned(read.load(Ordering::Relaxed), total);
-                    emit_progress(self.app, self.transfer.transfer_id, progress, 0, None);
-                }
-            }
-        }
+        let progress = file.progress(0, "running");
+        emit_in_order(self.app, self.transfer.transfer_id, progress, NOT_A_DUMP);
+        Ok(false)
     }
 
     /// Tries to reconnect with growing pauses, for up to `RECONNECT_FOR`.
@@ -1717,10 +1672,7 @@ impl Replay<'_> {
         let workers = sql_workers(driver);
         let split_tables = match &resume {
             Some(resume) => resume.parallel.then_some(resume.split_tables),
-            None if multithreaded && workers > 1 => match self.scan(driver).await? {
-                FileFit::Parallel => Some(true),
-                FileFit::InOrder(_) => None,
-            },
+            None if multithreaded && workers > 1 => self.parallel()?.then_some(true),
             None => None,
         };
         let mut plan = match split_tables {
@@ -2419,11 +2371,10 @@ mod tests {
     }
 
     #[test]
-    fn sql_workers_follows_logical_cpu_cores_up_to_the_cap() {
+    fn sql_workers_follows_logical_cpu_cores() {
         let cores = std::thread::available_parallelism()
             .map(|count| count.get())
-            .unwrap_or(1)
-            .clamp(1, MAX_WORKERS);
+            .unwrap_or(1);
         assert_eq!(sql_workers(Driver::Mysql), cores);
         assert_eq!(sql_workers(Driver::Postgres), cores);
         assert_eq!(sql_workers(Driver::Sqlite), 1);

@@ -5,8 +5,8 @@ import * as api from "../api";
 import { useApp } from "../composables/useApp";
 import { useTransferJob } from "../composables/useTransfers";
 import { baseName } from "../platform";
-import { formatDuration, importStages, inOrderNote, resumeAt, resumeChoice, runPhase, stagesPercent } from "../transfer";
-import type { BackupInfo, Driver, ImportInOrder, ImportProgress, ImportResume, ImportResumePoint } from "../types";
+import { formatDuration, importStages, resumeAt, resumeChoice, runPhase, stagesPercent } from "../transfer";
+import type { BackupInfo, Driver, ImportProgress, ImportResume, ImportResumePoint } from "../types";
 import ImportWorkDashboard from "./ImportWorkDashboard.vue";
 import Modal from "./Modal.vue";
 
@@ -37,9 +37,6 @@ const resuming = ref(false);
 const progress = ref<ImportProgress | null>(null);
 /** The last progress outside a reconnect, which reports every worker at 0. */
 const dashboard = ref<ImportProgress | null>(null);
-/** The run began by checking whether the file can load in parallel. */
-const checked = ref(false);
-const inOrder = ref<ImportInOrder | null>(null);
 let transferId = "";
 let stopProgress: UnlistenFn | null = null;
 
@@ -70,9 +67,8 @@ const partial = computed(() =>
 );
 /** Clearing can't be stopped halfway outside Postgres, so cancelling waits until the replay starts. */
 const canCancel = computed(() => !running.value || atomic.value || resuming.value || progress.value !== null);
-const percent = computed(() => Math.round(stagesPercent(importStages(dashboard.value, checked.value))));
+const percent = computed(() => Math.round(stagesPercent(importStages(dashboard.value))));
 const phase = computed(() => runPhase(progress.value));
-const checking = computed(() => progress.value?.phase === "scanning");
 const uncertain = computed(() => Boolean(resumePoint.value && resumePoint.value.to > resumePoint.value.from));
 const uncertainWord = computed(() => (resumePoint.value && resumePoint.value.to - resumePoint.value.from > 1 ? "them" : "it"));
 const statusLabel = computed(() => {
@@ -100,18 +96,10 @@ async function start(resume: ImportResume | null = null) {
   resumePoint.value = null;
   progress.value = null;
   dashboard.value = null;
-  checked.value = false;
-  inOrder.value = null;
   transferId = job.begin(`Restoring “${props.namespace}” from ${fileName.value}`);
   stopProgress = await listen<ImportProgress>("import-progress", (event) => {
     if (event.payload.transferId === transferId) {
       progress.value = event.payload;
-      if (event.payload.phase === "scanning") {
-        checked.value = true;
-      }
-      if (event.payload.inOrder) {
-        inOrder.value = event.payload.inOrder;
-      }
       if (event.payload.phase !== "reconnecting") {
         dashboard.value = event.payload;
       }
@@ -200,13 +188,11 @@ onUnmounted(() => stopProgress?.());
       I understand everything in “{{ namespace }}” will be deleted
     </label>
     <div v-if="running" class="transfer-progress" aria-live="polite">
-      <ImportWorkDashboard :progress="dashboard" :checked="checked" />
+      <ImportWorkDashboard :progress="dashboard" />
       <p class="muted tiny transfer-status">
         <span class="transfer-status-label">{{ statusLabel }}</span>
-        <span v-if="checking">{{ percent }}%</span>
-        <span v-else-if="progress">{{ progress.statements.toLocaleString() }} statements · {{ percent }}%</span>
+        <span v-if="progress">{{ progress.statements.toLocaleString() }} statements · {{ percent }}%</span>
       </p>
-      <p v-if="inOrder" class="muted tiny">{{ inOrderNote(inOrder) }}</p>
       <p v-if="progress?.phase === 'reconnecting' && progress.error" class="muted tiny transfer-error">
         {{ progress.error }}
       </p>
@@ -229,7 +215,7 @@ onUnmounted(() => stopProgress?.());
       </template>
       <button v-else-if="!error" class="danger" type="button" :disabled="running || !understood" @click="start()">
         <span v-if="running" class="spinner" aria-hidden="true" />
-        {{ checking ? "Checking…" : running ? "Restoring…" : "Erase and restore" }}
+        {{ running ? "Restoring…" : "Erase and restore" }}
       </button>
     </template>
   </Modal>

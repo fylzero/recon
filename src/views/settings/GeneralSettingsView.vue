@@ -204,9 +204,9 @@ function selectValue(event: Event) {
           <div class="settings-row-copy">
             <h3>Multithreaded import</h3>
             <p class="muted tiny">
-              Import MySQL and Postgres files over several connections when the result can't depend
-              on statement order, as with mysqldump and pg_dump output. Other files still run one
-              statement at a time, in order. Either way, a dropped connection resumes where it left off.
+              Import mysqldump, pg_dump, and Recon files into MySQL and Postgres over one connection
+              per processor core. Other files still run one statement at a time, in order. Either way,
+              a dropped connection resumes where it left off.
             </p>
           </div>
           <label class="settings-control checkbox-row">

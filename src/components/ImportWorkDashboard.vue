@@ -9,8 +9,6 @@ import type { ImportProgress, ImportWorkerProgress, MachineStats } from "../type
 
 const props = defineProps<{
   progress: ImportProgress | null;
-  /** The run began by checking whether the file can load in parallel. */
-  checked: boolean;
 }>();
 
 const THRESHOLDS_KEY = "recon.importTempThresholds";
@@ -79,7 +77,7 @@ let tickTimer: ReturnType<typeof setInterval> | null = null;
 let sampling = false;
 
 const workers = computed(() => [...(props.progress?.workers ?? [])].sort((a, b) => a.index - b.index));
-const stages = computed(() => importStages(props.progress, props.checked));
+const stages = computed(() => importStages(props.progress));
 const activeStage = computed(() => stages.value.find((stage) => stage.percent < 100) ?? null);
 const totalPercent = computed(() => stagesPercent(stages.value));
 

@@ -501,11 +501,10 @@ export interface ImportProgress {
   bytes: number;
   totalBytes: number;
   /**
-   * `scanning` while the file is checked for a parallel load, `planning` while
-   * it is split, `running`, `skipping` past statements that already ran, or
+   * `planning` while the file is split, `running`, `skipping` past statements that already ran, or
    * `reconnecting` after the connection dropped.
    */
-  phase: "scanning" | "planning" | "running" | "skipping" | "reconnecting";
+  phase: "planning" | "running" | "skipping" | "reconnecting";
   /** Failed reconnect attempts so far, with the last one's error. */
   attempt: number;
   error: string | null;
@@ -515,16 +514,8 @@ export interface ImportProgress {
   totalStatements: number;
   /** Empty for a run in file order. */
   workers: ImportWorkerProgress[];
-  /** Sent once, when a run that could have loaded in parallel settles on file order. */
-  inOrder?: ImportInOrder;
-}
-
-/** Why a run loads in file order. */
-export interface ImportInOrder {
-  /** The statement that rules out a parallel load, or null when it's the whole file. */
-  line: number | null;
-  /** Reads on from "line N", or stands alone without a line. */
-  reason: string;
+  /** Why a run that could have loaded in parallel runs in file order. Sent once, before it starts. */
+  inOrder?: string;
 }
 
 /** Per-logical-core load and, when the machine exposes one, a Celsius temperature. */

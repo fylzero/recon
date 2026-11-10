@@ -5,8 +5,8 @@ import * as api from "../api";
 import { useApp } from "../composables/useApp";
 import { useTransferJob } from "../composables/useTransfers";
 import { baseName } from "../platform";
-import { formatDuration, importStages, inOrderNote, resumeAt, resumeChoice, runPhase, stagesPercent } from "../transfer";
-import type { ImportInOrder, ImportProgress, ImportResume, ImportResumePoint } from "../types";
+import { formatDuration, importStages, resumeAt, resumeChoice, runPhase, stagesPercent } from "../transfer";
+import type { ImportProgress, ImportResume, ImportResumePoint } from "../types";
 import ImportWorkDashboard from "./ImportWorkDashboard.vue";
 import Modal from "./Modal.vue";
 
@@ -32,16 +32,14 @@ const resumePoint = ref<ImportResumePoint | null>(null);
 const progress = ref<ImportProgress | null>(null);
 /** The last progress outside a reconnect, which reports every worker at 0. */
 const dashboard = ref<ImportProgress | null>(null);
-/** The run began by checking whether the file can load in parallel. */
-const checked = ref(false);
-const inOrder = ref<ImportInOrder | null>(null);
+/** Why the run loads in file order, when it could have loaded in parallel. */
+const inOrder = ref("");
 let transferId = "";
 let stopProgress: UnlistenFn | null = null;
 
 const fileName = computed(() => baseName(props.path));
-const percent = computed(() => Math.round(stagesPercent(importStages(dashboard.value, checked.value))));
+const percent = computed(() => Math.round(stagesPercent(importStages(dashboard.value))));
 const phase = computed(() => runPhase(progress.value));
-const checking = computed(() => progress.value?.phase === "scanning");
 const uncertain = computed(() => Boolean(resumePoint.value && resumePoint.value.to > resumePoint.value.from));
 const uncertainWord = computed(() => (resumePoint.value && resumePoint.value.to - resumePoint.value.from > 1 ? "them" : "it"));
 
@@ -62,15 +60,11 @@ async function start(resume: ImportResume | null = null) {
   resumePoint.value = null;
   progress.value = null;
   dashboard.value = null;
-  checked.value = false;
-  inOrder.value = null;
+  inOrder.value = "";
   transferId = job.begin(`Importing ${fileName.value} into “${props.namespace}”`);
   stopProgress = await listen<ImportProgress>("import-progress", (event) => {
     if (event.payload.transferId === transferId) {
       progress.value = event.payload;
-      if (event.payload.phase === "scanning") {
-        checked.value = true;
-      }
       if (event.payload.inOrder) {
         inOrder.value = event.payload.inOrder;
       }
@@ -131,17 +125,16 @@ onUnmounted(() => stopProgress?.());
       stops at the first error. Anything that ran before an error stays applied. If the connection drops, Recon
       reconnects and picks up where it left off.
       <template v-if="multithreadedImport">
-        Multithreaded import is on, so Recon first checks whether the file can load over several connections.
+        Multithreaded import is on, so mysqldump, pg_dump, and Recon files load over several connections.
       </template>
     </p>
     <div v-if="running" class="transfer-progress" aria-live="polite">
-      <ImportWorkDashboard :progress="dashboard" :checked="checked" />
+      <ImportWorkDashboard :progress="dashboard" />
       <p class="muted tiny transfer-status">
         <span class="transfer-status-label">{{ cancelling ? "Cancelling…" : (phase ?? "Importing…") }}</span>
-        <span v-if="checking">{{ percent }}%</span>
-        <span v-else-if="progress">{{ progress.statements.toLocaleString() }} statements · {{ percent }}%</span>
+        <span v-if="progress">{{ progress.statements.toLocaleString() }} statements · {{ percent }}%</span>
       </p>
-      <p v-if="inOrder" class="muted tiny">{{ inOrderNote(inOrder) }}</p>
+      <p v-if="inOrder" class="muted tiny">Running in order on one connection: {{ inOrder }}.</p>
       <p v-if="progress?.phase === 'reconnecting' && progress.error" class="muted tiny transfer-error">
         {{ progress.error }}
       </p>
@@ -164,7 +157,7 @@ onUnmounted(() => stopProgress?.());
       </template>
       <button v-else-if="!error" class="primary" type="button" :disabled="running" @click="start()">
         <span v-if="running" class="spinner" aria-hidden="true" />
-        {{ checking ? "Checking…" : running ? "Importing…" : "Import" }}
+        {{ running ? "Importing…" : "Import" }}
       </button>
     </template>
   </Modal>
