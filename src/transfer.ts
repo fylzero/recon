@@ -169,7 +169,7 @@ export function runPhase(progress: ImportProgress | null) {
 
 /** One step of an import or restore, as the dashboard shows it. */
 export interface ImportStage {
-  id: "schema" | "rows" | "statements";
+  id: "read" | "rows" | "statements";
   title: string;
   description: string;
   percent: number;
@@ -210,18 +210,18 @@ export function importStages(progress: ImportProgress | null): ImportStage[] {
     total = progress.totalStatements;
   }
   stages.push({
-    id: "schema",
-    title: "Create tables",
-    description: "Split the file and create tables",
+    id: "read",
+    title: "Read file",
+    description: "Sort rows by table and create the tables",
     percent: planning ? share(progress.fileBytes, progress.fileTotalBytes) : 100,
-    weight: 2,
+    weight: 1,
   });
   stages.push({
     id: "rows",
     title: "Insert rows",
     description: `Over ${progress.workers.length} connections`,
     percent: planning ? 0 : share(run, total),
-    weight: 5,
+    weight: 6,
   });
   return stages;
 }
