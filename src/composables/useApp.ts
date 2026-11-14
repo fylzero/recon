@@ -8,6 +8,7 @@ import type {
   NotificationMode,
   TemperatureUnit,
   PreferencesPatch,
+  S3Location,
   SavedQuery,
   WindowState,
 } from "../types";
@@ -46,6 +47,7 @@ const dashboardIds = computed(() =>
   ),
 );
 const savedQueries = ref<SavedQuery[]>([]);
+const s3Locations = ref<S3Location[]>([]);
 const error = ref("");
 const loaded = ref(false);
 const editorFontFamily = ref(DEFAULT_CODE_FONT);
@@ -121,6 +123,7 @@ export function useApp() {
     standaloneConnections.value = data.connections ?? [];
     dashboardOrder.value = data.dashboardOrder ?? [];
     savedQueries.value = data.savedQueries ?? [];
+    s3Locations.value = data.s3Locations ?? [];
     themePreference.value = sanitizeTheme(data.theme);
     editorFontFamily.value = sanitizeFontFamily(data.editorFontFamily ?? DEFAULT_CODE_FONT);
     editorFontSize.value = clampFontSize(
@@ -406,6 +409,20 @@ export function useApp() {
     savedQueries.value = savedQueries.value.filter((query) => query.id !== queryId);
   }
 
+  async function saveS3Location(location: S3Location) {
+    const saved = await api.saveS3Location(location);
+    const exists = s3Locations.value.some((item) => item.id === saved.id);
+    s3Locations.value = exists
+      ? s3Locations.value.map((item) => (item.id === saved.id ? saved : item))
+      : [...s3Locations.value, saved];
+    return saved;
+  }
+
+  async function deleteS3Location(locationId: string) {
+    await api.deleteS3Location(locationId);
+    s3Locations.value = s3Locations.value.filter((item) => item.id !== locationId);
+  }
+
   async function reorderConnections(groupId: string | null, connectionIds: string[]) {
     const list = groupId
       ? (groups.value.find((group) => group.id === groupId)?.connections ?? [])
@@ -477,6 +494,7 @@ export function useApp() {
     dashboardOrder,
     dashboardIds,
     savedQueries,
+    s3Locations,
     error,
     loaded,
     theme: themePreference,
@@ -520,5 +538,7 @@ export function useApp() {
     moveConnection,
     saveQuery,
     deleteSavedQuery,
+    saveS3Location,
+    deleteS3Location,
   };
 }

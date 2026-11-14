@@ -120,6 +120,7 @@ export interface AppData {
   connections?: ConnectionEntry[];
   dashboardOrder?: string[];
   savedQueries?: SavedQuery[];
+  s3Locations?: S3Location[];
   theme?: ThemePreference;
   editorFontFamily?: string;
   editorFontSize?: number;
@@ -138,6 +139,52 @@ export interface AppData {
   temperatureUnit?: TemperatureUnit;
   window?: WindowState;
 }
+
+/** "" leaves encryption to the bucket's default. */
+export type S3Encryption = "" | "AES256" | "aws:kms";
+
+/** A bucket, and optionally a folder in it, that backups and imports can use through the AWS CLI. */
+export interface S3Location {
+  id: string;
+  name: string;
+  /** Empty uses the AWS CLI's default credentials. */
+  profile: string;
+  /** Empty uses the profile's region. */
+  region: string;
+  bucket: string;
+  /** A folder inside the bucket, ending in "/" when set. */
+  prefix: string;
+  /** For S3-compatible storage such as Cloudflare R2 or MinIO. */
+  endpoint: string;
+  encryption: S3Encryption;
+  kmsKeyId: string;
+}
+
+export interface S3File {
+  key: string;
+  size: number;
+  /** RFC 3339. */
+  modified: string;
+}
+
+export interface S3Listing {
+  prefix: string;
+  folders: string[];
+  files: S3File[];
+  /** Only the first 1,000 entries are listed. */
+  truncated: boolean;
+}
+
+/** Who the AWS CLI signs in as with a profile. */
+export interface AwsIdentity {
+  account: string;
+  arn: string;
+}
+
+/** Where an import or restore reads from. */
+export type TransferSource =
+  | { kind: "file"; path: string }
+  | { kind: "s3"; location: S3Location; key: string };
 
 export type NotificationMode = "background" | "always" | "off";
 

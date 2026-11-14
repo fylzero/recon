@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AppData,
+  AwsIdentity,
   BackupInfo,
   BrowseRequest,
   BrowseResult,
@@ -24,6 +25,8 @@ import type {
   ReplaceRequest,
   ResolvedSshHost,
   RowValues,
+  S3Listing,
+  S3Location,
   SavedQuery,
   SaveRequest,
   SchemaColumn,
@@ -33,6 +36,7 @@ import type {
   TableInfo,
   TabularOptions,
   TableStructure,
+  TransferSource,
   TruncateOptions,
   WindowState,
 } from "./types";
@@ -127,6 +131,38 @@ export function listSshHosts() {
 
 export function listAwsProfiles() {
   return invoke<string[]>("list_aws_profiles");
+}
+
+export function saveS3Location(location: S3Location) {
+  return invoke<S3Location>("save_s3_location", { location });
+}
+
+export function deleteS3Location(locationId: string) {
+  return invoke<void>("delete_s3_location", { locationId });
+}
+
+/** Resolves to a message saying what Recon could reach. */
+export function testS3Location(location: S3Location) {
+  return invoke<string>("test_s3_location", { location });
+}
+
+/** Rejects when the profile isn't allowed to list buckets. */
+export function listS3Buckets(location: S3Location) {
+  return invoke<string[]>("list_s3_buckets", { location });
+}
+
+export function listS3Objects(location: S3Location, prefix: string) {
+  return invoke<S3Listing>("list_s3_objects", { location, prefix });
+}
+
+/** The account and user or role the AWS CLI signs in as with this profile. */
+export function getAwsIdentity(profile: string, region: string) {
+  return invoke<AwsIdentity>("get_aws_identity", { profile, region });
+}
+
+/** Runs `aws sso login`, which finishes once the user signs in in their browser. */
+export function signInToAws(profile: string) {
+  return invoke<void>("sign_in_to_aws", { profile });
 }
 
 export function resolveSshHost(host: string) {
@@ -364,11 +400,11 @@ export function importSql(
   connectionId: string,
   transferId: string,
   namespace: string,
-  path: string,
+  source: TransferSource,
   resume: ImportResume | null = null,
   multithreaded: boolean | null = null,
 ) {
-  return invoke<ImportResult>("import_sql", { connectionId, transferId, namespace, path, resume, multithreaded });
+  return invoke<ImportResult>("import_sql", { connectionId, transferId, namespace, source, resume, multithreaded });
 }
 
 /** What `importSql` and `restoreDatabase` reject with, which can say where to resume. */
@@ -383,18 +419,29 @@ export function backupDatabase(connectionId: string, transferId: string, namespa
   return invoke<ExportResult>("backup_database", { connectionId, transferId, namespace, path });
 }
 
-export function readBackupInfo(path: string) {
-  return invoke<BackupInfo>("read_backup_info", { path });
+/** Streams a backup into an S3 object instead of a file. */
+export function backupDatabaseToS3(
+  connectionId: string,
+  transferId: string,
+  namespace: string,
+  location: S3Location,
+  key: string,
+) {
+  return invoke<ExportResult>("backup_database_to_s3", { connectionId, transferId, namespace, location, key });
+}
+
+export function readBackupInfo(source: TransferSource) {
+  return invoke<BackupInfo>("read_backup_info", { source });
 }
 
 export function restoreDatabase(
   connectionId: string,
   transferId: string,
   namespace: string,
-  path: string,
+  source: TransferSource,
   resume: ImportResume | null = null,
 ) {
-  return invoke<ImportResult>("restore_database", { connectionId, transferId, namespace, path, resume });
+  return invoke<ImportResult>("restore_database", { connectionId, transferId, namespace, source, resume });
 }
 
 export function cancelTransfer(transferId: string) {

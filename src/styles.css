@@ -2755,6 +2755,12 @@ button.link-button:hover:not(:disabled) {
   padding: 0.15rem 0.55rem;
 }
 
+.db-toolbar-transfer .overflow-menu-item {
+  display: flex;
+  padding: 0.4rem 0.55rem;
+  white-space: nowrap;
+}
+
 .db-toolbar-transfer svg {
   width: 0.85rem;
   height: 0.85rem;
@@ -3004,6 +3010,98 @@ button.link-button:hover:not(:disabled) {
   max-height: 8rem;
   padding-left: 1.1rem;
   overflow: auto;
+}
+
+.s3-browser {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.s3-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.s3-list {
+  display: flex;
+  flex-direction: column;
+  height: 15rem;
+  padding: 0.2rem;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input);
+}
+
+.s3-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.3rem 0.5rem;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font-size: 12.5px;
+  text-align: left;
+}
+
+.s3-row:hover:not(:disabled):not(.active) {
+  background: var(--bg-hover);
+}
+
+.s3-row.active {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.s3-row:disabled {
+  opacity: 0.45;
+}
+
+.s3-row-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.s3-folder .s3-row-name {
+  font-weight: 600;
+}
+
+.s3-empty {
+  margin: 0;
+  padding: 0.5rem;
+}
+
+.s3-location-url {
+  overflow-wrap: anywhere;
+}
+
+.s3-identity {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.s3-identity .spinner {
+  display: inline-block;
+  vertical-align: middle;
+  margin-right: 0.25rem;
+}
+
+.s3-location-actions {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.transfer-destination {
+  align-self: flex-start;
 }
 
 .replace-form {

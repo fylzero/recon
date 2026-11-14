@@ -9,6 +9,7 @@ mod models;
 mod persist;
 mod prompts;
 mod query_log;
+mod s3;
 mod secrets;
 mod tabular_commands;
 mod transfer_commands;
@@ -76,6 +77,13 @@ pub fn run() {
             commands::list_ssh_hosts,
             commands::resolve_ssh_host,
             commands::list_aws_profiles,
+            commands::save_s3_location,
+            commands::delete_s3_location,
+            commands::test_s3_location,
+            commands::list_s3_buckets,
+            commands::list_s3_objects,
+            commands::get_aws_identity,
+            commands::sign_in_to_aws,
             commands::update_preferences,
             machine_stats::machine_stats,
             commands::replace_app_data,
@@ -124,6 +132,7 @@ pub fn run() {
             transfer_commands::export_sql,
             transfer_commands::import_sql,
             transfer_commands::backup_database,
+            transfer_commands::backup_database_to_s3,
             transfer_commands::read_backup_info,
             transfer_commands::restore_database,
             transfer_commands::cancel_transfer,

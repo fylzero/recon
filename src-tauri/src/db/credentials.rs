@@ -47,7 +47,7 @@ fn aws_args(entry: &ConnectionEntry) -> Vec<String> {
     args
 }
 
-fn last_lines(bytes: &[u8]) -> String {
+pub(crate) fn last_lines(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
     let lines: Vec<&str> = text
         .lines()
@@ -57,7 +57,7 @@ fn last_lines(bytes: &[u8]) -> String {
     lines[lines.len().saturating_sub(ERROR_TAIL_LINES)..].join(" ")
 }
 
-pub(super) fn aws_command(args: impl IntoIterator<Item = String>) -> Command {
+pub(crate) fn aws_command(args: impl IntoIterator<Item = String>) -> Command {
     let mut command = Command::new("aws");
     command.args(args);
     command
@@ -67,11 +67,11 @@ pub(super) fn aws_command(args: impl IntoIterator<Item = String>) -> Command {
  * Runs a helper tool with the login shell's PATH and returns what it printed.
  * Failures name the tool through `label` and include the end of its stderr.
  */
-pub(super) async fn run_tool(command: &mut Command, label: &str) -> Result<Vec<u8>, String> {
+pub(crate) async fn run_tool(command: &mut Command, label: &str) -> Result<Vec<u8>, String> {
     run_tool_within(command, label, FETCH_TIMEOUT).await
 }
 
-async fn run_tool_within(
+pub(crate) async fn run_tool_within(
     command: &mut Command,
     label: &str,
     timeout: Duration,
@@ -161,12 +161,22 @@ pub async fn fetch(entry: &ConnectionEntry) -> Result<String, String> {
     Ok(password)
 }
 
-fn needs_sso_login(entry: &ConnectionEntry, err: &str) -> bool {
+/// Whether an AWS CLI error means the profile's SSO sign-in has expired.
+pub(crate) fn sso_expired(err: &str) -> bool {
     let err = err.to_lowercase();
-    entry.password_source == PasswordSource::AwsIam
-        && SSO_EXPIRED_MARKERS
-            .iter()
-            .any(|marker| err.contains(marker))
+    SSO_EXPIRED_MARKERS
+        .iter()
+        .any(|marker| err.contains(marker))
+}
+
+fn needs_sso_login(entry: &ConnectionEntry, err: &str) -> bool {
+    entry.password_source == PasswordSource::AwsIam && sso_expired(err)
+}
+
+/// Runs `aws sso login` for `profile`, waiting for any sign-in already underway.
+pub(crate) async fn sign_in(profile: &str) -> Result<(), String> {
+    let _turn = SSO_LOGIN.lock().await;
+    sso_login(profile).await
 }
 
 async fn sso_login(profile: &str) -> Result<(), String> {

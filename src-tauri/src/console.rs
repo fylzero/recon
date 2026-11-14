@@ -9,3 +9,13 @@ pub fn hide_window(command: &mut Command) -> &mut Command {
     command.creation_flags(CREATE_NO_WINDOW);
     command
 }
+
+/// `hide_window` for a process read or written from blocking code.
+pub fn hide_std_window(command: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}

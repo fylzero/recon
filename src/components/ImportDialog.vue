@@ -4,9 +4,9 @@ import { computed, onUnmounted, ref } from "vue";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
 import { useTransferJob } from "../composables/useTransfers";
-import { baseName } from "../platform";
+import { sourceName, sourcePath } from "../s3";
 import { formatDuration, importStages, resumeAt, resumeChoice, runPhase, stagesPercent } from "../transfer";
-import type { Driver, ImportProgress, ImportResume, ImportResumePoint } from "../types";
+import type { Driver, ImportProgress, ImportResume, ImportResumePoint, TransferSource } from "../types";
 import ImportWorkDashboard from "./ImportWorkDashboard.vue";
 import Modal from "./Modal.vue";
 import TransferRoute from "./TransferRoute.vue";
@@ -16,7 +16,7 @@ const props = defineProps<{
   driver: Driver;
   namespace: string;
   namespaceLabel: string;
-  path: string;
+  source: TransferSource;
 }>();
 
 const emit = defineEmits<{
@@ -39,7 +39,12 @@ const inOrder = ref("");
 let transferId = "";
 let stopProgress: UnlistenFn | null = null;
 
-const fileName = computed(() => baseName(props.path));
+const fileName = computed(() => sourceName(props.source));
+const path = computed(() => sourcePath(props.source));
+const fileLabel = computed(() => {
+  const kind = /\.gz$/i.test(fileName.value) ? "Gzipped SQL file" : "SQL file";
+  return props.source.kind === "s3" ? `${kind} in S3` : kind;
+});
 const canThread = computed(() => props.driver === "mysql" || props.driver === "postgres");
 /** For this import only. It starts from the setting in General. */
 const multithreaded = ref(multithreadedImport.value);
@@ -80,7 +85,7 @@ async function start(resume: ImportResume | null = null) {
     }
   });
   try {
-    const result = await api.importSql(props.connectionId, transferId, props.namespace, props.path, resume, multithreaded.value);
+    const result = await api.importSql(props.connectionId, transferId, props.namespace, props.source, resume, multithreaded.value);
     const statements = `${result.statements.toLocaleString()} ${result.statements === 1 ? "statement" : "statements"}`;
     const duration = formatDuration(result.durationMs);
     showToast(`Imported ${fileName.value} into “${props.namespace}” in ${duration} (${statements})`);
@@ -128,7 +133,7 @@ onUnmounted(() => stopProgress?.());
       <TransferRoute
         :file="fileName"
         :path="path"
-        :file-label="/\.gz$/i.test(fileName) ? 'Gzipped SQL file' : 'SQL file'"
+        :file-label="fileLabel"
         :target="namespace"
         :target-label="namespaceLabel"
         :driver="driver"
@@ -138,7 +143,7 @@ onUnmounted(() => stopProgress?.());
       v-if="!running"
       :file="fileName"
       :path="path"
-      :file-label="/\.gz$/i.test(fileName) ? 'Gzipped SQL file' : 'SQL file'"
+      :file-label="fileLabel"
       :target="namespace"
       :target-label="namespaceLabel"
       :driver="driver"

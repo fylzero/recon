@@ -8,11 +8,12 @@ use crate::db::tls;
 use crate::models::{
     sanitize_color, sanitize_font_family, sanitize_font_size, sanitize_list_font_family,
     sanitize_notifications, sanitize_temperature_unit, sanitize_theme, AppData, ConnectionEntry,
-    ConnectionGroup, Driver, PasswordSource, PreferencesPatch, SavedQuery, SshAuth, SshTunnel,
-    DEFAULT_EDITOR_FONT_SIZE, DEFAULT_GRID_FONT_SIZE, DEFAULT_LIST_FONT_SIZE, DEFAULT_SSH_PORT,
-    MAX_AUTO_COLUMN_WIDTH_MAX, MAX_AUTO_COLUMN_WIDTH_MIN, PAGE_SIZE_MAX, PAGE_SIZE_MIN,
-    QUERY_ROW_LIMIT_MAX, QUERY_ROW_LIMIT_MIN, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
+    ConnectionGroup, Driver, PasswordSource, PreferencesPatch, S3Location, SavedQuery, SshAuth,
+    SshTunnel, DEFAULT_EDITOR_FONT_SIZE, DEFAULT_GRID_FONT_SIZE, DEFAULT_LIST_FONT_SIZE,
+    DEFAULT_SSH_PORT, MAX_AUTO_COLUMN_WIDTH_MAX, MAX_AUTO_COLUMN_WIDTH_MIN, PAGE_SIZE_MAX,
+    PAGE_SIZE_MIN, QUERY_ROW_LIMIT_MAX, QUERY_ROW_LIMIT_MIN, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
 };
+use crate::s3::{self, S3Listing};
 use crate::{persist, query_log, secrets};
 
 const DEFAULT_GROUP_COLOR: &str = "#16323c";
@@ -335,7 +336,20 @@ fn sanitize_app_data(mut data: AppData) -> Result<AppData, String> {
         .filter(|query| data.find_connection(&query.connection_id).is_some())
         .map(sanitize_saved_query)
         .collect();
+    data.s3_locations = std::mem::take(&mut data.s3_locations)
+        .into_iter()
+        .map(sanitize_s3_location)
+        .collect::<Result<_, _>>()
+        .map_err(|_| String::from("Every S3 location needs a bucket"))?;
     Ok(data)
+}
+
+fn sanitize_s3_location(location: S3Location) -> Result<S3Location, String> {
+    let mut location = s3::sanitize(location)?;
+    if location.id.trim().is_empty() {
+        location.id = uuid::Uuid::new_v4().to_string();
+    }
+    Ok(location)
 }
 
 fn sanitize_saved_query(mut query: SavedQuery) -> SavedQuery {
@@ -703,6 +717,67 @@ pub fn list_ssh_hosts() -> Vec<String> {
 #[tauri::command]
 pub async fn list_aws_profiles() -> Vec<String> {
     crate::db::credentials::list_aws_profiles().await
+}
+
+#[tauri::command]
+pub fn save_s3_location(
+    app: AppHandle,
+    state: State<AppState>,
+    location: S3Location,
+) -> Result<S3Location, String> {
+    let location = sanitize_s3_location(location)?;
+    let mut data = lock(&state)?;
+    match data
+        .s3_locations
+        .iter_mut()
+        .find(|item| item.id == location.id)
+    {
+        Some(existing) => *existing = location.clone(),
+        None => data.s3_locations.push(location.clone()),
+    }
+    persist::save(&app, &data)?;
+    Ok(location)
+}
+
+#[tauri::command]
+pub fn delete_s3_location(
+    app: AppHandle,
+    state: State<AppState>,
+    location_id: String,
+) -> Result<(), String> {
+    let mut data = lock(&state)?;
+    data.s3_locations.retain(|item| item.id != location_id);
+    persist::save(&app, &data)
+}
+
+#[tauri::command]
+pub async fn test_s3_location(location: S3Location) -> Result<String, String> {
+    s3::test(&s3::sanitize(location)?).await
+}
+
+/// Bucket names for the location's profile. Fails when the profile isn't allowed to list buckets.
+#[tauri::command]
+pub async fn list_s3_buckets(location: S3Location) -> Result<Vec<String>, String> {
+    let location = S3Location {
+        bucket: "-".into(),
+        ..location
+    };
+    s3::list_buckets(&s3::sanitize(location)?).await
+}
+
+#[tauri::command]
+pub async fn list_s3_objects(location: S3Location, prefix: String) -> Result<S3Listing, String> {
+    s3::list(&s3::sanitize(location)?, &prefix).await
+}
+
+#[tauri::command]
+pub async fn get_aws_identity(profile: String, region: String) -> Result<s3::AwsIdentity, String> {
+    s3::identity(&profile, &region).await
+}
+
+#[tauri::command]
+pub async fn sign_in_to_aws(profile: String) -> Result<(), String> {
+    s3::sign_in(&profile).await
 }
 
 #[tauri::command]

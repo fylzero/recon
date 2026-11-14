@@ -37,7 +37,7 @@ Recon is an open-source database client for macOS, Windows, and Linux, built wit
 - **Open source**: Free to use and modify under the MIT license
 - **Privacy-focused**: Database credentials stored exclusively in the macOS Keychain, Windows Credential Manager, or the Linux system keyring
 - **No external dependencies**: MySQL, PostgreSQL, SQLite, and SQL Server drivers compiled directly into the app
-- **No account, no cloud**: Connections and queries go straight from your machine to your database
+- **No account, no cloud**: Connections and queries go straight from your machine to your database. Amazon S3 backups are opt-in and use your own AWS account
 - **Native app**: A Tauri shell with a Rust backend, not a bundled browser
 
 ## Features
@@ -77,6 +77,7 @@ Recon is an open-source database client for macOS, Windows, and Linux, built wit
 - Export tables to SQL, CSV, or JSON formats
 - Import data from SQL, CSV, or JSON files
 - Backup and restore entire databases
+- Back up to Amazon S3 and restore or import `.sql` files from it, streamed without saving to disk, through the AWS CLI and its profiles (also works with S3-compatible storage)
 - Export filtered data or entire tables
 - Row-level import and export options
 

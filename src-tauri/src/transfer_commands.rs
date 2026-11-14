@@ -27,8 +27,9 @@ use crate::db::{
     TableInfo,
 };
 use crate::db_commands::{reapply_namespace, reconnect_in_background, tables_in, Reconnected};
-use crate::models::Driver;
+use crate::models::{Driver, S3Location};
 use crate::query_log::{self, QueryOrigin, QueryRecord};
+use crate::s3;
 use crate::tabular_commands;
 
 pub(crate) const EXPORT_PROGRESS_EVENT: &str = "export-progress";
@@ -232,6 +233,31 @@ fn prepend_header(dest: &Path, body: &Path, header: &str, gzip: bool) -> Result<
     Ok(())
 }
 
+/// Reports a dump's progress, at once when it moves to another table.
+fn export_progress<'a>(
+    app: &'a AppHandle,
+    transfer_id: &'a str,
+) -> impl FnMut(DumpProgress) + Send + 'a {
+    let mut throttle = Throttle(None);
+    let mut current = String::new();
+    move |update: DumpProgress| {
+        let changed = update.table != current;
+        if throttle.ready(changed) {
+            current = update.table.to_string();
+            let _ = app.emit(
+                EXPORT_PROGRESS_EVENT,
+                ExportProgressEvent {
+                    transfer_id,
+                    table: update.table,
+                    index: update.index,
+                    total: update.total,
+                    rows: update.rows,
+                },
+            );
+        }
+    }
+}
+
 /**
  * Writes next to the destination and renames on success, so a failed or
  * cancelled dump never leaves a truncated file or clobbers an older one.
@@ -269,24 +295,7 @@ async fn write_dump(
                     .await?,
             );
             let server = format!("{} {version}", session.driver.label());
-            let mut throttle = Throttle(None);
-            let mut current = String::new();
-            let mut progress = |update: DumpProgress| {
-                let changed = update.table != current;
-                if throttle.ready(changed) {
-                    current = update.table.to_string();
-                    let _ = app.emit(
-                        EXPORT_PROGRESS_EVENT,
-                        ExportProgressEvent {
-                            transfer_id,
-                            table: update.table,
-                            index: update.index,
-                            total: update.total,
-                            rows: update.rows,
-                        },
-                    );
-                }
-            };
+            let mut progress = export_progress(app, transfer_id);
             let mut dump = Dump::new(&mut sink, &transfer.cancel, &mut progress);
             dump::run(&mut conn, &server, namespace, tables, options, &mut dump).await?;
             Ok::<_, String>((dump.into_summary(), server))
@@ -422,12 +431,7 @@ pub async fn backup_database(
         .map(dump_table)
         .collect();
     let transfer = transfers.start(&transfer_id);
-    let options = DumpOptions {
-        structure: true,
-        data: true,
-        drop_tables: true,
-        routines: true,
-    };
+    let options = BACKUP_OPTIONS;
     let driver = session.driver;
     let created_at = restore::utc_timestamp();
     let header = |server: &str, summary: &DumpSummary| {
@@ -457,6 +461,116 @@ pub async fn backup_database(
         summary,
         bytes,
         path,
+    })
+}
+
+const BACKUP_OPTIONS: DumpOptions = DumpOptions {
+    structure: true,
+    data: true,
+    drop_tables: true,
+    routines: true,
+};
+
+/// Uploads the backup header as its own gzip member, then the dump as another. Returns what was dumped and the bytes sent.
+#[allow(clippy::too_many_arguments)]
+async fn stream_backup(
+    conn: &mut Conn,
+    driver: Driver,
+    namespace: &str,
+    tables: &[DumpTable],
+    location: &S3Location,
+    key: &str,
+    cancel: &AtomicBool,
+    progress: &mut (dyn FnMut(DumpProgress) + Send),
+) -> Result<(DumpSummary, u64), String> {
+    let failed = |err: io::Error| format!("Could not upload the backup: {err}");
+    let version = first_text(&conn.run(dialect(driver).version_sql(), 1, None).await?);
+    let server = format!("{} {version}", driver.label());
+    let mut upload = s3::upload(location, key).await?;
+    let header = restore::header(&BackupInfo {
+        version: restore::BACKUP_VERSION,
+        driver,
+        namespace: namespace.to_string(),
+        server: server.clone(),
+        created_at: restore::utc_timestamp(),
+        skipped: Vec::new(),
+    });
+    let mut encoder = GzEncoder::new(&mut upload, Compression::default());
+    encoder.write_all(header.as_bytes()).map_err(failed)?;
+    encoder.finish().map_err(failed)?;
+
+    let mut body = GzEncoder::new(
+        BufWriter::with_capacity(COPY_CHUNK, &mut upload),
+        Compression::default(),
+    );
+    let mut dump = Dump::new(&mut body, cancel, progress);
+    dump::run(conn, &server, namespace, tables, BACKUP_OPTIONS, &mut dump).await?;
+    let summary = dump.into_summary();
+    body.finish()
+        .and_then(|mut out| out.flush())
+        .map_err(failed)?;
+    let bytes = upload.finish()?;
+    Ok((summary, bytes))
+}
+
+/**
+ * A backup like `backup_database`, streamed straight into an S3 object so
+ * it never touches the disk. The header has to go first, before the dump
+ * knows what it will leave out, so anything left out is recorded in the
+ * object's metadata afterward. A failed or cancelled backup ends the upload
+ * before S3 saves it, so an older object with the same key is kept.
+ */
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn backup_database_to_s3(
+    app: AppHandle,
+    sessions: State<'_, SessionStore>,
+    transfers: State<'_, TransferStore>,
+    connection_id: String,
+    transfer_id: String,
+    namespace: String,
+    location: S3Location,
+    key: String,
+) -> Result<ExportResult, String> {
+    let location = s3::sanitize(location)?;
+    let key = key.trim().trim_start_matches('/').to_string();
+    if key.is_empty() || key.ends_with('/') {
+        return Err("Enter a file name for the backup.".into());
+    }
+    let session = sessions.get(&connection_id).await?;
+    let tables: Vec<DumpTable> = tables_in(session.clone(), &namespace)
+        .await?
+        .iter()
+        .map(dump_table)
+        .collect();
+    let transfer = transfers.start(&transfer_id);
+    let mut conn = session.pool.detached().await?;
+    let mut progress = export_progress(&app, &transfer_id);
+    let outcome = stream_backup(
+        &mut conn,
+        session.driver,
+        &namespace,
+        &tables,
+        &location,
+        &key,
+        &transfer.cancel,
+        &mut progress,
+    )
+    .await;
+    conn.close().await;
+    let (summary, bytes) = outcome?;
+
+    if !summary.skipped.is_empty() {
+        s3::record_skipped(&location, &key, &summary.skipped)
+            .await
+            .map_err(|err| {
+                format!("The backup was uploaded, but Recon couldn't record what it left out, so Restore won't list them. {err}")
+            })?;
+    }
+    Ok(ExportResult {
+        summary,
+        bytes,
+        path: s3::url(&location.bucket, &key),
     })
 }
 
@@ -832,9 +946,17 @@ pub(crate) fn open_sql_file(path: &str) -> Result<SqlFile, String> {
     let name = file_name(Path::new(path));
     let file = File::open(path).map_err(|err| format!("Could not open {name}: {err}"))?;
     let total_bytes = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+    sql_reader(name, file, total_bytes)
+}
+
+fn sql_reader(
+    name: String,
+    input: impl Read + Send + 'static,
+    total_bytes: u64,
+) -> Result<SqlFile, String> {
     let read = Arc::new(AtomicU64::new(0));
     let mut counted = Counting {
-        inner: BufReader::with_capacity(READ_BUFFER, file),
+        inner: BufReader::with_capacity(READ_BUFFER, input),
         count: read.clone(),
     };
     let gzipped = counted
@@ -912,6 +1034,60 @@ fn finished_skip(completed: &HashSet<usize>, session_indexes: &HashSet<usize>) -
 fn statement_line(message: &str) -> Option<usize> {
     let rest = message.strip_prefix("Line ")?;
     rest.split(':').next()?.trim().parse().ok()
+}
+
+/// Where an import or restore reads from, as the dialogs send it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum SourceRequest {
+    File {
+        path: String,
+    },
+    S3 {
+        location: Box<S3Location>,
+        key: String,
+    },
+}
+
+/**
+ * A file to run, which a run opens again from the start each time it
+ * reconnects or resumes. An S3 object is streamed each time, never saved.
+ */
+pub(crate) enum Source {
+    File(String),
+    S3(Box<s3::Object>),
+}
+
+impl Source {
+    async fn resolve(request: SourceRequest) -> Result<Self, String> {
+        Ok(match request {
+            SourceRequest::File { path } => Source::File(path),
+            SourceRequest::S3 { location, key } => {
+                Source::S3(Box::new(s3::Object::resolve(*location, key).await?))
+            }
+        })
+    }
+
+    fn name(&self) -> String {
+        match self {
+            Source::File(path) => file_name(Path::new(path)),
+            Source::S3(object) => object.name(),
+        }
+    }
+
+    fn open(&self) -> Result<SqlFile, String> {
+        match self {
+            Source::File(path) => open_sql_file(path),
+            Source::S3(object) => sql_reader(object.name(), object.download()?, object.size),
+        }
+    }
+
+    async fn fingerprint(&self) -> Result<String, String> {
+        match self {
+            Source::File(path) => fingerprint(path),
+            Source::S3(object) => object.fingerprint().await,
+        }
+    }
 }
 
 /// Changes when the file does, so a resumed run never skips ahead in a different file.
@@ -1137,11 +1313,11 @@ impl Drop for CancelWatch {
 
 /// Walks the file in the same statement order `load_sql` indexes, including `COPY` data as one statement.
 fn visit_statements(
-    path: &str,
+    source: &Source,
     driver: Driver,
     mut visit: impl FnMut(usize, &crate::db::sql_split::Statement) -> Result<(), String>,
 ) -> Result<(), String> {
-    let mut file = open_sql_file(path)?;
+    let mut file = source.open()?;
     let mut splitter = Splitter::new(driver);
     let mut pending = Vec::new();
     let mut line = Vec::new();
@@ -1167,9 +1343,9 @@ fn visit_statements(
     }
 }
 
-fn session_statement_indexes(path: &str, driver: Driver) -> Result<HashSet<usize>, String> {
+fn session_statement_indexes(source: &Source, driver: Driver) -> Result<HashSet<usize>, String> {
     let mut session_indexes = HashSet::new();
-    visit_statements(path, driver, |index, statement| {
+    visit_statements(source, driver, |index, statement| {
         if resume::classify(driver, &statement.sql).session {
             session_indexes.insert(index);
         }
@@ -1189,7 +1365,7 @@ fn session_statement_indexes(path: &str, driver: Driver) -> Result<HashSet<usize
  * them out. Returns the stop and the lines of its uncertain statements.
  */
 fn note_lost_statements(
-    path: &str,
+    source: &Source,
     driver: Driver,
     completed: &mut HashSet<usize>,
     session_indexes: &mut HashSet<usize>,
@@ -1202,7 +1378,7 @@ fn note_lost_statements(
     let mut stop: Option<Stop> = None;
     let mut first_pending: Option<Stop> = None;
     let mut retry_lines = HashSet::new();
-    visit_statements(path, driver, |index, statement| {
+    visit_statements(source, driver, |index, statement| {
         let class = resume::classify(driver, &statement.sql);
         if class.session {
             session_indexes.insert(index);
@@ -1428,7 +1604,7 @@ struct Replay<'a> {
     connection_id: &'a str,
     transfer: &'a Transfer<'a>,
     namespace: &'a str,
-    path: &'a str,
+    source: &'a Source,
     fingerprint: String,
     /// The error to report when the run is cancelled.
     cancelled: &'static str,
@@ -1485,7 +1661,7 @@ impl Replay<'_> {
 
     /// Whether `load_sql` may run the file in parallel, telling the dialog why when it may not.
     fn parallel(&self) -> Result<bool, ImportError> {
-        let mut file = open_sql_file(self.path)?;
+        let mut file = self.source.open()?;
         if starts_like_dump(&mut file.reader)? {
             return Ok(true);
         }
@@ -1630,7 +1806,7 @@ impl Replay<'_> {
                 Err(LoadSqlError::Failed(message)) => Err(RunError::Failed(message, *executed)),
                 Err(LoadSqlError::LostConnection(lost)) => {
                     let (stop, lines) = note_lost_statements(
-                        self.path,
+                        self.source,
                         driver,
                         &mut run.completed,
                         &mut run.session_indexes,
@@ -1684,7 +1860,7 @@ impl Replay<'_> {
                 let session_indexes = if completed.is_empty() {
                     HashSet::new()
                 } else {
-                    session_statement_indexes(self.path, driver)?
+                    session_statement_indexes(self.source, driver)?
                 };
                 let mut run = Parallel {
                     options: LoadOptions {
@@ -1736,14 +1912,14 @@ impl Replay<'_> {
         let mut dropped = String::new();
         let mut stalled = 0;
         loop {
-            if fingerprint(self.path)? != self.fingerprint {
+            if self.source.fingerprint().await? != self.fingerprint {
                 return Err(format!(
                     "{} changed since the run started, so Recon can't pick up where it stopped.",
-                    file_name(Path::new(self.path))
+                    self.source.name()
                 )
                 .into());
             }
-            let mut file = open_sql_file(self.path)?;
+            let mut file = self.source.open()?;
             if resumable && session.is_lost() {
                 let progress = self.progress(&file, at.from, plan);
                 *session = match self.reconnect(session, progress).await {
@@ -1901,11 +2077,15 @@ async fn session_for_run(
     }
 }
 
-fn check_resume(resume: Option<&Resume>, fingerprint: &str, path: &str) -> Result<(), ImportError> {
+fn check_resume(
+    resume: Option<&Resume>,
+    fingerprint: &str,
+    source: &Source,
+) -> Result<(), ImportError> {
     match resume {
         Some(resume) if resume.fingerprint != fingerprint => Err(format!(
             "{} changed since the run stopped, so Recon can't pick up where it left off. Start it again instead.",
-            file_name(Path::new(path))
+            source.name()
         )
         .into()),
         _ => Ok(()),
@@ -1929,14 +2109,15 @@ pub async fn import_sql(
     connection_id: String,
     transfer_id: String,
     namespace: String,
-    path: String,
+    source: SourceRequest,
     resume: Option<Resume>,
     multithreaded: Option<bool>,
 ) -> Result<ImportResult, ImportError> {
     let multithreaded = multithreaded.unwrap_or_else(|| multithreaded_import(&app));
     let mut session = session_for_run(&sessions, &connection_id, resume.as_ref()).await?;
-    let fingerprint = fingerprint(&path)?;
-    check_resume(resume.as_ref(), &fingerprint, &path)?;
+    let source = Source::resolve(source).await?;
+    let fingerprint = source.fingerprint().await?;
+    check_resume(resume.as_ref(), &fingerprint, &source)?;
     let transfer = transfers.start(&transfer_id);
     let started = Instant::now();
     let mut executed = 0u64;
@@ -1946,24 +2127,33 @@ pub async fn import_sql(
         connection_id: &connection_id,
         transfer: &transfer,
         namespace: &namespace,
-        path: &path,
+        source: &source,
         fingerprint,
         cancelled: IMPORT_CANCELLED,
     };
     let outcome = replay
         .run(&mut session, resume, false, &mut executed, multithreaded)
         .await;
-    let sql = format!(
-        "-- Imported {} ({executed} statements)",
-        file_name(Path::new(&path))
-    );
+    let sql = format!("-- Imported {} ({executed} statements)", source.name());
     finish_file_run(&session, &namespace, &sql, started, executed, outcome)
 }
 
+/// Reads only the header. For an S3 object, what the backup left out is in its metadata.
+fn backup_info(source: &Source) -> Result<BackupInfo, String> {
+    let mut file = source.open()?;
+    let mut info = restore::parse_header(&mut *file.reader)?;
+    if let Source::S3(object) = source {
+        info.skipped.extend(object.skipped.iter().cloned());
+    }
+    Ok(info)
+}
+
 #[tauri::command]
-pub fn read_backup_info(path: String) -> Result<BackupInfo, String> {
-    let mut file = open_sql_file(&path)?;
-    restore::parse_header(&mut *file.reader)
+pub async fn read_backup_info(source: SourceRequest) -> Result<BackupInfo, String> {
+    let source = Source::resolve(source).await?;
+    tauri::async_runtime::spawn_blocking(move || backup_info(&source))
+        .await
+        .map_err(|err| err.to_string())?
 }
 
 /// Clears the namespace and replays the backup in one transaction, so a failure or cancel leaves everything as it was.
@@ -1973,10 +2163,10 @@ async fn restore_in_transaction(
     transfer: &Transfer<'_>,
     driver: Driver,
     namespace: &str,
-    path: &str,
+    source: &Source,
     executed: &mut u64,
 ) -> Result<(), String> {
-    let mut file = open_sql_file(path)?;
+    let mut file = source.open()?;
     let mut conn = session.pool.detached().await?;
     let ran = async {
         if driver == Driver::Mssql {
@@ -2038,13 +2228,14 @@ pub async fn restore_database(
     connection_id: String,
     transfer_id: String,
     namespace: String,
-    path: String,
+    source: SourceRequest,
     resume: Option<Resume>,
 ) -> Result<ImportResult, ImportError> {
     let multithreaded = multithreaded_import(&app);
     let mut session = session_for_run(&sessions, &connection_id, resume.as_ref()).await?;
     let driver = session.driver;
-    let info = read_backup_info(path.clone())?;
+    let source = Source::resolve(source).await?;
+    let info = backup_info(&source)?;
     if info.driver != driver {
         return Err(format!(
             "This backup is from a {} database and can't be restored into {}.",
@@ -2056,8 +2247,8 @@ pub async fn restore_database(
     if namespace.is_empty() && driver != Driver::Sqlite {
         return Err(String::from("Choose a database to restore into.").into());
     }
-    let fingerprint = fingerprint(&path)?;
-    check_resume(resume.as_ref(), &fingerprint, &path)?;
+    let fingerprint = source.fingerprint().await?;
+    check_resume(resume.as_ref(), &fingerprint, &source)?;
     let transfer = transfers.start(&transfer_id);
     let started = Instant::now();
     let mut executed = 0u64;
@@ -2069,7 +2260,7 @@ pub async fn restore_database(
             &transfer,
             driver,
             &namespace,
-            &path,
+            &source,
             &mut executed,
         )
         .await
@@ -2080,7 +2271,7 @@ pub async fn restore_database(
             connection_id: &connection_id,
             transfer: &transfer,
             namespace: &namespace,
-            path: &path,
+            source: &source,
             fingerprint,
             cancelled: RESTORE_CANCELLED,
         };
@@ -2092,10 +2283,7 @@ pub async fn restore_database(
     if outcome.is_ok() {
         let _ = reapply_namespace(&session).await;
     }
-    let sql = format!(
-        "-- Restored {} ({executed} statements)",
-        file_name(Path::new(&path))
-    );
+    let sql = format!("-- Restored {} ({executed} statements)", source.name());
     finish_file_run(&session, &namespace, &sql, started, executed, outcome)
 }
 
@@ -2402,13 +2590,226 @@ mod tests {
         assert_eq!(resumed_indexes(&resume).unwrap(), expected);
     }
 
+    /**
+     * Reads a gzipped backup back from S3 the way a restore does, into a
+     * bucket named `recon-test`: `RECON_TEST_S3_ENDPOINT=http://127.0.0.1:5055 cargo test -- --ignored`.
+     */
+    #[tokio::test]
+    #[ignore]
+    async fn live_reads_a_backup_from_s3() {
+        let Ok(endpoint) = std::env::var("RECON_TEST_S3_ENDPOINT") else {
+            return;
+        };
+        let location = S3Location {
+            bucket: "recon-test".into(),
+            endpoint,
+            ..Default::default()
+        };
+        let mut upload = s3::upload(&location, "restore/app.sql.gz").await.unwrap();
+        let header = restore::header(&BackupInfo {
+            version: restore::BACKUP_VERSION,
+            driver: Driver::Sqlite,
+            namespace: "main".into(),
+            server: "SQLite 3".into(),
+            created_at: restore::utc_timestamp(),
+            skipped: Vec::new(),
+        });
+        for part in [
+            header.as_str(),
+            "CREATE TABLE t (id INTEGER);\nINSERT INTO t VALUES (1);\n",
+        ] {
+            let mut encoder = GzEncoder::new(&mut upload, Compression::default());
+            encoder.write_all(part.as_bytes()).unwrap();
+            encoder.finish().unwrap();
+        }
+        upload.finish().unwrap();
+        s3::record_skipped(
+            &location,
+            "restore/app.sql.gz",
+            &["v (no permission to read its definition)".into()],
+        )
+        .await
+        .unwrap();
+
+        let source = Source::resolve(SourceRequest::S3 {
+            location: Box::new(location),
+            key: "restore/app.sql.gz".into(),
+        })
+        .await
+        .unwrap();
+        assert_eq!(source.name(), "app.sql.gz");
+        let info = backup_info(&source).unwrap();
+        assert_eq!(
+            (info.driver, info.namespace.as_str()),
+            (Driver::Sqlite, "main")
+        );
+        assert_eq!(info.skipped, ["v (no permission to read its definition)"]);
+        let mut count = 0;
+        visit_statements(&source, Driver::Sqlite, |_, _| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(
+            source.fingerprint().await.unwrap(),
+            source.fingerprint().await.unwrap()
+        );
+    }
+
+    /**
+     * Backs up a SQLite database into S3 and replays it into an empty one,
+     * into a bucket named `recon-test`: `RECON_TEST_S3_ENDPOINT=http://127.0.0.1:5055 cargo test -- --ignored`.
+     */
+    #[tokio::test]
+    #[ignore]
+    async fn live_backs_up_to_s3_and_restores_from_it() {
+        use sqlx::Connection;
+
+        let Ok(endpoint) = std::env::var("RECON_TEST_S3_ENDPOINT") else {
+            return;
+        };
+        let location = S3Location {
+            bucket: "recon-test".into(),
+            endpoint,
+            ..Default::default()
+        };
+        async fn open_db(url: &str) -> Conn {
+            Conn::Sqlite(sqlx::SqliteConnection::connect(url).await.unwrap())
+        }
+        let db_file = std::env::temp_dir().join(format!("recon-s3-e2e-{}.db", std::process::id()));
+        let _ = fs::remove_file(&db_file);
+        let db_path = format!("sqlite://{}?mode=rwc", db_file.display());
+        let mut source_db = open_db(&db_path).await;
+        for sql in [
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+            "CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INT REFERENCES users(id), body TEXT)",
+            "CREATE VIEW names AS SELECT name FROM users",
+            "INSERT INTO users VALUES (1, 'ann'), (2, 'bob')",
+            "INSERT INTO posts VALUES (1, 1, 'hi'), (2, 2, 'yo')",
+        ] {
+            source_db.execute(sql).await.unwrap();
+        }
+        let tables: Vec<DumpTable> = source_db
+            .run(
+                &dialect(Driver::Sqlite).tables_sql("main"),
+                usize::MAX,
+                None,
+            )
+            .await
+            .unwrap()
+            .text_rows()
+            .iter()
+            .map(|row| DumpTable {
+                name: text_at(row, 0),
+                view: text_at(row, 1) == "view",
+            })
+            .collect();
+
+        let cancelled = AtomicBool::new(true);
+        let mut cancelled_db = open_db(&db_path).await;
+        let stopped = stream_backup(
+            &mut cancelled_db,
+            Driver::Sqlite,
+            "main",
+            &tables,
+            &location,
+            "e2e/cancelled.sql.gz",
+            &cancelled,
+            &mut |_| {},
+        )
+        .await;
+        assert!(stopped.is_err());
+        let missing = SourceRequest::S3 {
+            location: Box::new(location.clone()),
+            key: "e2e/cancelled.sql.gz".into(),
+        };
+        assert!(Source::resolve(missing).await.is_err());
+
+        let cancel = AtomicBool::new(false);
+        let (summary, bytes) = stream_backup(
+            &mut source_db,
+            Driver::Sqlite,
+            "main",
+            &tables,
+            &location,
+            "e2e/app.sql.gz",
+            &cancel,
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.tables, 3);
+        assert!(bytes > 0);
+
+        let source = Source::resolve(SourceRequest::S3 {
+            location: Box::new(location),
+            key: "e2e/app.sql.gz".into(),
+        })
+        .await
+        .unwrap();
+        let info = backup_info(&source).unwrap();
+        assert_eq!(
+            (info.driver, info.namespace.as_str()),
+            (Driver::Sqlite, "main")
+        );
+        assert!(info.server.starts_with("SQLite "));
+
+        let mut restored = open_db("sqlite::memory:").await;
+        let file = source.open().unwrap();
+        crate::db::sql_load::load_sql(
+            &mut restored,
+            Driver::Sqlite,
+            file.reader,
+            LoadOptions {
+                workers: 1,
+                split_tables: false,
+            },
+            || async { Err::<Conn, String>("one connection".into()) },
+            &AtomicBool::new(false),
+            |_| {},
+            std::iter::empty::<&str>(),
+            &HashSet::new(),
+            None,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{err}"));
+        let compare =
+            "SELECT u.name, p.body FROM users u JOIN posts p ON p.user_id = u.id ORDER BY u.id";
+        let rows = |result: crate::db::RawOutput| -> Vec<String> {
+            result
+                .text_rows()
+                .iter()
+                .map(|row| format!("{}:{}", text_at(row, 0), text_at(row, 1)))
+                .collect()
+        };
+        let expected = rows(source_db.run(compare, 10, None).await.unwrap());
+        assert_eq!(
+            rows(restored.run(compare, 10, None).await.unwrap()),
+            expected
+        );
+        assert_eq!(expected, ["ann:hi", "bob:yo"]);
+        let views = restored
+            .run(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'view'",
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first_text(&views), "1");
+        cancelled_db.close().await;
+        source_db.close().await;
+        let _ = fs::remove_file(&db_file);
+    }
+
     #[test]
     fn statements_in_flight_on_several_workers_join_into_one_stop() {
         let path = write_file(
             "in-flight.sql",
             "CREATE TABLE a (id int PRIMARY KEY);\nINSERT INTO a VALUES (1);\nCREATE TABLE b (id int PRIMARY KEY);\nINSERT INTO b VALUES (1);\nINSERT INTO a VALUES (2);\n",
         );
-        let path = path.to_str().unwrap();
+        let path = &Source::File(path.to_str().unwrap().to_string());
         let mut completed: HashSet<usize> = [0, 2, 4].into_iter().collect();
         let mut sessions = HashSet::new();
         let (stop, retry_lines) =

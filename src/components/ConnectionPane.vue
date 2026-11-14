@@ -25,12 +25,15 @@ import { isTabularFile } from "../transfer";
 import {
   driverLabel,
   type BackupInfo,
+  type S3Location,
   type SaveRequest,
   type SavedQuery,
   type SessionInfo,
   type TableInfo,
   type TableLink,
+  type TransferSource,
 } from "../types";
+import { useOverflowMenu } from "../composables/useOverflowMenu";
 import BackupDialog from "./BackupDialog.vue";
 import ConnectionViewTabs, { type ConnectionViewTab } from "./ConnectionViewTabs.vue";
 import DatabaseSwitcher from "./DatabaseSwitcher.vue";
@@ -44,6 +47,7 @@ import QueryEditor from "./QueryEditor.vue";
 import QueryHistory from "./QueryHistory.vue";
 import SchemaDiagram, { type DiagramScope } from "./SchemaDiagram.vue";
 import RestoreDialog from "./RestoreDialog.vue";
+import S3BrowserDialog from "./S3BrowserDialog.vue";
 import SavedQueries from "./SavedQueries.vue";
 import SplitWorkspace from "./SplitWorkspace.vue";
 import TableActionDialog from "./TableActionDialog.vue";
@@ -113,7 +117,10 @@ const {
   showToast,
   savedQueries,
   saveQuery,
+  s3Locations,
 } = useApp();
+const importMenu = useOverflowMenu(() => `import-source:${props.sessionId}`);
+const restoreMenu = useOverflowMenu(() => `restore-source:${props.sessionId}`);
 const { openEditConnection } = useConnectionForm();
 const { openConnectionTab } = useTabs();
 const { revealKind } = useTransfers();
@@ -227,10 +234,12 @@ const saveError = ref("");
 const saveNameInput = ref<HTMLInputElement | null>(null);
 // Each keeps the database it was opened on, since its transfer can keep running while you switch away.
 const exportDialog = ref<{ namespace: string; tables: string[] | null; tableCount: number } | null>(null);
-const importTarget = ref<{ namespace: string; path: string } | null>(null);
+const importTarget = ref<{ namespace: string; source: TransferSource } | null>(null);
+/** Choosing a file in S3 to import or restore. */
+const s3Pick = ref<{ kind: "import" | "restore"; namespace: string } | null>(null);
 const importRowsTarget = ref<{ namespace: string; path: string; table: string | null } | null>(null);
 const backupTarget = ref<{ namespace: string; tableCount: number } | null>(null);
-const restoreTarget = ref<{ namespace: string; path: string; info: BackupInfo } | null>(null);
+const restoreTarget = ref<{ namespace: string; source: TransferSource; info: BackupInfo } | null>(null);
 const tableAction = ref<{ action: "truncate" | "drop"; namespace: string; tables: string[] } | null>(null);
 let selectionAnchor = "";
 const editors = new Map<string, InstanceType<typeof QueryEditor>>();
@@ -1303,6 +1312,7 @@ function openBackup() {
 }
 
 async function startImport(table: string | null = null) {
+  importMenu.close();
   if (revealKind(props.sessionId, "import")) {
     return;
   }
@@ -1321,11 +1331,38 @@ async function startImport(table: string | null = null) {
   if (table || isTabularFile(path)) {
     importRowsTarget.value = { namespace: namespace.value, path, table };
   } else {
-    importTarget.value = { namespace: namespace.value, path };
+    importTarget.value = { namespace: namespace.value, source: { kind: "file", path } };
+  }
+}
+
+function startFromS3(kind: "import" | "restore") {
+  importMenu.close();
+  restoreMenu.close();
+  if (!revealKind(props.sessionId, kind)) {
+    s3Pick.value = { kind, namespace: namespace.value };
+  }
+}
+
+async function onS3Picked(location: S3Location, key: string) {
+  const pick = s3Pick.value;
+  s3Pick.value = null;
+  if (!pick) {
+    return;
+  }
+  const source: TransferSource = { kind: "s3", location, key };
+  if (pick.kind === "import") {
+    importTarget.value = { namespace: pick.namespace, source };
+    return;
+  }
+  try {
+    restoreTarget.value = { namespace: pick.namespace, source, info: await api.readBackupInfo(source) };
+  } catch (err) {
+    showToast(String(err), "error");
   }
 }
 
 async function startRestore() {
+  restoreMenu.close();
   if (revealKind(props.sessionId, "restore")) {
     return;
   }
@@ -1340,7 +1377,8 @@ async function startRestore() {
   }
   try {
     const target = namespace.value;
-    restoreTarget.value = { namespace: target, path, info: await api.readBackupInfo(path) };
+    const source: TransferSource = { kind: "file", path };
+    restoreTarget.value = { namespace: target, source, info: await api.readBackupInfo(source) };
   } catch (err) {
     showToast(String(err), "error");
   }
@@ -2845,18 +2883,30 @@ onUnmounted(() => {
             </button>
           </div>
           <div class="db-toolbar-transfer">
-            <button
-              class="ghost tiny"
-              type="button"
-              :disabled="!canTransfer"
-              :title="`Run a .sql file against “${namespace}”, or load rows from a CSV or JSON file`"
-              @click="startImport()"
-            >
-              <svg viewBox="0 0 16 16" aria-hidden="true">
-                <path d="M8 2.5v7.5M4.8 6.8 8 10l3.2-3.2M2.5 11.5v1a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-1" />
-              </svg>
-              Import
-            </button>
+            <div class="overflow-menu">
+              <button
+                class="ghost tiny"
+                type="button"
+                :disabled="!canTransfer"
+                :title="`Run a .sql file against “${namespace}”, or load rows from a CSV or JSON file`"
+                :aria-haspopup="s3Locations.length ? 'menu' : undefined"
+                :aria-expanded="s3Locations.length ? importMenu.isOpen.value : undefined"
+                @click="s3Locations.length ? importMenu.toggle() : startImport()"
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M8 2.5v7.5M4.8 6.8 8 10l3.2-3.2M2.5 11.5v1a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-1" />
+                </svg>
+                Import
+              </button>
+              <div v-if="importMenu.isOpen.value" class="overflow-menu-dropdown" role="menu">
+                <button class="overflow-menu-item" type="button" role="menuitem" @click="startImport()">
+                  From a file…
+                </button>
+                <button class="overflow-menu-item" type="button" role="menuitem" @click="startFromS3('import')">
+                  .sql file from Amazon S3…
+                </button>
+              </div>
+            </div>
             <button
               class="ghost tiny"
               type="button"
@@ -2882,22 +2932,34 @@ onUnmounted(() => {
               </svg>
               Backup
             </button>
-            <button
-              class="ghost tiny"
-              type="button"
-              :disabled="!canRestore"
-              :title="
-                canRestore || !canTransfer
-                  ? `Replace everything in “${namespace}” with a Recon backup`
-                  : 'SQLite backups can only be restored into the main database'
-              "
-              @click="startRestore"
-            >
-              <svg viewBox="0 0 16 16" aria-hidden="true">
-                <path d="M2.8 8a5.2 5.2 0 1 0 1.5-3.7M2.5 2.5v2.8h2.8M8 5v3l2 1.5" />
-              </svg>
-              Restore
-            </button>
+            <div class="overflow-menu">
+              <button
+                class="ghost tiny"
+                type="button"
+                :disabled="!canRestore"
+                :title="
+                  canRestore || !canTransfer
+                    ? `Replace everything in “${namespace}” with a Recon backup`
+                    : 'SQLite backups can only be restored into the main database'
+                "
+                :aria-haspopup="s3Locations.length ? 'menu' : undefined"
+                :aria-expanded="s3Locations.length ? restoreMenu.isOpen.value : undefined"
+                @click="s3Locations.length ? restoreMenu.toggle() : startRestore()"
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M2.8 8a5.2 5.2 0 1 0 1.5-3.7M2.5 2.5v2.8h2.8M8 5v3l2 1.5" />
+                </svg>
+                Restore
+              </button>
+              <div v-if="restoreMenu.isOpen.value" class="overflow-menu-dropdown" role="menu">
+                <button class="overflow-menu-item" type="button" role="menuitem" @click="startRestore">
+                  From a file…
+                </button>
+                <button class="overflow-menu-item" type="button" role="menuitem" @click="startFromS3('restore')">
+                  From Amazon S3…
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </header>
@@ -3564,9 +3626,18 @@ onUnmounted(() => {
         :driver="driver"
         :namespace="importTarget.namespace"
         :namespace-label="namespaceLabel"
-        :path="importTarget.path"
+        :source="importTarget.source"
         @imported="onImported"
         @close="importTarget = null"
+      />
+      <S3BrowserDialog
+        v-if="s3Pick"
+        :title="s3Pick.kind === 'import' ? `Import into “${s3Pick.namespace}” from S3` : `Restore “${s3Pick.namespace}” from S3`"
+        mode="open"
+        :accept="s3Pick.kind === 'import' ? ['.sql', '.gz'] : ['.gz']"
+        :confirm-label="s3Pick.kind === 'import' ? 'Import…' : 'Restore…'"
+        @choose="onS3Picked"
+        @close="s3Pick = null"
       />
       <ImportRowsDialog
         v-if="importRowsTarget"
@@ -3595,7 +3666,7 @@ onUnmounted(() => {
         :driver="driver"
         :namespace="restoreTarget.namespace"
         :namespace-label="namespaceLabel"
-        :path="restoreTarget.path"
+        :source="restoreTarget.source"
         :info="restoreTarget.info"
         @restored="onImported"
         @close="restoreTarget = null"

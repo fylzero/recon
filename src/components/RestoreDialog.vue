@@ -4,9 +4,9 @@ import { computed, onUnmounted, ref } from "vue";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
 import { useTransferJob } from "../composables/useTransfers";
-import { baseName } from "../platform";
+import { sourceName, sourcePath } from "../s3";
 import { formatDuration, importStages, resumeAt, resumeChoice, runPhase, stagesPercent } from "../transfer";
-import type { BackupInfo, Driver, ImportProgress, ImportResume, ImportResumePoint } from "../types";
+import type { BackupInfo, Driver, ImportProgress, ImportResume, ImportResumePoint, TransferSource } from "../types";
 import ImportWorkDashboard from "./ImportWorkDashboard.vue";
 import Modal from "./Modal.vue";
 import TransferRoute from "./TransferRoute.vue";
@@ -16,7 +16,7 @@ const props = defineProps<{
   driver: Driver;
   namespace: string;
   namespaceLabel: string;
-  path: string;
+  source: TransferSource;
   info: BackupInfo;
 }>();
 
@@ -43,7 +43,9 @@ let stopProgress: UnlistenFn | null = null;
 
 const label = computed(() => props.namespaceLabel.toLowerCase());
 const atomic = computed(() => props.driver === "postgres" || props.driver === "mssql");
-const fileName = computed(() => baseName(props.path));
+const fileName = computed(() => sourceName(props.source));
+const path = computed(() => sourcePath(props.source));
+const fileLabel = computed(() => (props.source.kind === "s3" ? "Recon backup in S3" : "Recon backup"));
 const created = computed(() => {
   const date = new Date(props.info.createdAt);
   return Number.isNaN(date.getTime()) ? props.info.createdAt : date.toLocaleString();
@@ -108,7 +110,7 @@ async function start(resume: ImportResume | null = null) {
     }
   });
   try {
-    const result = await api.restoreDatabase(props.connectionId, transferId, props.namespace, props.path, resume);
+    const result = await api.restoreDatabase(props.connectionId, transferId, props.namespace, props.source, resume);
     const statements = `${result.statements.toLocaleString()} ${result.statements === 1 ? "statement" : "statements"}`;
     const duration = formatDuration(result.durationMs);
     showToast(`Restored “${props.namespace}” from ${fileName.value} in ${duration} (${statements})`);
@@ -165,7 +167,7 @@ onUnmounted(() => stopProgress?.());
       <TransferRoute
         :file="fileName"
         :path="path"
-        file-label="Recon backup"
+        :file-label="fileLabel"
         :target="namespace"
         :target-label="namespaceLabel"
         :driver="driver"
@@ -175,7 +177,7 @@ onUnmounted(() => stopProgress?.());
       v-if="!running"
       :file="fileName"
       :path="path"
-      file-label="Recon backup"
+      :file-label="fileLabel"
       :target="namespace"
       :target-label="namespaceLabel"
       :driver="driver"

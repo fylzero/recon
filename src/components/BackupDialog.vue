@@ -7,8 +7,9 @@ import { useApp } from "../composables/useApp";
 import { useTransferJob } from "../composables/useTransfers";
 import { baseName } from "../platform";
 import { backupLimits, fileSafe, formatBytes } from "../transfer";
-import type { Driver, ExportProgress, ExportResult } from "../types";
+import type { Driver, ExportProgress, ExportResult, S3Location } from "../types";
 import Modal from "./Modal.vue";
+import S3BrowserDialog from "./S3BrowserDialog.vue";
 
 const props = defineProps<{
   connectionId: string;
@@ -22,9 +23,12 @@ const emit = defineEmits<{
   close: [];
 }>();
 
-const { showToast } = useApp();
+const { showToast, s3Locations } = useApp();
 const job = useTransferJob(() => props.connectionId, "backup");
 
+const destination = ref<"file" | "s3">("file");
+/** Choosing where in S3 to save, which shows the S3 browser in place of this dialog. */
+const choosingS3 = ref(false);
 const running = ref(false);
 const cancelling = ref(false);
 const error = ref("");
@@ -63,24 +67,40 @@ function close() {
 }
 
 function describe(result: ExportResult) {
-  const file = baseName(result.path);
+  const file = result.path.startsWith("s3://") ? result.path : baseName(result.path);
   const tables = `${result.tables.toLocaleString()} ${result.tables === 1 ? "table" : "tables"}`;
   const rows = `${result.rows.toLocaleString()} ${result.rows === 1 ? "row" : "rows"}`;
   return `Backed up ${tables} (${rows}, ${formatBytes(result.bytes)}) to ${file}`;
+}
+
+function defaultName() {
+  return `${fileSafe(props.namespace || "main")}-backup-${timestamp()}.sql.gz`;
 }
 
 async function start() {
   if (running.value) {
     return;
   }
-  const path = await save({
-    title: `Back up “${props.namespace}”`,
-    defaultPath: `${fileSafe(props.namespace || "main")}-backup-${timestamp()}.sql.gz`,
-    filters: [{ name: "Gzipped SQL", extensions: ["gz"] }],
-  });
-  if (!path) {
+  if (destination.value === "s3") {
+    choosingS3.value = true;
     return;
   }
+  const path = await save({
+    title: `Back up “${props.namespace}”`,
+    defaultPath: defaultName(),
+    filters: [{ name: "Gzipped SQL", extensions: ["gz"] }],
+  });
+  if (path) {
+    await run((transferId) => api.backupDatabase(props.connectionId, transferId, props.namespace, path));
+  }
+}
+
+function startS3(location: S3Location, key: string) {
+  choosingS3.value = false;
+  void run((transferId) => api.backupDatabaseToS3(props.connectionId, transferId, props.namespace, location, key));
+}
+
+async function run(backup: (transferId: string) => Promise<ExportResult>) {
   running.value = true;
   error.value = "";
   progress.value = null;
@@ -92,7 +112,7 @@ async function start() {
     }
   });
   try {
-    const result = await api.backupDatabase(props.connectionId, transferId, props.namespace, path);
+    const result = await backup(transferId);
     if (result.skipped.length) {
       incomplete.value = result;
       job.stopped();
@@ -135,7 +155,16 @@ onUnmounted(() => stopProgress?.());
 </script>
 
 <template>
-  <Modal v-if="!job.hidden.value" :title="`Back up ${label} “${namespace}”`" @close="close">
+  <S3BrowserDialog
+    v-if="choosingS3"
+    :title="`Back up “${namespace}” to S3`"
+    mode="save"
+    :default-name="defaultName()"
+    confirm-label="Back up"
+    @choose="startS3"
+    @close="choosingS3 = false"
+  />
+  <Modal v-else-if="!job.hidden.value" :title="`Back up ${label} “${namespace}”`" @close="close">
     <template v-if="incomplete">
       <p class="muted tiny transfer-summary">{{ describe(incomplete) }}.</p>
       <div class="transfer-warning" role="alert">
@@ -149,6 +178,27 @@ onUnmounted(() => stopProgress?.());
     </template>
     <template v-else>
       <p class="muted tiny transfer-summary">{{ summary }}</p>
+      <div
+        v-if="s3Locations.length || destination === 's3'"
+        class="segmented transfer-destination"
+        role="group"
+        aria-label="Save to"
+      >
+        <button
+          v-for="item in ([['file', 'This computer'], ['s3', 'Amazon S3']] as const)"
+          :key="item[0]"
+          type="button"
+          :class="{ active: destination === item[0] }"
+          :aria-pressed="destination === item[0]"
+          :disabled="running"
+          @click="destination = item[0]"
+        >
+          {{ item[1] }}
+        </button>
+      </div>
+      <p v-if="destination === 's3'" class="muted tiny">
+        Streams straight into the bucket, without saving the backup on this computer.
+      </p>
       <p class="muted tiny">Use Restore to replace everything in a {{ label }} with this backup.</p>
       <p v-if="limits" class="muted tiny">{{ limits }}</p>
       <div v-if="running" class="transfer-progress" aria-live="polite">

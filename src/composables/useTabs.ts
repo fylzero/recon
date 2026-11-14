@@ -13,6 +13,7 @@ export const SETTINGS_SECTIONS = [
   "general",
   "appearance",
   "import-export",
+  "integrations",
   "window",
   "json",
 ] as const;

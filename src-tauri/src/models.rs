@@ -352,6 +352,26 @@ pub struct SavedQuery {
     pub updated_at: u64,
 }
 
+/// A bucket, and optionally a folder in it, that backups and imports can use through the AWS CLI.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct S3Location {
+    pub id: String,
+    pub name: String,
+    /// The AWS CLI profile, or empty for its default credentials.
+    pub profile: String,
+    /// Empty uses the profile's region.
+    pub region: String,
+    pub bucket: String,
+    /// A folder inside the bucket, ending in "/" when set.
+    pub prefix: String,
+    /// For S3-compatible storage such as Cloudflare R2 or MinIO.
+    pub endpoint: String,
+    /// "" leaves it to the bucket's default, or "AES256" or "aws:kms".
+    pub encryption: String,
+    pub kms_key_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppData {
@@ -364,6 +384,8 @@ pub struct AppData {
     pub dashboard_order: Vec<String>,
     #[serde(default)]
     pub saved_queries: Vec<SavedQuery>,
+    #[serde(default)]
+    pub s3_locations: Vec<S3Location>,
     /// Color theme: "system", "light", or "dark".
     #[serde(default = "default_theme")]
     pub theme: String,
@@ -413,6 +435,7 @@ impl Default for AppData {
             connections: Vec::new(),
             dashboard_order: Vec::new(),
             saved_queries: Vec::new(),
+            s3_locations: Vec::new(),
             theme: default_theme(),
             editor_font_family: default_code_font(),
             editor_font_size: default_editor_font_size(),

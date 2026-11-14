@@ -8,6 +8,7 @@ import {
 import AppearanceSettingsView from "./settings/AppearanceSettingsView.vue";
 import GeneralSettingsView from "./settings/GeneralSettingsView.vue";
 import ImportExportSettingsView from "./settings/ImportExportSettingsView.vue";
+import IntegrationsSettingsView from "./settings/IntegrationsSettingsView.vue";
 import WindowSettingsView from "./settings/WindowSettingsView.vue";
 
 const JsonSettingsView = defineAsyncComponent({
@@ -26,6 +27,7 @@ const preferenceSections: { id: SettingsSection; label: string }[] = [
   { id: "general", label: "General" },
   { id: "appearance", label: "Appearance" },
   { id: "import-export", label: "Import & Export" },
+  { id: "integrations", label: "Integrations" },
   { id: "window", label: "Window" },
   { id: "json", label: "JSON" },
 ];
@@ -64,6 +66,9 @@ const current = computed(() =>
           <path d="M17 20V4" />
           <path d="m13 8 4-4 4 4" />
         </svg>
+        <svg v-else-if="item.id === 'integrations'" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M7 18a4 4 0 0 1-.6-7.96A6 6 0 0 1 18 9a4.5 4.5 0 0 1-.5 9Z" />
+        </svg>
         <svg v-else-if="item.id === 'window'" viewBox="0 0 24 24" aria-hidden="true">
           <rect x="3.5" y="5.5" width="17" height="13" rx="1.5" />
           <path d="M3.5 9h17" />
@@ -79,6 +84,7 @@ const current = computed(() =>
       <GeneralSettingsView v-if="current === 'general'" />
       <AppearanceSettingsView v-if="current === 'appearance'" />
       <ImportExportSettingsView v-if="current === 'import-export'" />
+      <IntegrationsSettingsView v-if="current === 'integrations'" />
       <WindowSettingsView v-if="current === 'window'" />
       <JsonSettingsView v-if="current === 'json'" />
     </div>

@@ -7,10 +7,16 @@ export interface ChangelogRelease {
 export const CHANGELOG: ChangelogRelease[] = [
   {
     version: "1.15.0",
-    date: "November 13, 2026",
+    date: "November 14, 2026",
     notes: [
       "Recon has a light theme. Choose System, Light, or Dark under Theme in Appearance. System, the default, follows your computer's light or dark appearance and switches with it. The window's title bar, the SQL editor, and the JSON editor follow the theme too.",
       "The Update available dialog just shows the new version and the one you have, without the list of downloads for every platform.",
+      "Back up to Amazon S3, and restore or import .sql files from it. Add a bucket under Settings → Integrations, then choose Amazon S3 in the Backup dialog, or From Amazon S3… under Restore or Import. Files stream between the bucket and the database without being saved on this computer.",
+      "Recon reaches S3 through the AWS CLI, so it uses the same profiles your terminal does: access keys, AWS SSO, or an assumed role. Recon stores only the location, never credentials. When an SSO sign-in has expired, click Sign in to AWS and finish in your browser.",
+      "The S3 location form shows which AWS account and which user or role the chosen profile signs in as, so you can tell where the profile's buckets come from before you save.",
+      "Each S3 location has a profile, an optional region, a bucket, and an optional folder. It can also have a custom endpoint for S3-compatible storage like Cloudflare R2 or MinIO, and S3-managed or KMS server-side encryption for buckets that require it. Test checks that Recon can list the folder.",
+      "The S3 browser lists the location's folders and files. Choose Other bucket… to use one you haven't saved. If the profile can't list buckets, type the bucket name instead.",
+      "A backup to S3 that fails or is cancelled ends the upload before S3 saves it, so an older backup with the same name is kept. If a restore or import from S3 loses its database connection, Recon streams the file again and picks up where it left off, as it does for local files. It first checks that the object in S3 hasn't changed.",
     ],
   },
   {
