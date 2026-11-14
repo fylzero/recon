@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { computed, onUnmounted, ref } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
 import { useTransferJob } from "../composables/useTransfers";
@@ -48,6 +48,33 @@ const fileLabel = computed(() => {
 const canThread = computed(() => props.driver === "mysql" || props.driver === "postgres");
 /** For this import only. It starts from the setting in General. */
 const multithreaded = ref(multithreadedImport.value);
+/** Off every time, since it can't be undone. */
+const dropTables = ref(false);
+/** How many tables the drop would remove, or null until counted. */
+const tableCount = ref<number | null>(null);
+const dropWarning = computed(() => {
+  const target = `“${props.namespace}”`;
+  if (tableCount.value === null) {
+    return `Every table in ${target} will be dropped before importing`;
+  }
+  if (tableCount.value === 0) {
+    return `${target} has no tables to drop`;
+  }
+  const tables = tableCount.value === 1 ? "the 1 table" : `all ${tableCount.value.toLocaleString()} tables`;
+  return `Drops ${tables} in ${target} before importing`;
+});
+
+watch(dropTables, async (on) => {
+  if (!on || tableCount.value !== null) {
+    return;
+  }
+  try {
+    const tables = await api.listTables(props.connectionId, props.namespace);
+    tableCount.value = tables.filter((table) => table.kind === "table").length;
+  } catch {
+    tableCount.value = null;
+  }
+});
 const percent = computed(() => Math.round(stagesPercent(importStages(dashboard.value))));
 const phase = computed(() => runPhase(progress.value));
 const uncertain = computed(() => Boolean(resumePoint.value && resumePoint.value.to > resumePoint.value.from));
@@ -85,7 +112,15 @@ async function start(resume: ImportResume | null = null) {
     }
   });
   try {
-    const result = await api.importSql(props.connectionId, transferId, props.namespace, props.source, resume, multithreaded.value);
+    const result = await api.importSql(
+      props.connectionId,
+      transferId,
+      props.namespace,
+      props.source,
+      resume,
+      multithreaded.value,
+      dropTables.value && !resume,
+    );
     const statements = `${result.statements.toLocaleString()} ${result.statements === 1 ? "statement" : "statements"}`;
     const duration = formatDuration(result.durationMs);
     showToast(`Imported ${fileName.value} into “${props.namespace}” in ${duration} (${statements})`);
@@ -148,14 +183,29 @@ onUnmounted(() => stopProgress?.());
       :target-label="namespaceLabel"
       :driver="driver"
     />
-    <label
-      v-if="!running && canThread"
-      class="checkbox-row"
-      title="Loads mysqldump, pg_dump, and Recon files over one connection per processor core. Set the default in General settings."
-    >
-      <input v-model="multithreaded" type="checkbox" :disabled="Boolean(resumePoint)" />
-      Multithreaded import
-    </label>
+    <div v-if="!running" class="import-options">
+      <label
+        v-if="canThread"
+        class="checkbox-row"
+        title="Loads mysqldump, pg_dump, and Recon files over one connection per processor core. Set the default in General settings."
+      >
+        <input v-model="multithreaded" type="checkbox" :disabled="Boolean(resumePoint)" />
+        Multithreaded import
+      </label>
+      <label
+        class="checkbox-row"
+        title="Removes tables the file doesn't create, so the database ends up matching it."
+      >
+        <input v-model="dropTables" type="checkbox" :disabled="Boolean(resumePoint)" />
+        Drop existing tables first
+      </label>
+    </div>
+    <div v-if="dropTables && !running && !resumePoint" class="transfer-warning" role="alert">
+      <strong>{{ dropWarning }}</strong>
+      <p>Their rows are permanently deleted, even if the import fails. This can't be undone.</p>
+      <p v-if="driver === 'postgres'">Views built on them are dropped too (CASCADE). Other views are kept.</p>
+      <p v-else>Foreign key checks are skipped while dropping. Views are kept.</p>
+    </div>
     <div v-if="running" class="transfer-progress" aria-live="polite">
       <ImportWorkDashboard :progress="dashboard" />
       <p v-if="cancelling || phase" class="muted tiny">{{ cancelling ? "Cancelling…" : phase }}</p>
@@ -180,7 +230,7 @@ onUnmounted(() => stopProgress?.());
         </template>
         <button v-else class="primary" type="button" @click="resume(resumePoint.from)">Resume</button>
       </template>
-      <button v-else-if="!error" class="primary" type="button" :disabled="running" @click="start()">
+      <button v-else-if="!error" :class="dropTables ? 'danger' : 'primary'" type="button" :disabled="running" @click="start()">
         <span v-if="running" class="spinner" aria-hidden="true" />
         {{ running ? "Importing…" : "Import" }}
       </button>

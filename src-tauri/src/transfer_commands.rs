@@ -26,7 +26,9 @@ use crate::db::{
     self, describe_error, dialect, first_text, quote_literal, text_at, Conn, Session, SessionStore,
     TableInfo,
 };
-use crate::db_commands::{reapply_namespace, reconnect_in_background, tables_in, Reconnected};
+use crate::db_commands::{
+    drop_every_table, reapply_namespace, reconnect_in_background, tables_in, Reconnected,
+};
 use crate::models::{Driver, S3Location};
 use crate::query_log::{self, QueryOrigin, QueryRecord};
 use crate::s3;
@@ -2099,6 +2101,8 @@ fn check_resume(
  * where it stopped, and `resume` picks up a run that stopped for good. With
  * multithreaded import on, a dump [`starts_like_dump`] knows loads over
  * several connections. `multithreaded` overrides the setting for this run.
+ * `drop_tables` first drops every table in the namespace, once the file is
+ * found, and is ignored when resuming so loaded tables aren't lost.
  */
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
@@ -2112,12 +2116,20 @@ pub async fn import_sql(
     source: SourceRequest,
     resume: Option<Resume>,
     multithreaded: Option<bool>,
+    drop_tables: Option<bool>,
 ) -> Result<ImportResult, ImportError> {
     let multithreaded = multithreaded.unwrap_or_else(|| multithreaded_import(&app));
     let mut session = session_for_run(&sessions, &connection_id, resume.as_ref()).await?;
     let source = Source::resolve(source).await?;
     let fingerprint = source.fingerprint().await?;
     check_resume(resume.as_ref(), &fingerprint, &source)?;
+    if drop_tables == Some(true) && resume.is_none() {
+        drop_every_table(session.clone(), &namespace)
+            .await
+            .map_err(|err| {
+                format!("Couldn't drop the existing tables, so nothing was imported: {err}")
+            })?;
+    }
     let transfer = transfers.start(&transfer_id);
     let started = Instant::now();
     let mut executed = 0u64;

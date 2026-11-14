@@ -963,10 +963,19 @@ pub async fn drop_tables(
         return Ok(());
     }
     let session = app.state::<SessionStore>().get(&connection_id).await?;
+    drop_on(&session, &namespace, &tables, options).await
+}
+
+async fn drop_on(
+    session: &Session,
+    namespace: &str,
+    tables: &[String],
+    options: DropOptions,
+) -> Result<(), String> {
     let mut conn = session.pool.detached().await?;
     let mut outcome = Ok(());
-    for sql in table_ops::drop_statements(session.driver, &namespace, &tables, options) {
-        outcome = detached_run(&session, &mut conn, &sql, QueryOrigin::Schema)
+    for sql in table_ops::drop_statements(session.driver, namespace, tables, options) {
+        outcome = detached_run(session, &mut conn, &sql, QueryOrigin::Schema)
             .await
             .map(|_| ());
         if outcome.is_err() {
@@ -974,10 +983,33 @@ pub async fn drop_tables(
         }
     }
     conn.close().await;
-    for table in &tables {
-        session.forget_columns(Some(&namespace), Some(table));
+    for table in tables {
+        session.forget_columns(Some(namespace), Some(table));
     }
     outcome
+}
+
+/**
+ * Drops every table in `namespace`, skipping foreign key checks and, on
+ * Postgres, cascading to the views and keys that depend on them. Views
+ * elsewhere are left alone. Returns how many tables were dropped.
+ */
+pub async fn drop_every_table(session: Arc<Session>, namespace: &str) -> Result<usize, String> {
+    let tables: Vec<String> = tables_in(session.clone(), namespace)
+        .await?
+        .into_iter()
+        .filter(|table| table.kind == "table")
+        .map(|table| table.name)
+        .collect();
+    if tables.is_empty() {
+        return Ok(0);
+    }
+    let options = DropOptions {
+        disable_foreign_keys: true,
+        cascade: true,
+    };
+    drop_on(&session, namespace, &tables, options).await?;
+    Ok(tables.len())
 }
 
 async fn detached_run(

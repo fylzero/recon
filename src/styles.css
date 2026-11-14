@@ -2927,6 +2927,13 @@ button.link-button:hover:not(:disabled) {
   align-self: center;
 }
 
+.import-options {
+  display: flex;
+  flex-direction: column;
+  align-self: center;
+  gap: 0.4rem;
+}
+
 .modal-title-split .transfer-route {
   padding: 0;
   font-weight: 400;

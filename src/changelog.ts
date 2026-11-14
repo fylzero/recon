@@ -17,6 +17,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       "Each S3 location has a profile, an optional region, a bucket, and an optional folder. It can also have a custom endpoint for S3-compatible storage like Cloudflare R2 or MinIO, and S3-managed or KMS server-side encryption for buckets that require it. Test checks that Recon can list the folder.",
       "The S3 browser lists the location's folders and files. Choose Other bucket… to use one you haven't saved. If the profile can't list buckets, type the bucket name instead.",
       "A backup to S3 that fails or is cancelled ends the upload before S3 saves it, so an older backup with the same name is kept. If a restore or import from S3 loses its database connection, Recon streams the file again and picks up where it left off, as it does for local files. It first checks that the object in S3 hasn't changed.",
+      "The Import dialog can drop every table in the database before importing, so tables the file doesn't create aren't left behind. Check Drop existing tables first. It's off each time the dialog opens, says how many tables it will drop, and doesn't drop again when an import resumes.",
     ],
   },
   {

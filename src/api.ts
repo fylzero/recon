@@ -403,8 +403,17 @@ export function importSql(
   source: TransferSource,
   resume: ImportResume | null = null,
   multithreaded: boolean | null = null,
+  dropTables = false,
 ) {
-  return invoke<ImportResult>("import_sql", { connectionId, transferId, namespace, source, resume, multithreaded });
+  return invoke<ImportResult>("import_sql", {
+    connectionId,
+    transferId,
+    namespace,
+    source,
+    resume,
+    multithreaded,
+    dropTables,
+  });
 }
 
 /** What `importSql` and `restoreDatabase` reject with, which can say where to resume. */
