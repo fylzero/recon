@@ -4,6 +4,13 @@ export interface CellPosition {
   col: number;
 }
 
+export interface CellRange {
+  top: number;
+  bottom: number;
+  left: number;
+  right: number;
+}
+
 export interface CellOption {
   /** The text the cell gets. */
   value: string;
@@ -37,6 +44,7 @@ import {
   type CopyFormat,
 } from "../cells";
 import { useApp } from "../composables/useApp";
+import { rememberCopy } from "../gridClipboard";
 import { altKeyName } from "../platform";
 import type { Cell, ColumnMeta, RowValues, SortDirection } from "../types";
 
@@ -71,6 +79,8 @@ const props = defineProps<{
   matches?: Map<number, Set<number>>;
   /** The match find is on. The grid selects it and scrolls it into view. */
   currentMatch?: CellPosition | null;
+  /** ⌘V emits `paste`, and ⌘⇧V emits it to add the pasted rows as new rows. */
+  pastable?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -84,6 +94,8 @@ const emit = defineEmits<{
   cellMenu: [row: number, col: number, event: MouseEvent];
   rowMenu: [row: number, event: MouseEvent];
   headerMenu: [col: number, event: MouseEvent];
+  blankMenu: [event: MouseEvent];
+  paste: [range: CellRange | null, asNewRows: boolean];
 }>();
 
 function onCellContextMenu(event: MouseEvent, row: number, col: number) {
@@ -415,7 +427,7 @@ watch(
   },
 );
 
-const selection = computed(() => {
+const selection = computed((): CellRange | null => {
   if (!anchor.value || !focus.value) {
     return null;
   }
@@ -538,6 +550,17 @@ function onBlankDblclick(event: MouseEvent) {
   const target = event.target as Element;
   if (props.creatable && (target.closest(".grid-filler") || !target.closest(".grid-row, .grid-header"))) {
     emit("create");
+  }
+}
+
+/** A right-click below the last row or past the last column, where no cell is. */
+function onBlankContextMenu(event: MouseEvent) {
+  const target = event.target as Element;
+  const blank = target.closest(".grid-filler") || !target.closest(".grid-cell, .grid-gutter, .grid-header");
+  if (props.contextMenus && blank) {
+    event.preventDefault();
+    commitEdit();
+    emit("blankMenu", event);
   }
 }
 
@@ -717,6 +740,7 @@ async function copySelection(format: CopyFormat = "tsv") {
     return;
   }
   const lines: string[] = [];
+  const copied: Cell[][] = [];
   let missing = 0;
   for (let row = range.top; row <= range.bottom; row += 1) {
     const values = props.rows[row];
@@ -724,20 +748,20 @@ async function copySelection(format: CopyFormat = "tsv") {
       missing += 1;
       continue;
     }
-    const cells: string[] = [];
-    for (let col = range.left; col <= range.right; col += 1) {
-      cells.push(cellCopyText(values[col] ?? null));
-    }
-    lines.push(cells.join("\t"));
+    const cells = values.slice(range.left, range.right + 1).map((value) => value ?? null);
+    copied.push(cells);
+    lines.push(cells.map(cellCopyText).join("\t"));
   }
+  const names = props.columns.slice(range.left, range.right + 1).map((column) => column.name);
   if (range.top !== range.bottom || range.left !== range.right) {
-    const header = props.columns.slice(range.left, range.right + 1).map((column) => column.name);
     if (range.top === 0 && range.bottom === props.rows.length - 1) {
-      lines.unshift(header.join("\t"));
+      lines.unshift(names.join("\t"));
     }
   }
   try {
-    await navigator.clipboard.writeText(lines.join("\n"));
+    const text = lines.join("\n");
+    await navigator.clipboard.writeText(text);
+    rememberCopy(text, names, copied);
     const count = lines.length;
     showToast(
       missing
@@ -765,7 +789,9 @@ async function copySelectionAs(format: "csv" | "json", range: NonNullable<typeof
     rows.push(values.slice(range.left, range.right + 1).map((value) => value ?? null));
   }
   try {
-    await navigator.clipboard.writeText(copyText(format, columns, rows));
+    const text = copyText(format, columns, rows);
+    await navigator.clipboard.writeText(text);
+    rememberCopy(text, columns.map((column) => column.name), rows);
     const count = rows.length;
     const what = `${count.toLocaleString()} ${count === 1 ? "row" : "rows"} as ${format.toUpperCase()}`;
     showToast(missing ? `Copied ${what}. ${missing.toLocaleString()} rows were not loaded yet.` : `Copied ${what}`);
@@ -779,6 +805,11 @@ function onKeydown(event: KeyboardEvent) {
   if (meta && event.key.toLowerCase() === "c") {
     event.preventDefault();
     void copySelection();
+    return;
+  }
+  if (meta && !event.altKey && event.key.toLowerCase() === "v" && props.pastable) {
+    event.preventDefault();
+    emit("paste", selection.value, event.shiftKey);
     return;
   }
   if (meta && event.key.toLowerCase() === "a") {
@@ -933,7 +964,27 @@ function focusedCell(): { position: CellPosition; text: string } | null {
   return { position: { ...position }, text: cellText(value) };
 }
 
-defineExpose({ scrollToTop, commitEdit, editCell, focusedCell, selectedRows, copySelection });
+function selectedRange() {
+  return selection.value ? { ...selection.value } : null;
+}
+
+function selectRange(range: CellRange) {
+  anchor.value = { row: range.top, col: range.left };
+  focus.value = { row: range.bottom, col: range.right };
+  scrollCellIntoView(anchor.value);
+  scroller.value?.focus({ preventScroll: true });
+}
+
+defineExpose({
+  scrollToTop,
+  commitEdit,
+  editCell,
+  focusedCell,
+  selectedRows,
+  selectedRange,
+  selectRange,
+  copySelection,
+});
 </script>
 
 <template>
@@ -950,6 +1001,7 @@ defineExpose({ scrollToTop, commitEdit, editCell, focusedCell, selectedRows, cop
     }"
     @keydown="onKeydown"
     @dblclick="onBlankDblclick"
+    @contextmenu="onBlankContextMenu"
     @wheel="onWheel"
     @scroll.passive="menuOpen && placeMenu()"
   >

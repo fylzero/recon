@@ -42,6 +42,7 @@ import {
   type TableViewState,
 } from "../filters/model";
 import { convertValue, DEFAULT_OPERATOR } from "../filters/operators";
+import { pastedCells, type PastedCells } from "../gridClipboard";
 import { ariaModifier, shortcut } from "../platform";
 import type {
   BrowseRequest,
@@ -59,7 +60,7 @@ import type {
   TableLink,
   TableStructure as Structure,
 } from "../types";
-import DataGrid, { type CellOptions, type CellPosition } from "./DataGrid.vue";
+import DataGrid, { type CellOptions, type CellPosition, type CellRange } from "./DataGrid.vue";
 import ExportRowsDialog, { type ExportRowsSource } from "./ExportRowsDialog.vue";
 import FilterPanel from "./FilterPanel.vue";
 import FilterPopover from "./FilterPopover.vue";
@@ -166,6 +167,7 @@ const sqlPreview = ref<{ sql: string; loading: boolean; error: string } | null>(
 const cellMenu = ref<{ x: number; y: number; row: number; col: number } | null>(null);
 const rowMenu = ref<{ x: number; y: number } | null>(null);
 const headerMenu = ref<{ x: number; y: number; col: number } | null>(null);
+const blankMenu = ref<{ x: number; y: number } | null>(null);
 const menuRows = ref<number[]>([]);
 const menuEl = ref<HTMLElement | null>(null);
 const menuPosition = ref<PopoverPosition>({ left: 0, top: 0 });
@@ -1034,6 +1036,168 @@ function create() {
   }
 }
 
+/** Clipboard cells. A first row of this table's column names is their header. */
+async function readPastedCells(): Promise<PastedCells | null> {
+  let text: string;
+  try {
+    text = await readClipboard();
+  } catch {
+    return null;
+  }
+  const cells = pastedCells(text);
+  if (!cells || cells.columns || cells.rows.length < 2) {
+    return cells;
+  }
+  const [first, ...rest] = cells.rows;
+  const named = first.every((value) => typeof value === "string" && columnIndex.value.has(value));
+  return named ? { columns: first as string[], rows: rest } : cells;
+}
+
+/**
+ * Pairs of pasted column and grid column. By name when asked and every pasted
+ * column is here, otherwise side by side from `left`, repeated across `span`
+ * columns when it's a multiple of the pasted width.
+ */
+function pasteColumns(pasted: PastedCells, left: number, span: number, byName: boolean) {
+  if (byName && pasted.columns) {
+    const named = pasted.columns.map((name) => columnIndex.value.get(name));
+    if (named.every((col) => col !== undefined)) {
+      return named.map((col, from): [number, number] => [from, col as number]);
+    }
+  }
+  const width = Math.max(...pasted.rows.map((row) => row.length));
+  const count = span > width && span % width === 0 ? span : width;
+  return Array.from({ length: count }, (_, index): [number, number] => [index % width, left + index]).filter(
+    ([, col]) => col < columns.value.length,
+  );
+}
+
+/** A pasted value as the column takes it, or undefined for bytes, which can't be pasted. */
+function pastedValue(value: Cell, reference: Cell, col: number): Cell | undefined {
+  const column = columns.value[col];
+  if (!column || isBytes(value)) {
+    return undefined;
+  }
+  return typeof value === "string" ? parseInput(value, reference, column) : value;
+}
+
+function canPasteInto(row: number, col: number) {
+  const current = displayRows.value[row]?.[col];
+  return cellEditable(row) && current !== undefined && !isBytes(current);
+}
+
+/**
+ * Pastes over the selection, repeating the pasted rows and columns when the
+ * selection is a multiple of them. Whole rows match columns by name and keep
+ * their primary key, and new rows their auto-increment values.
+ */
+function pasteOver(pasted: PastedCells, range: CellRange) {
+  const height = range.bottom - range.top + 1;
+  const wholeRows = range.left === 0 && range.right === columns.value.length - 1;
+  const pairs = pasteColumns(pasted, range.left, range.right - range.left + 1, wholeRows);
+  const count = height > pasted.rows.length && height % pasted.rows.length === 0 ? height : pasted.rows.length;
+  const changes: CellChange[] = [];
+  let skipped = 0;
+  let outside = 0;
+  let bottom = range.top;
+  for (let index = 0; index < count; index += 1) {
+    const row = range.top + index;
+    if (row >= allRows.value.length) {
+      outside += 1;
+      continue;
+    }
+    bottom = row;
+    const source = pasted.rows[index % pasted.rows.length];
+    for (const [from, col] of pairs) {
+      const kept = row < rows.value.length ? keyIndexes.value.includes(col) : autoColumns.value[col];
+      if (source[from] === undefined || (wholeRows && kept)) {
+        continue;
+      }
+      const value = canPasteInto(row, col)
+        ? pastedValue(source[from], rows.value[row]?.[col] ?? null, col)
+        : undefined;
+      if (value === undefined || (value === null && nullable.value.get(columns.value[col].name) === false)) {
+        skipped += 1;
+        continue;
+      }
+      const change = changeAt(row, col, value);
+      if (change) {
+        changes.push(change);
+      }
+    }
+  }
+  if (!changes.length && skipped) {
+    showToast(
+      skipped === 1 ? "This cell can't take the pasted value." : "These cells can't take the pasted values.",
+      "error",
+    );
+    return;
+  }
+  recordChanges(changes);
+  const cols = pairs.map(([, col]) => col);
+  if (cols.length) {
+    grid.value?.selectRange({ top: range.top, bottom, left: Math.min(...cols), right: Math.max(...cols) });
+  }
+  const pastedRows = bottom - range.top + 1;
+  const done = count === 1 && pairs.length === 1
+    ? "Pasted value"
+    : `Pasted ${pastedRows.toLocaleString()} ${pastedRows === 1 ? "row" : "rows"}`;
+  const notes = [
+    skipped ? `${skipped.toLocaleString()} ${skipped === 1 ? "cell" : "cells"} couldn't be changed.` : "",
+    outside
+      ? `${outside.toLocaleString()} ${outside === 1 ? "row" : "rows"} went past the last row. ` +
+        `Use ${shortcut("⇧⌘V")} to add rows.`
+      : "",
+  ].filter(Boolean);
+  showToast(notes.length ? [`${done}.`, ...notes].join(" ") : done, notes.length ? "error" : "success");
+}
+
+/** Adds the pasted rows at the bottom, leaving auto-increment columns for the database. */
+async function pasteAsNewRows(pasted: PastedCells, range: CellRange | null) {
+  if (!canInsert.value) {
+    showToast("Rows can only be added to tables.", "error");
+    return;
+  }
+  const width = Math.max(...pasted.rows.map((row) => row.length));
+  const left = width >= columns.value.length ? 0 : (range?.left ?? 0);
+  const pairs = pasteColumns(pasted, left, 0, true);
+  const ids = pasted.rows.map(() => nextNewRowId++);
+  const changes = pasted.rows.flatMap((source, index) =>
+    pairs.flatMap(([from, col]): CellChange[] => {
+      const name = columns.value[col]?.name;
+      const value = source[from] === undefined || autoColumns.value[col]
+        ? undefined
+        : pastedValue(source[from], null, col);
+      return name && value !== undefined && value !== null
+        ? [{ key: [NEW_ROW, ids[index]], column: name, original: null, before: null, value }]
+        : [];
+    }),
+  );
+  recordEntry({ changes, created: ids });
+  await nextTick();
+  const last = allRows.value.length - 1;
+  grid.value?.selectRange({ top: last - ids.length + 1, bottom: last, left: 0, right: columns.value.length - 1 });
+  showToast(ids.length === 1 ? "Added 1 row" : `Added ${ids.length.toLocaleString()} rows`);
+}
+
+/** Pastes over the selection, or adds new rows when asked or when nothing is selected. */
+async function paste(range: CellRange | null, asNewRows: boolean) {
+  if (kind.value !== "table" || mode.value !== "data") {
+    return;
+  }
+  grid.value?.commitEdit();
+  const pasted = await readPastedCells();
+  if (!pasted?.rows.length) {
+    showToast("The clipboard has no text to paste.", "error");
+    return;
+  }
+  if (asNewRows || !range) {
+    await pasteAsNewRows(pasted, range);
+  } else {
+    pasteOver(pasted, range);
+  }
+}
+
 function pendingChanges() {
   grid.value?.commitEdit();
   const structurePending = structureView.value?.pendingChanges();
@@ -1457,10 +1621,11 @@ function closeGridMenus() {
   cellMenu.value = null;
   rowMenu.value = null;
   headerMenu.value = null;
+  blankMenu.value = null;
 }
 
 useDismiss(
-  computed(() => Boolean(cellMenu.value || rowMenu.value || headerMenu.value)),
+  computed(() => Boolean(cellMenu.value || rowMenu.value || headerMenu.value || blankMenu.value)),
   () => [menuEl.value],
   closeGridMenus,
 );
@@ -1486,6 +1651,11 @@ function deleteFromMenu() {
 function copyFromMenu(format: CopyFormat) {
   closeGridMenus();
   void grid.value?.copySelection(format);
+}
+
+function pasteFromMenu(asNewRows: boolean) {
+  closeGridMenus();
+  void paste(grid.value?.selectedRange() ?? null, asNewRows);
 }
 
 const exportOpen = ref(false);
@@ -1519,6 +1689,25 @@ function onRowMenu(row: number, event: MouseEvent) {
   menuRows.value = grid.value?.selectedRows() ?? [row];
   rowMenu.value = { x: event.clientX, y: event.clientY };
   placeGridMenu(event.clientX, event.clientY);
+}
+
+function onBlankMenu(event: MouseEvent) {
+  closeGridMenus();
+  if (kind.value !== "table") {
+    return;
+  }
+  blankMenu.value = { x: event.clientX, y: event.clientY };
+  placeGridMenu(event.clientX, event.clientY);
+}
+
+function createFromMenu() {
+  closeGridMenus();
+  void createRecord();
+}
+
+function pasteBelowFromMenu() {
+  closeGridMenus();
+  void paste(null, true);
 }
 
 function onHeaderMenu(col: number, event: MouseEvent) {
@@ -1942,6 +2131,7 @@ defineExpose({ refresh, pendingChanges, markSaved, discard, showStructure });
           :links="links"
           :matches="find.byRow.value"
           :current-match="find.current.value"
+          :pastable="kind === 'table'"
           context-menus
           @sort="onSort"
           @edit="onEdit"
@@ -1952,6 +2142,8 @@ defineExpose({ refresh, pendingChanges, markSaved, discard, showStructure });
           @cell-menu="onCellMenu"
           @row-menu="onRowMenu"
           @header-menu="onHeaderMenu"
+          @blank-menu="onBlankMenu"
+          @paste="paste"
         />
       </template>
       <div v-if="result || loading" class="table-pager-bar">
@@ -2028,7 +2220,7 @@ defineExpose({ refresh, pendingChanges, markSaved, discard, showStructure });
     </div>
     <Teleport to="body">
       <div
-        v-if="cellMenu || rowMenu || headerMenu"
+        v-if="cellMenu || rowMenu || headerMenu || blankMenu"
         ref="menuEl"
         class="overflow-menu-dropdown table-context-menu"
         role="menu"
@@ -2045,6 +2237,21 @@ defineExpose({ refresh, pendingChanges, markSaved, discard, showStructure });
           <button class="overflow-menu-item" type="button" role="menuitem" @click="copyFromMenu('json')">
             Copy as JSON
           </button>
+          <template v-if="kind === 'table'">
+            <button class="overflow-menu-item" type="button" role="menuitem" :aria-keyshortcuts="`${ariaModifier}+V`" @click="pasteFromMenu(false)">
+              Paste
+            </button>
+            <button
+              class="overflow-menu-item"
+              type="button"
+              role="menuitem"
+              :aria-keyshortcuts="`${ariaModifier}+Shift+V`"
+              :disabled="!canInsert"
+              @click="pasteFromMenu(true)"
+            >
+              Paste as new rows
+            </button>
+          </template>
           <div v-if="cellMenu || kind === 'table'" class="overflow-menu-divider" role="separator" />
         </template>
         <template v-if="cellMenu">
@@ -2134,6 +2341,21 @@ defineExpose({ refresh, pendingChanges, markSaved, discard, showStructure });
           </button>
           <button class="overflow-menu-item" type="button" role="menuitem" :disabled="!view.sort" @click="sortFromMenu(null)">
             Clear sort
+          </button>
+        </template>
+        <template v-else-if="blankMenu">
+          <button class="overflow-menu-item" type="button" role="menuitem" :disabled="!canInsert" @click="createFromMenu">
+            New record
+          </button>
+          <button
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            :aria-keyshortcuts="`${ariaModifier}+Shift+V`"
+            :disabled="!canInsert"
+            @click="pasteBelowFromMenu"
+          >
+            Paste as new rows
           </button>
         </template>
       </div>
