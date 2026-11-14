@@ -64,7 +64,6 @@ const {
   statusText,
   currentVersion,
   availableVersion,
-  notes,
   busy,
   promptOpen,
   checkForUpdates,
@@ -256,7 +255,6 @@ watch([groups, standaloneConnections], () => {
       <p>
         Recon {{ availableVersion }} is available. You have {{ currentVersion }}.
       </p>
-      <p v-if="notes" class="muted tiny settings-update-notes">{{ notes }}</p>
       <p
         v-if="status === 'downloading' || status === 'installing' || status === 'error'"
         class="muted tiny"

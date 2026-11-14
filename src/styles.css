@@ -775,13 +775,6 @@ button.commit:hover:not(:disabled) {
   max-width: 12rem;
 }
 
-.settings-update-notes {
-  margin: 0;
-  white-space: pre-wrap;
-  max-height: 8rem;
-  overflow: auto;
-}
-
 .settings-control {
   display: flex;
   justify-content: flex-end;

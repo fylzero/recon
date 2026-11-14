@@ -10,6 +10,7 @@ export const CHANGELOG: ChangelogRelease[] = [
     date: "November 13, 2026",
     notes: [
       "Recon has a light theme. Choose System, Light, or Dark under Theme in Appearance. System, the default, follows your computer's light or dark appearance and switches with it. The window's title bar, the SQL editor, and the JSON editor follow the theme too.",
+      "The Update available dialog just shows the new version and the one you have, without the list of downloads for every platform.",
     ],
   },
   {
