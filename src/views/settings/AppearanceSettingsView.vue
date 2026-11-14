@@ -13,9 +13,11 @@ import {
   formatFontSize,
   isPresetFont,
 } from "../../fonts";
+import { THEME_OPTIONS } from "../../theme";
 import type { PreferencesPatch } from "../../types";
 
 const {
+  theme,
   editorFontFamily,
   editorFontSize,
   gridFontFamily,
@@ -93,11 +95,29 @@ function sliderValue(event: Event) {
       <div class="settings-header">
         <div>
           <div class="brand">Appearance</div>
-          <p class="muted tiny">Fonts and text sizes.</p>
+          <p class="muted tiny">Theme, fonts, and text sizes.</p>
         </div>
       </div>
 
       <section class="settings-card">
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <h3>Theme</h3>
+            <p class="muted tiny">System follows your light or dark appearance setting.</p>
+          </div>
+          <div class="segmented" role="group" aria-label="Theme">
+            <button
+              v-for="option in THEME_OPTIONS"
+              :key="option.id"
+              type="button"
+              :class="{ active: theme === option.id }"
+              :aria-pressed="theme === option.id"
+              @click="save({ theme: option.id })"
+            >
+              {{ option.label }}
+            </button>
+          </div>
+        </div>
         <div class="settings-row" :class="{ 'settings-row-stacked': editorFont.usingCustom.value }">
           <div class="settings-row-copy">
             <h3>Editor font</h3>

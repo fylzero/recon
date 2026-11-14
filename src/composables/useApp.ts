@@ -27,6 +27,7 @@ import {
   sendSystemNotification,
   windowFocused,
 } from "../notifications";
+import { sanitizeTheme, themePreference } from "../theme";
 
 export const DEFAULT_PAGE_SIZE = 300;
 export const DEFAULT_QUERY_ROW_LIMIT = 10_000;
@@ -120,6 +121,7 @@ export function useApp() {
     standaloneConnections.value = data.connections ?? [];
     dashboardOrder.value = data.dashboardOrder ?? [];
     savedQueries.value = data.savedQueries ?? [];
+    themePreference.value = sanitizeTheme(data.theme);
     editorFontFamily.value = sanitizeFontFamily(data.editorFontFamily ?? DEFAULT_CODE_FONT);
     editorFontSize.value = clampFontSize(
       data.editorFontSize ?? DEFAULT_EDITOR_FONT_SIZE,
@@ -477,6 +479,7 @@ export function useApp() {
     savedQueries,
     error,
     loaded,
+    theme: themePreference,
     editorFontFamily,
     editorFontSize,
     gridFontFamily,

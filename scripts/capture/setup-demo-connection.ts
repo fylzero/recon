@@ -59,6 +59,7 @@ const settings = {
   ],
   dashboardOrder: ["demo-connection"],
   savedQueries: [],
+  theme: "dark",
   editorFontFamily: "jetbrains",
   editorFontSize: 14,
   gridFontFamily: "jetbrains",

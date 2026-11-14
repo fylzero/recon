@@ -63,6 +63,18 @@ pub fn sanitize_temperature_unit(value: &str) -> String {
     }
 }
 
+fn default_theme() -> String {
+    "system".into()
+}
+
+pub fn sanitize_theme(value: &str) -> String {
+    match value.trim() {
+        "light" => "light".into(),
+        "dark" => "dark".into(),
+        _ => default_theme(),
+    }
+}
+
 fn default_header_color() -> String {
     "#16323c".into()
 }
@@ -352,6 +364,9 @@ pub struct AppData {
     pub dashboard_order: Vec<String>,
     #[serde(default)]
     pub saved_queries: Vec<SavedQuery>,
+    /// Color theme: "system", "light", or "dark".
+    #[serde(default = "default_theme")]
+    pub theme: String,
     #[serde(default = "default_code_font")]
     pub editor_font_family: String,
     #[serde(default = "default_editor_font_size")]
@@ -398,6 +413,7 @@ impl Default for AppData {
             connections: Vec::new(),
             dashboard_order: Vec::new(),
             saved_queries: Vec::new(),
+            theme: default_theme(),
             editor_font_family: default_code_font(),
             editor_font_size: default_editor_font_size(),
             grid_font_family: default_code_font(),
@@ -460,6 +476,7 @@ impl AppData {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PreferencesPatch {
+    pub theme: Option<String>,
     pub editor_font_family: Option<String>,
     pub editor_font_size: Option<f64>,
     pub grid_font_family: Option<String>,
@@ -532,6 +549,9 @@ mod tests {
         assert_eq!(parsed.list_font_family, "ui");
         assert_eq!(parsed.list_font_size, 12.5);
         assert_eq!(parsed.notifications, "background");
+        assert_eq!(parsed.theme, "system");
+        assert_eq!(sanitize_theme(" light "), "light");
+        assert_eq!(sanitize_theme("sepia"), "system");
 
         let entry: ConnectionEntry =
             serde_json::from_str(r#"{"name":"old","driver":"mysql"}"#).unwrap();

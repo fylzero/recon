@@ -2,6 +2,7 @@ import { MSSQL, MySQL, PostgreSQL, SQLite, type SQLDialect } from "@codemirror/l
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { EditorView } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
+import { editorChrome } from "./theme";
 import type { Driver } from "./types";
 
 export function sqlDialect(driver: Driver): SQLDialect {
@@ -22,9 +23,10 @@ export const sqlEditorTheme = EditorView.theme(
     "&": {
       height: "100%",
       color: "var(--text)",
-      backgroundColor: "#0d1016",
+      backgroundColor: "var(--bg-input)",
       fontSize: "var(--editor-font-size)",
     },
+    ...editorChrome,
     "&.cm-focused": { outline: "none" },
     ".cm-scroller": {
       fontFamily: "var(--editor-font-family)",
@@ -32,15 +34,12 @@ export const sqlEditorTheme = EditorView.theme(
     },
     ".cm-content": { caretColor: "var(--text)", padding: "0.45rem 0" },
     ".cm-gutters": {
-      backgroundColor: "#0d1016",
+      backgroundColor: "var(--bg-input)",
       color: "var(--muted)",
       borderRight: "1px solid var(--border)",
     },
-    ".cm-activeLine": { backgroundColor: "rgba(255, 255, 255, 0.03)" },
+    ".cm-activeLine": { backgroundColor: "rgb(var(--tint) / 0.03)" },
     ".cm-activeLineGutter": { backgroundColor: "transparent" },
-    ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": {
-      backgroundColor: "#2a3344",
-    },
     ".cm-cursor": { borderLeftColor: "var(--text)" },
     ".cm-tooltip": {
       backgroundColor: "var(--bg-raised)",
@@ -58,15 +57,15 @@ export const sqlEditorTheme = EditorView.theme(
 
 export const sqlHighlighting = syntaxHighlighting(
   HighlightStyle.define([
-    { tag: t.keyword, color: "#c4a6ff" },
-    { tag: [t.string, t.special(t.string)], color: "#3dd68c" },
-    { tag: t.number, color: "#e6c07b" },
-    { tag: t.bool, color: "#9ec1ff" },
-    { tag: t.null, color: "#9ec1ff" },
-    { tag: [t.lineComment, t.blockComment], color: "#6b7588", fontStyle: "italic" },
-    { tag: t.typeName, color: "#7ee0c7" },
-    { tag: [t.operator, t.punctuation], color: "#aab4c6" },
-    { tag: t.special(t.name), color: "#f0a36b" },
+    { tag: t.keyword, color: "var(--syntax-keyword)" },
+    { tag: [t.string, t.special(t.string)], color: "var(--syntax-string)" },
+    { tag: t.number, color: "var(--syntax-number)" },
+    { tag: t.bool, color: "var(--syntax-constant)" },
+    { tag: t.null, color: "var(--syntax-constant)" },
+    { tag: [t.lineComment, t.blockComment], color: "var(--syntax-comment)", fontStyle: "italic" },
+    { tag: t.typeName, color: "var(--syntax-type)" },
+    { tag: [t.operator, t.punctuation], color: "var(--syntax-operator)" },
+    { tag: t.special(t.name), color: "var(--syntax-special)" },
     { tag: t.invalid, color: "var(--bad)" },
   ]),
 );

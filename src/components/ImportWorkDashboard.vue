@@ -633,8 +633,8 @@ onUnmounted(() => {
           <svg :viewBox="`0 0 ${CHART_W} ${CHART_H}`" preserveAspectRatio="none" class="import-rate-svg">
             <defs>
               <linearGradient id="importRateGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stop-color="#3dd68c" stop-opacity="0.28" />
-                <stop offset="100%" stop-color="#3dd68c" stop-opacity="0.0" />
+                <stop offset="0%" style="stop-color: var(--good)" stop-opacity="0.28" />
+                <stop offset="100%" style="stop-color: var(--good)" stop-opacity="0.0" />
               </linearGradient>
             </defs>
             <polygon v-if="rateAreaPoints" :points="rateAreaPoints" fill="url(#importRateGrad)" />

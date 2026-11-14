@@ -120,6 +120,7 @@ export interface AppData {
   connections?: ConnectionEntry[];
   dashboardOrder?: string[];
   savedQueries?: SavedQuery[];
+  theme?: ThemePreference;
   editorFontFamily?: string;
   editorFontSize?: number;
   gridFontFamily?: string;
@@ -142,7 +143,12 @@ export type NotificationMode = "background" | "always" | "off";
 
 export type TemperatureUnit = "fahrenheit" | "celsius";
 
+export type ThemePreference = "system" | "light" | "dark";
+
+export type ResolvedTheme = Exclude<ThemePreference, "system">;
+
 export interface PreferencesPatch {
+  theme?: ThemePreference;
   editorFontFamily?: string;
   editorFontSize?: number;
   gridFontFamily?: string;
