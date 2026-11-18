@@ -22,6 +22,11 @@ defineProps<{ driver?: Driver }>();
       <ellipse cx="12" cy="12.5" rx="3.5" ry="1.4" />
       <path d="M8.5 12.5v4c0 .77 1.57 1.4 3.5 1.4s3.5-.63 3.5-1.4v-4" />
     </template>
+    <template v-else-if="driver === 'redis'">
+      <path d="M12 3.5 21 7.5l-9 4-9-4Z" />
+      <path d="m3 12 9 4 9-4" />
+      <path d="m3 16.5 9 4 9-4" />
+    </template>
     <template v-else>
       <ellipse cx="12" cy="5" rx="8" ry="3" />
       <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />

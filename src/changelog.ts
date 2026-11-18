@@ -6,6 +6,15 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.17.0",
+    date: "November 18, 2026",
+    notes: [
+      "Recon connects to Redis, including through SSH tunnels and over TLS. Keys are grouped into folders by :, and you can search them, filter by type, and switch databases.",
+      "Hashes, lists, sets, sorted sets, and streams open in the table grid, where you edit, copy, paste, and delete like any table and save with ⌘S. Strings open as text, JSON, or hex.",
+      "A Console runs any Redis command, and keys can be created, renamed, given a TTL, or deleted.",
+    ],
+  },
+  {
     version: "1.16.0",
     date: "November 14, 2026",
     notes: [

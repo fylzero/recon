@@ -58,7 +58,7 @@ const password = ref("");
 const savePassword = ref(initial?.savePassword ?? true);
 const database = ref(initial?.database ?? "");
 const filePath = ref(initial?.filePath ?? "");
-const sslMode = ref<SslMode>(initial?.sslMode ?? "prefer");
+const sslMode = ref<SslMode>(initial?.sslMode ?? (initial?.driver === "redis" ? "disable" : "prefer"));
 const cleartextAuth = ref(initial?.cleartextAuth ?? false);
 const passwordSource = ref<PasswordSource>(initial?.passwordSource ?? "password");
 const awsRegion = ref(initial?.awsRegion ?? "");
@@ -119,6 +119,7 @@ watch(
 );
 
 const isSqlite = computed(() => driver.value === "sqlite");
+const isRedis = computed(() => driver.value === "redis");
 const title = computed(() => (editing ? "Edit connection" : "New connection"));
 
 const useSsh = computed(() => !isSqlite.value && sshEnabled.value);
@@ -184,12 +185,15 @@ const sourceReady = computed(() => {
   return true;
 });
 
+const redisDatabaseValid = computed(() => !isRedis.value || /^\d*$/.test(database.value.trim()));
+
 const canSubmit = computed(() =>
   isSqlite.value
     ? Boolean(filePath.value.trim())
     : Boolean(
         host.value.trim() &&
-          user.value.trim() &&
+          (user.value.trim() || isRedis.value) &&
+          redisDatabaseValid.value &&
           sshReady.value &&
           sourceReady.value &&
           !cleartextBlocked.value &&
@@ -247,8 +251,17 @@ watch(driver, (next, previous) => {
   if (next !== "sqlite" && (!user.value.trim() || user.value === previousUser)) {
     user.value = defaultUser(next);
   }
-  if (next === "mssql" && passwordSource.value === "aws-iam") {
+  if ((next === "mssql" || next === "redis") && passwordSource.value === "aws-iam") {
     passwordSource.value = "password";
+  }
+  // Redis TLS is all or nothing, and always checks the host name when it verifies.
+  if (next === "redis") {
+    if (sslMode.value === "prefer") sslMode.value = "disable";
+    if (sslMode.value === "verify-ca") sslMode.value = "verify-full";
+    if (/^\d*$/.test(database.value.trim()) === false) database.value = "";
+  } else if (previous === "redis") {
+    if (sslMode.value === "disable") sslMode.value = "prefer";
+    if (/^\d+$/.test(database.value.trim())) database.value = "";
   }
 });
 
@@ -654,13 +667,13 @@ async function submit(connectAfter: boolean) {
             <input v-model.number="port" type="number" min="1" max="65535" />
           </label>
           <label class="modal-label">
-            <span class="muted tiny">User</span>
+            <span class="muted tiny">{{ isRedis ? "User (ACL)" : "User" }}</span>
             <input
               v-model="user"
               type="text"
               spellcheck="false"
               autocomplete="off"
-              :placeholder="defaultUser(driver)"
+              :placeholder="isRedis ? 'default' : defaultUser(driver)"
             />
           </label>
           <label class="modal-label">
@@ -668,7 +681,7 @@ async function submit(connectAfter: boolean) {
             <select v-model="passwordSource">
               <option value="password">Password</option>
               <option value="none">No password</option>
-              <option v-if="driver !== 'mssql'" value="aws-iam">AWS IAM</option>
+              <option v-if="driver !== 'mssql' && driver !== 'redis'" value="aws-iam">AWS IAM</option>
               <option value="command">Password command</option>
             </select>
           </label>
@@ -719,15 +732,24 @@ async function submit(connectAfter: boolean) {
             <p class="muted tiny span-2 ssh-hint">{{ passwordCommandShell }}</p>
           </template>
           <label class="modal-label">
-            <span class="muted tiny">Database</span>
+            <span class="muted tiny">{{ isRedis ? "Database number" : "Database" }}</span>
             <input
               v-model="database"
               type="text"
+              :inputmode="isRedis ? 'numeric' : undefined"
               spellcheck="false"
-              placeholder="Optional"
+              :placeholder="isRedis ? '0' : 'Optional'"
             />
           </label>
-          <label class="modal-label">
+          <label v-if="isRedis" class="modal-label">
+            <span class="muted tiny">TLS</span>
+            <select v-model="sslMode">
+              <option value="disable">Off</option>
+              <option value="require">On, without verifying the certificate</option>
+              <option value="verify-full">On, verify the certificate and host name</option>
+            </select>
+          </label>
+          <label v-else class="modal-label">
             <span class="muted tiny">SSL</span>
             <select v-model="sslMode">
               <option value="prefer">Prefer</option>
@@ -737,9 +759,14 @@ async function submit(connectAfter: boolean) {
               <option value="disable">Disable</option>
             </select>
           </label>
+          <p v-if="!redisDatabaseValid" class="settings-error span-2">The Redis database is a number, like 0.</p>
           <p v-if="iamBlocked" class="settings-error span-2">AWS IAM logins need SSL set to Require or Verify.</p>
           <p v-if="hostCheckBlocked" class="settings-error span-2">
-            The host name can't be checked through an SSH tunnel. Set SSL to Verify CA instead.
+            {{
+              isRedis
+                ? "The host name can't be checked through an SSH tunnel. Turn TLS on without verifying instead."
+                : "The host name can't be checked through an SSH tunnel. Set SSL to Verify CA instead."
+            }}
           </p>
           <template v-if="verifiesCertificate">
             <label class="modal-label span-2">
@@ -754,7 +781,7 @@ async function submit(connectAfter: boolean) {
                 <button class="ghost" type="button" @click="browseCertificate('ca', 'Choose CA certificate')">
                   Browse…
                 </button>
-                <button class="ghost" type="button" @click="useRdsBundle">AWS RDS bundle</button>
+                <button v-if="!isRedis" class="ghost" type="button" @click="useRdsBundle">AWS RDS bundle</button>
               </div>
             </label>
             <p class="muted tiny span-2 ssh-hint">

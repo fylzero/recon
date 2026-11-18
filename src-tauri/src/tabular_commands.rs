@@ -213,7 +213,7 @@ fn snapshot_sql(driver: Driver) -> &'static [&'static str] {
             "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ",
             "START TRANSACTION WITH CONSISTENT SNAPSHOT",
         ],
-        Driver::Sqlite => &["BEGIN"],
+        Driver::Sqlite | Driver::Redis => &["BEGIN"],
         Driver::Mssql => &["BEGIN TRAN"],
     }
 }

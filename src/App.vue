@@ -13,6 +13,7 @@ import AuthPromptDialog from "./components/AuthPromptDialog.vue";
 import ConnectionsView from "./views/ConnectionsView.vue";
 
 const ConnectionPane = defineAsyncComponent(() => import("./components/ConnectionPane.vue"));
+const RedisPane = defineAsyncComponent(() => import("./components/RedisPane.vue"));
 const SettingsView = defineAsyncComponent({
   loader: () => import("./views/SettingsView.vue"),
   errorComponent: {
@@ -43,6 +44,7 @@ const {
   pauseToast,
   resumeToast,
   showToast,
+  findConnection,
   editorFontFamily,
   editorFontSize,
   gridFontFamily,
@@ -194,7 +196,15 @@ watch([groups, standaloneConnections], () => {
         class="main-pane"
         v-show="activeId === tab.id"
       >
+        <RedisPane
+          v-if="findConnection(tab.connectionId)?.connection.driver === 'redis'"
+          :connection-id="tab.connectionId"
+          :session-id="tab.id"
+          :initial-namespace="tab.namespace"
+          :active="activeId === tab.id"
+        />
         <ConnectionPane
+          v-else
           :connection-id="tab.connectionId"
           :session-id="tab.id"
           :initial-namespace="tab.namespace"

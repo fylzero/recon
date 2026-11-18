@@ -72,7 +72,7 @@ pub struct StatementResult {
  * command password source get a fresh one every time instead, signing in
  * to AWS SSO again through `prompter` if that has expired.
  */
-async fn password_for(
+pub(crate) async fn password_for(
     entry: &ConnectionEntry,
     password: Option<String>,
     prompter: &Prompter,
@@ -113,7 +113,7 @@ fn typed_or_saved(
     secrets::get(&account(&entry.id))
 }
 
-async fn open_tunnel(
+pub(crate) async fn open_tunnel(
     entry: &ConnectionEntry,
     ssh_secret: Option<String>,
     ssh_password: Option<String>,
@@ -155,7 +155,7 @@ fn reusable_tunnel(stale: &Session, entry: &ConnectionEntry) -> Option<Arc<Tunne
         .cloned()
 }
 
-fn explain(tunnel: Option<&Tunnel>, err: String) -> String {
+pub(crate) fn explain(tunnel: Option<&Tunnel>, err: String) -> String {
     match tunnel {
         Some(tunnel) => tunnel.explain(err),
         None => err,
@@ -270,6 +270,7 @@ pub async fn test_connection(
         Driver::Postgres => db::postgres::test(&target, password.as_deref(), &tls).await,
         Driver::Sqlite => db::sqlite::test(&target).await,
         Driver::Mssql => db::mssql::test(&target, password.as_deref()).await,
+        Driver::Redis => crate::redis::test(&target, password.as_deref(), &tls).await,
     };
     let outcome = outcome.map_err(|err| explain(tunnel.as_deref(), err));
     if let Some(tunnel) = tunnel {
@@ -367,6 +368,7 @@ async fn open_session(
         Driver::Postgres => db::postgres::open(&target, password.as_deref(), &tls).await,
         Driver::Sqlite => db::sqlite::open(&target).await,
         Driver::Mssql => db::mssql::open(&target, password.as_deref()).await,
+        Driver::Redis => Err("Redis connections open with redis_connect.".to_string()),
     };
     let opened = match opened {
         Ok(opened) => opened,
@@ -1059,7 +1061,7 @@ async fn load_columns(
                     Driver::Postgres => {
                         serde_json::from_str(&text_at(&text, 6)).unwrap_or_default()
                     }
-                    Driver::Sqlite | Driver::Mssql => Vec::new(),
+                    Driver::Sqlite | Driver::Redis | Driver::Mssql => Vec::new(),
                 };
                 let mut column = ColumnDetail {
                     name: text_at(&text, 0),
@@ -1465,7 +1467,7 @@ async fn cancel_request(session: &Session, request_id: Option<&str>) {
         Driver::Postgres => format!("SELECT pg_cancel_backend({backend})"),
         // SQL Server has no KILL QUERY. Its pool replaces the ended connection.
         Driver::Mssql => format!("KILL {backend}"),
-        Driver::Sqlite => return,
+        Driver::Sqlite | Driver::Redis => return,
     };
     let killed = session.pool.run(&sql, 1).await.is_ok();
     if killed && session.driver == Driver::Mssql {

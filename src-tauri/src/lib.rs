@@ -9,6 +9,7 @@ mod models;
 mod persist;
 mod prompts;
 mod query_log;
+mod redis;
 mod s3;
 mod secrets;
 mod tabular_commands;
@@ -47,6 +48,7 @@ pub fn run() {
             app.manage(SessionStore::default());
             app.manage(ResultStore::default());
             app.manage(TransferStore::default());
+            app.manage(redis::RedisStore::default());
             app.manage(prompts::PromptStore::default());
             if let (Some(window), Some(bounds)) = (app.get_webview_window("main"), bounds) {
                 window_state::apply(&window, &bounds);
@@ -140,6 +142,17 @@ pub fn run() {
             tabular_commands::export_result,
             tabular_commands::preview_import,
             tabular_commands::import_rows,
+            redis::redis_connect,
+            redis::redis_disconnect,
+            redis::redis_databases,
+            redis::redis_select_db,
+            redis::redis_scan,
+            redis::redis_key_info,
+            redis::redis_read,
+            redis::redis_edit,
+            redis::redis_edit_batch,
+            redis::redis_create_key,
+            redis::redis_command,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

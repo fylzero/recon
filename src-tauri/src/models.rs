@@ -168,6 +168,7 @@ pub enum Driver {
     Postgres,
     Sqlite,
     Mssql,
+    Redis,
 }
 
 impl Driver {
@@ -177,6 +178,7 @@ impl Driver {
             Driver::Postgres => 5432,
             Driver::Sqlite => 0,
             Driver::Mssql => 1433,
+            Driver::Redis => 6379,
         }
     }
 
@@ -186,6 +188,7 @@ impl Driver {
             Driver::Postgres => "PostgreSQL",
             Driver::Sqlite => "SQLite",
             Driver::Mssql => "SQL Server",
+            Driver::Redis => "Redis",
         }
     }
 }

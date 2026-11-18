@@ -2437,6 +2437,10 @@ body.reordering-repos .repo-row,
   color: var(--rose);
 }
 
+.driver-icon.driver-redis {
+  color: var(--bad);
+}
+
 .repo-row.colored .driver-icon {
   color: inherit;
 }
@@ -6332,4 +6336,432 @@ button.import-threshold-btn {
 
 .import-work-worker span {
   white-space: nowrap;
+}
+
+/* Redis */
+
+.redis-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+
+.redis-toolbar-actions .segmented button {
+  padding: 0.2rem 0.7rem;
+  font-size: 12px;
+}
+
+.redis-toolbar-actions button.redis-new-key-button {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 0.3rem;
+  white-space: nowrap;
+}
+
+.redis-new-key-button .button-icon {
+  width: 0.85rem;
+  height: 0.85rem;
+}
+
+.redis-db-select {
+  width: auto;
+  max-width: 14rem;
+  padding: 0.2rem 0.45rem;
+  font-size: 12.5px;
+}
+
+.redis-sidebar {
+  min-width: 0;
+}
+
+.redis-list-options {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 0.75rem 0.5rem;
+}
+
+.redis-list-options select {
+  flex: 1;
+  min-width: 0;
+  padding: 0.2rem 0.4rem;
+  font-size: 12px;
+}
+
+.redis-separator {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex: 0 0 auto;
+}
+
+.redis-separator input {
+  width: 3.2rem;
+  padding: 0.2rem 0.4rem;
+  font-family: var(--font-code);
+  font-size: 12px;
+  text-align: center;
+}
+
+.redis-key-list:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.redis-key-rows {
+  position: relative;
+  width: 100%;
+}
+
+.redis-key-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.redis-key-row.folder .db-table-name {
+  color: var(--muted);
+}
+
+.redis-chevron {
+  transition: transform 0.12s ease;
+}
+
+.redis-chevron.open {
+  transform: rotate(90deg);
+}
+
+.redis-folder-count {
+  margin-left: auto;
+  padding-left: 0.4rem;
+}
+
+.redis-kind-tag {
+  flex: 0 0 auto;
+  min-width: 2.4rem;
+  padding: 0.05rem 0.3rem;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--kind-color, var(--muted)) 16%, transparent);
+  color: var(--kind-color, var(--muted));
+  font-family: var(--font-code);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.redis-kind-tag.kind-string {
+  --kind-color: var(--blue);
+}
+
+.redis-kind-tag.kind-hash {
+  --kind-color: var(--purple);
+}
+
+.redis-kind-tag.kind-list {
+  --kind-color: var(--orange);
+}
+
+.redis-kind-tag.kind-set {
+  --kind-color: var(--good);
+}
+
+.redis-kind-tag.kind-zset {
+  --kind-color: var(--rose);
+}
+
+.redis-kind-tag.kind-stream {
+  --kind-color: var(--accent-text);
+}
+
+.redis-list-footer {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 2rem;
+  padding: 0.3rem 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.redis-list-footer > span {
+  margin-right: auto;
+}
+
+.redis-main {
+  flex: 1;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+.redis-key {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.redis-key-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.35rem 0.75rem;
+  padding: 0.65rem 0.9rem 0.55rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.redis-key-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.redis-key-title .redis-kind-tag {
+  min-width: 0;
+  font-size: 10.5px;
+}
+
+.redis-key-name {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-code);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.redis-key-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.redis-key-meta {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+}
+
+.redis-ttl-set {
+  color: var(--warn);
+}
+
+.redis-key-error {
+  margin: 1rem;
+}
+
+.redis-key-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  text-align: center;
+}
+
+.redis-string {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.redis-string-bar,
+.redis-collection-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.9rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.redis-string-bar .segmented button {
+  padding: 0.15rem 0.6rem;
+  font-size: 12px;
+}
+
+.redis-string-actions {
+  display: flex;
+  gap: 0.3rem;
+  margin-left: auto;
+}
+
+.redis-string-editor {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0.75rem 0.9rem;
+  border: 0;
+  border-radius: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--editor-font-family);
+  font-size: var(--editor-font-size);
+  line-height: 1.5;
+  resize: none;
+}
+
+.redis-string-editor:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+.redis-collection {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.redis-collection-bar input {
+  flex: 1;
+  min-width: 0;
+  max-width: 22rem;
+  padding: 0.25rem 0.5rem;
+  font-size: 12.5px;
+}
+
+.redis-save-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-left: auto;
+}
+
+.redis-grid {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.redis-grid-footer {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-height: 2rem;
+  padding: 0.25rem 0.9rem;
+  border-top: 1px solid var(--border);
+}
+
+.redis-grid-footer > span {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-right: auto;
+}
+
+.redis-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.redis-dialog .modal-actions {
+  margin-top: 0.25rem;
+}
+
+.redis-value-input {
+  min-height: 6rem;
+  font-family: var(--editor-font-family);
+  font-size: var(--editor-font-size);
+  resize: vertical;
+}
+
+.redis-console {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg);
+  font-family: var(--editor-font-family);
+  font-size: var(--editor-font-size);
+}
+
+.redis-console-output {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0.75rem 0.9rem;
+}
+
+.redis-console-hint {
+  font-family: var(--font-ui, inherit);
+  line-height: 1.6;
+}
+
+.redis-console-hint code {
+  font-family: var(--font-code);
+}
+
+.redis-console-entry + .redis-console-entry {
+  margin-top: 0.6rem;
+}
+
+.redis-console-command {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.redis-console-time {
+  margin-left: auto;
+  font-family: var(--font-code);
+}
+
+.redis-console-prompt {
+  flex: 0 0 auto;
+  color: var(--accent-text);
+}
+
+.redis-console-reply {
+  margin: 0.2rem 0 0;
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.redis-console-reply.error {
+  color: var(--bad);
+}
+
+.redis-console-input {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.55rem 0.9rem;
+  border-top: 1px solid var(--border);
+}
+
+.redis-console-input .redis-console-prompt {
+  padding-top: 0.05rem;
+}
+
+.redis-console-input textarea {
+  flex: 1;
+  min-height: 1.5em;
+  max-height: 10em;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  field-sizing: content;
+  resize: none;
+}
+
+.redis-console-input textarea:focus {
+  outline: none;
+  box-shadow: none;
 }

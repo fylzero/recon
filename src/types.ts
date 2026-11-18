@@ -1,7 +1,7 @@
 import type { WireNode } from "./filters/compile";
 import type { FilterKind } from "./filters/model";
 
-export type Driver = "mysql" | "postgres" | "sqlite" | "mssql";
+export type Driver = "mysql" | "postgres" | "sqlite" | "mssql" | "redis";
 export type SslMode = "disable" | "prefer" | "require" | "verify-ca" | "verify-full";
 export type PasswordSource = "password" | "none" | "aws-iam" | "command";
 
@@ -10,7 +10,13 @@ export const DRIVER_OPTIONS: { id: Driver; label: string; defaultPort: number }[
   { id: "postgres", label: "PostgreSQL", defaultPort: 5432 },
   { id: "sqlite", label: "SQLite", defaultPort: 0 },
   { id: "mssql", label: "SQL Server", defaultPort: 1433 },
+  { id: "redis", label: "Redis", defaultPort: 6379 },
 ];
+
+/** Redis is a key-value store: no tables, SQL, imports, or backups. */
+export function isSqlDriver(driver: Driver) {
+  return driver !== "redis";
+}
 
 export function driverLabel(driver: Driver) {
   return DRIVER_OPTIONS.find((option) => option.id === driver)?.label ?? driver;
@@ -650,4 +656,100 @@ export interface QueryLogEntry {
   durationMs: number;
   rows?: number;
   error: string;
+}
+
+/** A Redis key or value. `hex` holds the exact bytes when they aren't UTF-8, and `text` is then only for display. */
+export interface RedisBytes {
+  text: string;
+  hex?: string;
+}
+
+export type RedisKind = "string" | "hash" | "list" | "set" | "zset" | "stream" | (string & {});
+
+export interface RedisDatabase {
+  index: number;
+  keys: number;
+}
+
+export interface RedisInfo {
+  serverVersion: string;
+  db: number;
+  databases: RedisDatabase[];
+}
+
+export interface RedisKeyEntry {
+  key: RedisBytes;
+  kind: RedisKind;
+}
+
+export interface RedisScanPage {
+  cursor: string | null;
+  keys: RedisKeyEntry[];
+}
+
+export interface RedisKeyInfo {
+  kind: RedisKind;
+  /** Milliseconds left, -1 for no expiry, or -2 once the key is gone. */
+  ttlMs: number;
+  length: number | null;
+  memory: number | null;
+  encoding: string | null;
+}
+
+export interface RedisFieldValue {
+  field: RedisBytes;
+  value: RedisBytes;
+}
+
+export type RedisValuePage =
+  | { kind: "string"; value: RedisBytes; size: number; truncated: boolean }
+  | { kind: "hash"; entries: RedisFieldValue[]; cursor: string | null }
+  | { kind: "list"; items: { index: number; value: RedisBytes }[]; cursor: string | null }
+  | { kind: "set"; members: RedisBytes[]; cursor: string | null }
+  | { kind: "zset"; members: { member: RedisBytes; score: number }[]; cursor: string | null }
+  | { kind: "stream"; entries: { id: string; fields: RedisFieldValue[] }[]; cursor: string | null }
+  | { kind: "other"; typeName: string };
+
+export type RedisEdit =
+  | { op: "setString"; key: RedisBytes; value: RedisBytes }
+  | { op: "hashSet"; key: RedisBytes; field: RedisBytes; value: RedisBytes; original: RedisBytes | null }
+  | { op: "hashDelete"; key: RedisBytes; fields: RedisBytes[] }
+  | { op: "listSet"; key: RedisBytes; index: number; value: RedisBytes }
+  | { op: "listPush"; key: RedisBytes; value: RedisBytes; head: boolean }
+  | { op: "listRemove"; key: RedisBytes; indexes: number[] }
+  | { op: "setAdd"; key: RedisBytes; member: RedisBytes; original: RedisBytes | null }
+  | { op: "setRemove"; key: RedisBytes; members: RedisBytes[] }
+  | { op: "zsetAdd"; key: RedisBytes; member: RedisBytes; score: number; original: RedisBytes | null }
+  | { op: "zsetRemove"; key: RedisBytes; members: RedisBytes[] }
+  | { op: "streamAdd"; key: RedisBytes; fields: [RedisBytes, RedisBytes][] }
+  | { op: "streamDelete"; key: RedisBytes; ids: string[] }
+  | { op: "rename"; key: RedisBytes; to: RedisBytes; overwrite: boolean }
+  | { op: "expire"; key: RedisBytes; seconds: number | null }
+  | { op: "delete"; keys: RedisBytes[] };
+
+export interface RedisNewKey {
+  key: RedisBytes;
+  kind: RedisKind;
+  field: RedisBytes | null;
+  value: RedisBytes;
+  score: number | null;
+  ttlSeconds: number | null;
+}
+
+export type RedisReply =
+  | { type: "nil" }
+  | { type: "int"; value: number }
+  | { type: "bulk"; value: RedisBytes }
+  | { type: "status"; value: string }
+  | { type: "error"; value: string }
+  | { type: "array"; value: RedisReply[] }
+  | { type: "set"; value: RedisReply[] }
+  | { type: "map"; value: [RedisReply, RedisReply][] }
+  | { type: "double"; value: number | null }
+  | { type: "bool"; value: boolean }
+  | { type: "big"; value: string };
+
+export interface RedisCommandResult {
+  reply: RedisReply;
+  durationMs: number;
 }

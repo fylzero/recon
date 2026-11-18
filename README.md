@@ -5,7 +5,7 @@
 <h1 align="center">Recon</h1>
 
 <p align="center">
-  A database client for macOS, Windows, and Linux. Connect to MySQL, PostgreSQL, SQLite, and SQL Server with built-in drivers—no additional software required. No account, no cloud: your connections stay on your machine, and your credentials stay in the macOS Keychain, Windows Credential Manager, or the Linux system keyring.
+  A database client for macOS, Windows, and Linux. Connect to MySQL, PostgreSQL, SQLite, SQL Server, and Redis with built-in drivers—no additional software required. No account, no cloud: your connections stay on your machine, and your credentials stay in the macOS Keychain, Windows Credential Manager, or the Linux system keyring.
 </p>
 
 <p align="center">
@@ -30,13 +30,13 @@
 
 ## About
 
-Recon is an open-source database client for macOS, Windows, and Linux, built with Tauri, Vue, and Rust. It works with MySQL, PostgreSQL, SQLite, and SQL Server databases without separate database drivers or command-line tools.
+Recon is an open-source database client for macOS, Windows, and Linux, built with Tauri, Vue, and Rust. It works with MySQL, PostgreSQL, SQLite, SQL Server, and Redis without separate database drivers or command-line tools.
 
 **Key characteristics:**
 
 - **Open source**: Free to use and modify under the MIT license
 - **Privacy-focused**: Database credentials stored exclusively in the macOS Keychain, Windows Credential Manager, or the Linux system keyring
-- **No external dependencies**: MySQL, PostgreSQL, SQLite, and SQL Server drivers compiled directly into the app
+- **No external dependencies**: MySQL, PostgreSQL, SQLite, SQL Server, and Redis drivers compiled directly into the app
 - **No account, no cloud**: Connections and queries go straight from your machine to your database. Amazon S3 backups are opt-in and use your own AWS account
 - **Native app**: A Tauri shell with a Rust backend, not a bundled browser
 
@@ -72,6 +72,13 @@ Recon is an open-source database client for macOS, Windows, and Linux, built wit
 - Create and modify tables
 - Add and alter columns and indexes
 - Truncate and drop tables
+
+**Redis**
+- Browse keys with SCAN, grouped into folders by `:` (or any separator), filtered by pattern or type
+- View and edit strings (text, JSON, or hex), hashes, lists, sets, and sorted sets; add and remove stream entries
+- Create, rename, expire, and delete keys, including several at once
+- A command console with history, for anything the browser doesn't cover
+- Works over SSH tunnels and TLS, and with ACL users
 
 **Data Import & Export**
 - Export tables to SQL, CSV, or JSON formats

@@ -322,7 +322,7 @@ impl Table {
                  WHERE i.indrelid = to_regclass({}) AND i.indisprimary",
                 quote_literal(&self.raw)
             )),
-            Driver::Sqlite => None,
+            Driver::Sqlite | Driver::Redis => None,
             Driver::Mssql => {
                 let (schema, name) = match self.parts.as_slice() {
                     [name] => ("dbo".to_string(), name.clone()),

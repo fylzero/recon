@@ -50,8 +50,16 @@ const target = computed(() => {
   if (entry.driver === "sqlite") {
     return entry.filePath.replace(/^\/Users\/[^/]+/, "~");
   }
-  const address = `${entry.user}@${entry.host}:${entry.port}`;
-  const full = entry.database ? `${address}/${entry.database}` : address;
+  const host = `${entry.host}:${entry.port}`;
+  const address = entry.user ? `${entry.user}@${host}` : host;
+  const full =
+    entry.driver === "redis"
+      ? entry.database && entry.database !== "0"
+        ? `${address}/db${entry.database}`
+        : address
+      : entry.database
+        ? `${address}/${entry.database}`
+        : address;
   return entry.ssh?.enabled ? `${full} via ${entry.ssh.host}` : full;
 });
 

@@ -7,6 +7,15 @@ import type {
   BrowseResult,
   ConnectionEntry,
   ConnectionGroup,
+  RedisCommandResult,
+  RedisDatabase,
+  RedisEdit,
+  RedisInfo,
+  RedisKeyInfo,
+  RedisNewKey,
+  RedisScanPage,
+  RedisValuePage,
+  RedisBytes,
   DropOptions,
   ExportRequest,
   ExportResult,
@@ -455,4 +464,66 @@ export function restoreDatabase(
 
 export function cancelTransfer(transferId: string) {
   return invoke<void>("cancel_transfer", { transferId });
+}
+
+export function redisConnect(
+  connectionId: string,
+  password: string | null,
+  sessionId: string,
+  db: number | null,
+) {
+  return invoke<RedisInfo>("redis_connect", { connectionId, password, sessionId, db });
+}
+
+export function redisDisconnect(sessionId: string) {
+  return invoke<void>("redis_disconnect", { sessionId });
+}
+
+export function redisDatabases(sessionId: string) {
+  return invoke<RedisDatabase[]>("redis_databases", { sessionId });
+}
+
+export function redisSelectDb(sessionId: string, db: number) {
+  return invoke<void>("redis_select_db", { sessionId, db });
+}
+
+export function redisScan(
+  sessionId: string,
+  cursor: string | null,
+  pattern: string,
+  kind: string | null,
+  count: number,
+) {
+  return invoke<RedisScanPage>("redis_scan", { sessionId, cursor, pattern, kind, count });
+}
+
+export function redisKeyInfo(sessionId: string, key: RedisBytes) {
+  return invoke<RedisKeyInfo>("redis_key_info", { sessionId, key });
+}
+
+export function redisRead(
+  sessionId: string,
+  key: RedisBytes,
+  kind: string,
+  cursor: string | null,
+  count: number,
+) {
+  return invoke<RedisValuePage>("redis_read", { sessionId, key, kind, cursor, count });
+}
+
+export function redisEdit(sessionId: string, edit: RedisEdit) {
+  return invoke<void>("redis_edit", { sessionId, edit });
+}
+
+/** Applies every change in one transaction, so all of them save or none do. */
+export function redisEditBatch(sessionId: string, edits: RedisEdit[]) {
+  return invoke<void>("redis_edit_batch", { sessionId, edits });
+}
+
+export function redisCreateKey(sessionId: string, key: RedisNewKey) {
+  return invoke<void>("redis_create_key", { sessionId, key });
+}
+
+export function redisCommand(sessionId: string, line: string) {
+  return invoke<RedisCommandResult>("redis_command", { sessionId, line });
 }

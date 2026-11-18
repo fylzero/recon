@@ -35,6 +35,7 @@ fn driver_name(driver: Driver) -> &'static str {
         Driver::Postgres => "postgres",
         Driver::Sqlite => "sqlite",
         Driver::Mssql => "mssql",
+        Driver::Redis => "redis",
     }
 }
 
@@ -164,7 +165,7 @@ pub async fn reset_namespace(
     match driver {
         Driver::Mysql => reset_mysql(conn, namespace).await,
         Driver::Postgres => reset_postgres(conn, namespace).await,
-        Driver::Sqlite => reset_sqlite(conn, namespace).await,
+        Driver::Sqlite | Driver::Redis => reset_sqlite(conn, namespace).await,
         Driver::Mssql => reset_mssql(conn).await,
     }
 }

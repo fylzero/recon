@@ -984,7 +984,7 @@ fn sql_reader(
 /// How many connections `load_sql` may use. One per logical CPU core on MySQL and Postgres.
 fn sql_workers(driver: Driver) -> usize {
     match driver {
-        Driver::Sqlite | Driver::Mssql => 1,
+        Driver::Sqlite | Driver::Redis | Driver::Mssql => 1,
         Driver::Mysql | Driver::Postgres => std::thread::available_parallelism()
             .map(|count| count.get())
             .unwrap_or(1),
@@ -1224,7 +1224,7 @@ async fn backend_of(conn: &mut Conn, driver: Driver) -> Option<Backend> {
         Driver::Postgres => {
             "SELECT pid, backend_start::text FROM pg_stat_activity WHERE pid = pg_backend_pid()"
         }
-        Driver::Sqlite => return None,
+        Driver::Sqlite | Driver::Redis => return None,
         Driver::Mssql => "SELECT @@SPID",
     };
     let row = conn.run(sql, 1, None).await.ok()?.text_rows().pop()?;
@@ -1248,7 +1248,7 @@ async fn end_backend(conn: &mut Conn, driver: Driver, backend: &Backend) {
             backend.id,
             quote_literal(backend.started.as_deref().unwrap_or_default())
         ),
-        Driver::Sqlite => return,
+        Driver::Sqlite | Driver::Redis => return,
         Driver::Mssql => format!("KILL {}", backend.id),
     };
     let _ = conn.execute(&sql).await;

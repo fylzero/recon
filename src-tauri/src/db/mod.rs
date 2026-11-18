@@ -671,7 +671,7 @@ pub fn create_index_statement(
             "CREATE {unique}INDEX {} ON {table} ({columns})",
             dialect.quote_ident(name)
         ),
-        Driver::Sqlite => format!(
+        Driver::Sqlite | Driver::Redis => format!(
             "CREATE {unique}INDEX {} ON {} ({columns})",
             dialect.qualified(namespace, name),
             dialect.quote_ident(table_name)
@@ -796,7 +796,7 @@ pub fn alter_statements(
                 .map(statement)
                 .collect())
         }
-        Driver::Sqlite => {
+        Driver::Sqlite | Driver::Redis => {
             if !change.only_renames() {
                 return Err(format!(
                     "SQLite can only rename columns. Changing the type, nullability, or default of {} needs the table rebuilt, which Recon doesn't do yet.",
@@ -833,7 +833,7 @@ pub fn update_statement(
     let mut value_sql = |value: &EditValue| match driver {
         Driver::Postgres => value.postgres_literal(),
         Driver::Mssql => mssql::edit_literal(value),
-        Driver::Mysql | Driver::Sqlite => {
+        Driver::Mysql | Driver::Sqlite | Driver::Redis => {
             params.push(value.clone());
             "?".to_string()
         }
@@ -1038,11 +1038,15 @@ pub trait Dialect: Sync {
     }
 }
 
+/**
+ * Redis never opens a SQL session (`open_session` refuses it), so it never
+ * reaches the SQL helpers. They group it with SQLite only to stay exhaustive.
+ */
 pub fn dialect(driver: Driver) -> &'static dyn Dialect {
     match driver {
         Driver::Mysql => &mysql::MysqlDialect,
         Driver::Postgres => &postgres::PostgresDialect,
-        Driver::Sqlite => &sqlite::SqliteDialect,
+        Driver::Sqlite | Driver::Redis => &sqlite::SqliteDialect,
         Driver::Mssql => &mssql::MssqlDialect,
     }
 }
@@ -2101,7 +2105,7 @@ pub fn index_statements(
                 statement(create),
             ])
         }
-        Driver::Sqlite => {
+        Driver::Sqlite | Driver::Redis => {
             if current.constraint || current.definition.is_empty() {
                 return Err(format!(
                     "Index {} was created by a UNIQUE or PRIMARY KEY constraint, so SQLite can't change it.",

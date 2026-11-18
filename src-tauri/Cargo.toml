@@ -1,7 +1,7 @@
 [package]
 name = "Recon"
-version = "1.16.0"
-description = "A database client for MySQL, PostgreSQL, SQLite, and SQL Server"
+version = "1.17.0"
+description = "A database client for MySQL, PostgreSQL, SQLite, SQL Server, and Redis"
 authors = ["RazorKode LLC"]
 license = "MIT"
 edition = "2021"
@@ -39,6 +39,7 @@ tauri-plugin-notification = "2"
 tiberius = { version = "0.13", default-features = false, features = ["tds73", "rustls"] }
 deadpool = "0.12"
 tokio-util = { version = "0.7.20", features = ["compat"] }
+redis = { version = "1.8", default-features = false, features = ["acl", "streams", "tokio-comp", "tokio-rustls-comp", "tls-rustls-insecure"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }

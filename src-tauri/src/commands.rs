@@ -247,6 +247,38 @@ pub fn sanitize_connection(mut entry: ConnectionEntry) -> Result<ConnectionEntry
                     .unwrap_or_else(|| "SQLite".into());
             }
         }
+        Driver::Redis => {
+            if entry.host.is_empty() {
+                entry.host = "127.0.0.1".into();
+            }
+            if entry.port == 0 {
+                entry.port = entry.driver.default_port();
+            }
+            entry.database = match entry.database.as_str() {
+                "" => "0".into(),
+                index => index
+                    .parse::<u32>()
+                    .map_err(|_| "The Redis database is a number, like 0.".to_string())?
+                    .to_string(),
+            };
+            entry.file_path.clear();
+            entry.cleartext_auth = false;
+            // Redis TLS is on or off, and checks the host name whenever it verifies.
+            entry.ssl_mode = match entry.ssl_mode.as_str() {
+                "prefer" => "disable".into(),
+                "verify-ca" => "verify-full".into(),
+                mode => mode.into(),
+            };
+            sanitize_ssh(&mut entry.ssh)?;
+            sanitize_tls(&mut entry)?;
+            if entry.password_source == PasswordSource::AwsIam {
+                return Err("AWS IAM sign-in isn't available for Redis yet.".into());
+            }
+            sanitize_password_source(&mut entry)?;
+            if entry.name.is_empty() {
+                entry.name = entry.host.clone();
+            }
+        }
         Driver::Mysql | Driver::Postgres | Driver::Mssql => {
             if entry.host.is_empty() {
                 entry.host = "127.0.0.1".into();
