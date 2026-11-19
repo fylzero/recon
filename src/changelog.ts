@@ -6,6 +6,16 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.19.0",
+    date: "November 18, 2026",
+    notes: [
+      "Recon connects to MongoDB, by host and port (including through an SSH tunnel) or with a mongodb:// or mongodb+srv:// connection string, over TLS. Pasting a connection string with a password moves the password into its own field, so it's kept in the keychain.",
+      "Browse databases and collections, and find documents with a filter, sort, and projection written as in the shell, like { age: { $gt: 30 } }. Documents show in a table or as JSON, a page at a time.",
+      "Edit a field in the table, or a whole document as text that keeps each value's type, like NumberLong(5) and ISODate(\"…\"). Insert, duplicate, and delete documents, and see each collection's indexes.",
+      "A Console runs command documents like { ping: 1 } and common shell commands, such as db.users.find(…).sort(…), aggregate, updateMany, createIndex, show collections, and use.",
+    ],
+  },
+  {
     version: "1.18.0",
     date: "November 18, 2026",
     notes: [

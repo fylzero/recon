@@ -16,6 +16,13 @@ import type {
   RedisScanPage,
   RedisValuePage,
   RedisBytes,
+  MongoCollection,
+  MongoConsoleResult,
+  MongoDatabase,
+  MongoDocument,
+  MongoFindPage,
+  MongoIndex,
+  MongoInfo,
   DropOptions,
   ExportRequest,
   ExportResult,
@@ -526,4 +533,64 @@ export function redisCreateKey(sessionId: string, key: RedisNewKey) {
 
 export function redisCommand(sessionId: string, line: string) {
   return invoke<RedisCommandResult>("redis_command", { sessionId, line });
+}
+
+export function mongoConnect(connectionId: string, password: string | null, sessionId: string) {
+  return invoke<MongoInfo>("mongo_connect", { connectionId, password, sessionId });
+}
+
+export function mongoDisconnect(sessionId: string) {
+  return invoke<void>("mongo_disconnect", { sessionId });
+}
+
+export function mongoDatabases(sessionId: string, current: string) {
+  return invoke<MongoDatabase[]>("mongo_databases", { sessionId, current });
+}
+
+export function mongoCollections(sessionId: string, db: string) {
+  return invoke<MongoCollection[]>("mongo_collections", { sessionId, db });
+}
+
+export interface MongoQuery {
+  filter: string;
+  sort: string;
+  projection: string;
+  skip: number;
+  limit: number;
+}
+
+export function mongoFind(sessionId: string, db: string, collection: string, query: MongoQuery) {
+  return invoke<MongoFindPage>("mongo_find", { sessionId, db, collection, ...query });
+}
+
+export function mongoInsert(sessionId: string, db: string, collection: string, document: string) {
+  return invoke<MongoDocument>("mongo_insert", { sessionId, db, collection, document });
+}
+
+export function mongoReplace(sessionId: string, db: string, collection: string, id: unknown, document: string) {
+  return invoke<MongoDocument>("mongo_replace", { sessionId, db, collection, id, document });
+}
+
+/** Sets one top-level field, keeping its type. `text` null sets it to null. */
+export function mongoSetField(
+  sessionId: string,
+  db: string,
+  collection: string,
+  id: unknown,
+  field: string,
+  text: string | null,
+) {
+  return invoke<MongoDocument>("mongo_set_field", { sessionId, db, collection, id, field, text });
+}
+
+export function mongoDelete(sessionId: string, db: string, collection: string, ids: unknown[]) {
+  return invoke<number>("mongo_delete", { sessionId, db, collection, ids });
+}
+
+export function mongoIndexes(sessionId: string, db: string, collection: string) {
+  return invoke<MongoIndex[]>("mongo_indexes", { sessionId, db, collection });
+}
+
+export function mongoCommand(sessionId: string, db: string, line: string) {
+  return invoke<MongoConsoleResult>("mongo_command", { sessionId, db, line });
 }

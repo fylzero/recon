@@ -1,7 +1,7 @@
 import type { WireNode } from "./filters/compile";
 import type { FilterKind } from "./filters/model";
 
-export type Driver = "mysql" | "postgres" | "sqlite" | "mssql" | "redis";
+export type Driver = "mysql" | "postgres" | "sqlite" | "mssql" | "redis" | "mongodb";
 export type SslMode = "disable" | "prefer" | "require" | "verify-ca" | "verify-full";
 export type PasswordSource = "password" | "none" | "aws-iam" | "command";
 
@@ -11,11 +11,12 @@ export const DRIVER_OPTIONS: { id: Driver; label: string; defaultPort: number }[
   { id: "sqlite", label: "SQLite", defaultPort: 0 },
   { id: "mssql", label: "SQL Server", defaultPort: 1433 },
   { id: "redis", label: "Redis", defaultPort: 6379 },
+  { id: "mongodb", label: "MongoDB", defaultPort: 27017 },
 ];
 
-/** Redis is a key-value store: no tables, SQL, imports, or backups. */
+/** Redis and MongoDB aren't SQL: no tables, SQL, imports, or backups. */
 export function isSqlDriver(driver: Driver) {
-  return driver !== "redis";
+  return driver !== "redis" && driver !== "mongodb";
 }
 
 export function driverLabel(driver: Driver) {
@@ -88,6 +89,10 @@ export interface ConnectionEntry {
   sslCaPath?: string;
   sslCertPath?: string;
   sslKeyPath?: string;
+  /** MongoDB only: a mongodb:// or mongodb+srv:// connection string, used instead of host and port. */
+  uri?: string;
+  /** MongoDB only: the database the user signs in against, "admin" when empty. */
+  authDatabase?: string;
   ssh?: SshTunnel;
 }
 
@@ -752,4 +757,77 @@ export type RedisReply =
 export interface RedisCommandResult {
   reply: RedisReply;
   durationMs: number;
+}
+
+export interface MongoDatabase {
+  name: string;
+  sizeOnDisk: number;
+  empty: boolean;
+}
+
+export interface MongoInfo {
+  serverVersion: string;
+  database: string;
+  databases: MongoDatabase[];
+}
+
+export interface MongoCollection {
+  name: string;
+  kind: "collection" | "view" | "timeseries";
+  count: number | null;
+}
+
+export type MongoKind =
+  | "string"
+  | "int"
+  | "long"
+  | "double"
+  | "decimal"
+  | "bool"
+  | "null"
+  | "objectId"
+  | "date"
+  | "object"
+  | "array"
+  | "binary"
+  | "regex"
+  | "timestamp"
+  | "other";
+
+export interface MongoField {
+  name: string;
+  value: null | boolean | number | string;
+  kind: MongoKind;
+}
+
+/** A document: its `_id` as relaxed Extended JSON, its mongosh-style text, and its fields for the grid. */
+export interface MongoDocument {
+  id: unknown;
+  text: string;
+  fields: MongoField[];
+}
+
+export interface MongoFindPage {
+  documents: MongoDocument[];
+  total: number | null;
+  durationMs: number;
+}
+
+export interface MongoIndex {
+  name: string;
+  keys: string;
+  unique: boolean;
+  sparse: boolean;
+  hidden: boolean;
+  ttlSeconds: number | null;
+  partial: string | null;
+  text: string;
+}
+
+export interface MongoConsoleResult {
+  output: string;
+  error: boolean;
+  durationMs: number;
+  changed: boolean;
+  database: string | null;
 }

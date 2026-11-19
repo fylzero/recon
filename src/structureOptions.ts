@@ -70,6 +70,7 @@ export const DATA_TYPES: Record<Driver, string[]> = {
     "varbinary(max)",
   ],
   redis: [],
+  mongodb: [],
 };
 
 /** Common default expressions. Defaults are SQL, so text needs its quotes. */
@@ -79,6 +80,7 @@ export const DEFAULT_VALUES: Record<Driver, string[]> = {
   sqlite: ["NULL", "CURRENT_TIMESTAMP", "0", "1", "''"],
   mssql: ["NULL", "CURRENT_TIMESTAMP", "0", "1", "N''"],
   redis: [],
+  mongodb: [],
 };
 
 export function quoteIdentifier(driver: Driver, name: string) {

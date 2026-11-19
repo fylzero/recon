@@ -2441,6 +2441,10 @@ body.reordering-repos .repo-row,
   color: var(--bad);
 }
 
+.driver-icon.driver-mongodb {
+  color: var(--good);
+}
+
 .repo-row.colored .driver-icon {
   color: inherit;
 }
@@ -2500,25 +2504,47 @@ button.link-button:hover:not(:disabled) {
   gap: 0.9rem;
 }
 
-.driver-picker {
-  align-self: flex-start;
+/* Every database fits without scrolling: separate tiles, three to a row. */
+.driver-picker.segmented {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.4rem;
+  align-self: stretch;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
-.driver-picker button {
+.driver-picker.segmented button {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 0.45rem;
-  padding: 0.4rem 0.9rem;
+  min-width: 0;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-input);
   font-size: 13px;
+}
+
+.driver-picker.segmented button.active,
+.driver-picker.segmented button.active:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-input));
+  color: var(--text);
+}
+
+@media (max-width: 420px) {
+  .driver-picker {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .driver-picker .driver-icon {
   width: 1.1rem;
   height: 1.1rem;
-}
-
-.driver-picker button.active .driver-icon {
-  color: inherit;
 }
 
 .form-grid {
@@ -6787,4 +6813,181 @@ button.import-threshold-btn {
 .redis-console-input textarea:focus {
   outline: none;
   box-shadow: none;
+}
+
+/* MongoDB */
+
+.connection-form .mongo-mode {
+  justify-self: start;
+}
+
+.mongo-kind-tag.kind-collection {
+  --kind-color: var(--good);
+}
+
+.mongo-kind-tag.kind-view {
+  --kind-color: var(--purple);
+}
+
+.mongo-kind-tag.kind-timeseries {
+  --kind-color: var(--orange);
+}
+
+.mongo-pane .db-table .mongo-kind-tag {
+  min-width: 0;
+}
+
+.mongo-collection-header {
+  align-items: center;
+}
+
+.mongo-collection-header .segmented button {
+  padding: 0.15rem 0.6rem;
+}
+
+.mongo-query {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.5rem 0.9rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.mongo-query-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.mongo-query-label {
+  flex: 0 0 3.2rem;
+}
+
+.mongo-query-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.25rem 0.5rem;
+  font-family: var(--font-code);
+  font-size: 12.5px;
+}
+
+.mongo-query-row button.active {
+  color: var(--accent-text);
+}
+
+.mongo-query-error {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.mongo-toolbar .segmented button {
+  padding: 0.15rem 0.6rem;
+}
+
+.mongo-json-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0.5rem 0.9rem;
+}
+
+.mongo-json-doc {
+  margin-bottom: 0.5rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input);
+  cursor: default;
+}
+
+.mongo-json-doc.selected {
+  border-color: var(--accent);
+}
+
+.mongo-json-doc pre {
+  margin: 0;
+  font-family: var(--editor-font-family);
+  font-size: var(--grid-font-size, 12.5px);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.mongo-empty {
+  margin: 0;
+  padding: 0.5rem 0.9rem;
+}
+
+.mongo-indexes {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0.75rem 0.9rem;
+}
+
+.mongo-index-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.mongo-index-table th {
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-weight: 500;
+  text-align: left;
+}
+
+.mongo-index-table td {
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.mongo-index-table code,
+.mongo-index-hint code,
+.mongo-editor code,
+.mongo-pane .db-list-hint code {
+  font-family: var(--font-code);
+  font-size: 11.5px;
+}
+
+.mongo-index-name {
+  font-family: var(--font-code);
+}
+
+.mongo-index-props {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.mongo-badge {
+  padding: 0.05rem 0.35rem;
+  border-radius: 4px;
+  background: rgb(var(--tint) / 0.08);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.mongo-index-hint {
+  margin-top: 0.75rem;
+}
+
+.mongo-editor .mongo-code {
+  height: min(60vh, 34rem);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.mongo-console .redis-console-hint p {
+  margin: 0 0 0.5rem;
+}
+
+.mongo-console-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }

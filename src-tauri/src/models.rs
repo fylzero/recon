@@ -169,6 +169,8 @@ pub enum Driver {
     Sqlite,
     Mssql,
     Redis,
+    #[serde(rename = "mongodb")]
+    Mongo,
 }
 
 impl Driver {
@@ -179,6 +181,7 @@ impl Driver {
             Driver::Sqlite => 0,
             Driver::Mssql => 1433,
             Driver::Redis => 6379,
+            Driver::Mongo => 27017,
         }
     }
 
@@ -189,6 +192,7 @@ impl Driver {
             Driver::Sqlite => "SQLite",
             Driver::Mssql => "SQL Server",
             Driver::Redis => "Redis",
+            Driver::Mongo => "MongoDB",
         }
     }
 }
@@ -313,6 +317,13 @@ pub struct ConnectionEntry {
     pub ssl_cert_path: String,
     #[serde(default)]
     pub ssl_key_path: String,
+    /// MongoDB only: a mongodb:// or mongodb+srv:// connection string, used instead of
+    /// the host and port. It never holds the password, which stays in the keychain.
+    #[serde(default)]
+    pub uri: String,
+    /// MongoDB only: the database the user signs in against (authSource), "admin" when empty.
+    #[serde(default)]
+    pub auth_database: String,
     #[serde(default)]
     pub ssh: SshTunnel,
 }
@@ -552,6 +563,8 @@ mod tests {
                 ssl_ca_path: String::new(),
                 ssl_cert_path: String::new(),
                 ssl_key_path: String::new(),
+                uri: String::new(),
+                auth_database: String::new(),
                 ssh: SshTunnel::default(),
             }],
         });

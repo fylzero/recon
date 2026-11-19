@@ -5,7 +5,7 @@
 <h1 align="center">Recon</h1>
 
 <p align="center">
-  A database client for macOS, Windows, and Linux. Connect to MySQL, PostgreSQL, SQLite, SQL Server, and Redis with built-in drivers—no additional software required. No account, no cloud: your connections stay on your machine, and your credentials stay in the macOS Keychain, Windows Credential Manager, or the Linux system keyring.
+  A database client for macOS, Windows, and Linux. Connect to MySQL, PostgreSQL, SQLite, SQL Server, Redis, and MongoDB with built-in drivers—no additional software required. No account, no cloud: your connections stay on your machine, and your credentials stay in the macOS Keychain, Windows Credential Manager, or the Linux system keyring.
 </p>
 
 <p align="center">
@@ -30,13 +30,13 @@
 
 ## About
 
-Recon is an open-source database client for macOS, Windows, and Linux, built with Tauri, Vue, and Rust. It works with MySQL, PostgreSQL, SQLite, SQL Server, and Redis without separate database drivers or command-line tools.
+Recon is an open-source database client for macOS, Windows, and Linux, built with Tauri, Vue, and Rust. It works with MySQL, PostgreSQL, SQLite, SQL Server, Redis, and MongoDB without separate database drivers or command-line tools.
 
 **Key characteristics:**
 
 - **Open source**: Free to use and modify under the MIT license
 - **Privacy-focused**: Database credentials stored exclusively in the macOS Keychain, Windows Credential Manager, or the Linux system keyring
-- **No external dependencies**: MySQL, PostgreSQL, SQLite, SQL Server, and Redis drivers compiled directly into the app
+- **No external dependencies**: MySQL, PostgreSQL, SQLite, SQL Server, Redis, and MongoDB drivers compiled directly into the app
 - **No account, no cloud**: Connections and queries go straight from your machine to your database. Amazon S3 backups are opt-in and use your own AWS account
 - **Native app**: A Tauri shell with a Rust backend, not a bundled browser
 
@@ -81,6 +81,14 @@ Recon is an open-source database client for macOS, Windows, and Linux, built wit
 - Works over SSH tunnels and TLS, and with ACL users
 - Also works with Valkey, KeyDB, and Dragonfly
 
+**MongoDB**
+- Browse databases and collections, with document counts
+- Find documents with a filter, sort, and projection in shell syntax, like `{ age: { $gt: 30 } }`, a page at a time
+- See documents in a table or as JSON; edit fields in the table, or whole documents as text that keeps types like `NumberLong`, `ISODate`, and `ObjectId`
+- Insert, duplicate, and delete documents, and see each collection's indexes
+- A console for command documents and common shell commands, such as `db.users.find(…)`, `aggregate`, `updateMany`, and `createIndex`
+- Connects by host and port (including through an SSH tunnel) or with a `mongodb://` or `mongodb+srv://` connection string, over TLS
+
 **Data Import & Export**
 - Export tables to SQL, CSV, or JSON formats
 - Import data from SQL, CSV, or JSON files
@@ -95,6 +103,7 @@ Recon is an open-source database client for macOS, Windows, and Linux, built wit
 - **SQLite**: Local database file support with ability to create new databases
 - **SQL Server**: SQL Server 2022 and newer, signing in with a SQL Server login. Windows and Microsoft Entra ID authentication aren't supported yet. Connect to a named instance on its port rather than by `host\INSTANCE`.
 - **Redis / Valkey / KeyDB / Dragonfly**: Redis 6 and newer, and the servers compatible with it. Choose Redis as the driver; Recon detects which server it's connected to. Dragonfly doesn't report a key's encoding, or the memory used by small values.
+- **MongoDB**: MongoDB 4.4 and newer, signing in with a user name and password (SCRAM). Through an SSH tunnel Recon talks to the one server you name, so use a replica set's primary to make changes. Connection strings can't go through a tunnel.
 
 ## Download & Installation
 

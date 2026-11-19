@@ -14,6 +14,7 @@ import ConnectionsView from "./views/ConnectionsView.vue";
 
 const ConnectionPane = defineAsyncComponent(() => import("./components/ConnectionPane.vue"));
 const RedisPane = defineAsyncComponent(() => import("./components/RedisPane.vue"));
+const MongoPane = defineAsyncComponent(() => import("./components/MongoPane.vue"));
 const SettingsView = defineAsyncComponent({
   loader: () => import("./views/SettingsView.vue"),
   errorComponent: {
@@ -198,6 +199,13 @@ watch([groups, standaloneConnections], () => {
       >
         <RedisPane
           v-if="findConnection(tab.connectionId)?.connection.driver === 'redis'"
+          :connection-id="tab.connectionId"
+          :session-id="tab.id"
+          :initial-namespace="tab.namespace"
+          :active="activeId === tab.id"
+        />
+        <MongoPane
+          v-else-if="findConnection(tab.connectionId)?.connection.driver === 'mongodb'"
           :connection-id="tab.connectionId"
           :session-id="tab.id"
           :initial-namespace="tab.namespace"

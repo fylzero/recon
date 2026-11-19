@@ -1,6 +1,6 @@
 [package]
 name = "Recon"
-version = "1.18.0"
+version = "1.19.0"
 description = "A database client for MySQL, PostgreSQL, SQLite, SQL Server, and Redis"
 authors = ["RazorKode LLC"]
 license = "MIT"
@@ -40,6 +40,7 @@ tiberius = { version = "0.13", default-features = false, features = ["tds73", "r
 deadpool = "0.12"
 tokio-util = { version = "0.7.20", features = ["compat"] }
 redis = { version = "1.8", default-features = false, features = ["acl", "streams", "tokio-comp", "tokio-rustls-comp", "tls-rustls-insecure"] }
+mongodb = "3.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }

@@ -59,7 +59,13 @@ const password = ref("");
 const savePassword = ref(initial?.savePassword ?? true);
 const database = ref(initial?.database ?? "");
 const filePath = ref(initial?.filePath ?? "");
-const sslMode = ref<SslMode>(initial?.sslMode ?? (initial?.driver === "redis" ? "disable" : "prefer"));
+const sslMode = ref<SslMode>(
+  initial?.sslMode ?? (initial?.driver === "redis" || initial?.driver === "mongodb" ? "disable" : "prefer"),
+);
+const mongoMode = ref<"host" | "uri">(initial?.uri ? "uri" : "host");
+const uri = ref(initial?.uri ?? "");
+const authDatabase = ref(initial?.authDatabase ?? "");
+const uriNote = ref("");
 const cleartextAuth = ref(initial?.cleartextAuth ?? false);
 const passwordSource = ref<PasswordSource>(initial?.passwordSource ?? "password");
 const awsRegion = ref(initial?.awsRegion ?? "");
@@ -123,9 +129,13 @@ watch(
 
 const isSqlite = computed(() => driver.value === "sqlite");
 const isRedis = computed(() => driver.value === "redis");
+const isMongo = computed(() => driver.value === "mongodb");
+const usesUri = computed(() => isMongo.value && mongoMode.value === "uri");
+/** Redis and MongoDB TLS is on or off, and checks the host name whenever it verifies. */
+const simpleTls = computed(() => isRedis.value || isMongo.value);
 const title = computed(() => (editing ? "Edit connection" : "New connection"));
 
-const useSsh = computed(() => !isSqlite.value && sshEnabled.value);
+const useSsh = computed(() => !isSqlite.value && !usesUri.value && sshEnabled.value);
 
 const sshReady = computed(
   () =>
@@ -189,14 +199,16 @@ const sourceReady = computed(() => {
 });
 
 const redisDatabaseValid = computed(() => !isRedis.value || /^\d*$/.test(database.value.trim()));
+const uriValid = computed(() => !usesUri.value || /^mongodb(\+srv)?:\/\/[^\s]+$/.test(uri.value.trim()));
 
 const canSubmit = computed(() =>
   isSqlite.value
     ? Boolean(filePath.value.trim())
     : Boolean(
-        host.value.trim() &&
-          (user.value.trim() || isRedis.value) &&
+        (usesUri.value ? uri.value.trim() : host.value.trim()) &&
+          (user.value.trim() || isRedis.value || isMongo.value) &&
           redisDatabaseValid.value &&
+          uriValid.value &&
           sshReady.value &&
           sourceReady.value &&
           !cleartextBlocked.value &&
@@ -254,16 +266,20 @@ watch(driver, (next, previous) => {
   if (next !== "sqlite" && (!user.value.trim() || user.value === previousUser)) {
     user.value = defaultUser(next);
   }
-  if ((next === "mssql" || next === "redis") && passwordSource.value === "aws-iam") {
+  if ((next === "mssql" || next === "redis" || next === "mongodb") && passwordSource.value === "aws-iam") {
     passwordSource.value = "password";
   }
-  // Redis TLS is all or nothing, and always checks the host name when it verifies.
-  if (next === "redis") {
+  const simple = (id: Driver) => id === "redis" || id === "mongodb";
+  // Redis and MongoDB TLS is all or nothing, and always checks the host name when it verifies.
+  if (simple(next)) {
     if (sslMode.value === "prefer") sslMode.value = "disable";
     if (sslMode.value === "verify-ca") sslMode.value = "verify-full";
+  } else if (simple(previous)) {
+    if (sslMode.value === "disable") sslMode.value = "prefer";
+  }
+  if (next === "redis") {
     if (/^\d*$/.test(database.value.trim()) === false) database.value = "";
   } else if (previous === "redis") {
-    if (sslMode.value === "disable") sslMode.value = "prefer";
     if (/^\d+$/.test(database.value.trim())) database.value = "";
   }
 });
@@ -282,6 +298,9 @@ watch(
     awsRegion,
     awsProfile,
     passwordCommand,
+    uri,
+    authDatabase,
+    mongoMode,
     sslCaPath,
     sslCertPath,
     sslKeyPath,
@@ -300,6 +319,36 @@ watch(
     testResult.value = null;
   },
 );
+
+/**
+ * Moves a user name and password out of a pasted connection string into their
+ * own fields, so the password is kept in the keychain instead of the settings file.
+ */
+watch(uri, (value) => {
+  const match = /^(mongodb(?:\+srv)?:\/\/)([^@/?]*)@(.*)$/s.exec(value.trim());
+  if (!match) return;
+  const [, scheme, userinfo, rest] = match;
+  const colon = userinfo.indexOf(":");
+  const decode = (text: string) => {
+    try {
+      return decodeURIComponent(text);
+    } catch {
+      return text;
+    }
+  };
+  const name = decode(colon >= 0 ? userinfo.slice(0, colon) : userinfo);
+  const secret = colon >= 0 ? decode(userinfo.slice(colon + 1)) : "";
+  if (name) user.value = name;
+  if (secret) {
+    passwordSource.value = "password";
+    savePassword.value = true;
+    password.value = secret;
+  }
+  uri.value = `${scheme}${rest}`;
+  uriNote.value = secret
+    ? `Moved the user name and password into their own fields, so the password is kept in the ${secretStoreName}.`
+    : "Moved the user name into its own field.";
+});
 
 watch(sshAuth, (next) => {
   sshSecret.value = "";
@@ -453,7 +502,7 @@ function buildEntry(): ConnectionEntry {
     id: initial?.id ?? "",
     name: name.value.trim(),
     driver: driver.value,
-    host: isSqlite.value ? "" : host.value.trim(),
+    host: isSqlite.value || usesUri.value ? "" : host.value.trim(),
     port: isSqlite.value ? 0 : Number(port.value) || 0,
     user: isSqlite.value ? "" : user.value.trim(),
     database: isSqlite.value ? "" : database.value.trim(),
@@ -469,10 +518,12 @@ function buildEntry(): ConnectionEntry {
     sslCaPath: verifiesCertificate.value ? sslCaPath.value.trim() : "",
     sslCertPath: requiresTls.value && useClientCert.value ? sslCertPath.value.trim() : "",
     sslKeyPath: requiresTls.value && useClientCert.value ? sslKeyPath.value.trim() : "",
+    uri: usesUri.value ? uri.value.trim() : "",
+    authDatabase: isMongo.value && !usesUri.value ? authDatabase.value.trim() : "",
     ssh: isSqlite.value
       ? defaultSshTunnel()
       : {
-          enabled: sshEnabled.value,
+          enabled: useSsh.value,
           host: sshHost.value.trim(),
           port: Number(sshPort.value) || DEFAULT_SSH_PORT,
           user: sshUser.value.trim(),
@@ -676,14 +727,56 @@ async function submit(connectAfter: boolean) {
         </template>
 
         <template v-else>
-          <label class="modal-label">
-            <span class="muted tiny">Host</span>
-            <input v-model="host" type="text" spellcheck="false" placeholder="127.0.0.1" />
-          </label>
-          <label class="modal-label port-field">
-            <span class="muted tiny">Port</span>
-            <input v-model.number="port" type="number" min="1" max="65535" />
-          </label>
+          <div v-if="isMongo" class="segmented span-2 mongo-mode" role="radiogroup" aria-label="Connect with">
+            <button
+              type="button"
+              role="radio"
+              :aria-checked="mongoMode === 'host'"
+              :class="{ active: mongoMode === 'host' }"
+              @click="mongoMode = 'host'"
+            >
+              Host and port
+            </button>
+            <button
+              type="button"
+              role="radio"
+              :aria-checked="mongoMode === 'uri'"
+              :class="{ active: mongoMode === 'uri' }"
+              @click="mongoMode = 'uri'"
+            >
+              Connection string
+            </button>
+          </div>
+          <template v-if="usesUri">
+            <label class="modal-label span-2">
+              <span class="muted tiny">Connection string</span>
+              <input
+                v-model="uri"
+                class="code-input"
+                type="text"
+                spellcheck="false"
+                autocomplete="off"
+                placeholder="mongodb+srv://cluster0.example.mongodb.net/?retryWrites=true"
+              />
+            </label>
+            <p v-if="!uriValid" class="settings-error span-2">
+              A connection string starts with mongodb:// or mongodb+srv://.
+            </p>
+            <p v-else-if="uriNote" class="muted tiny span-2 ssh-hint">{{ uriNote }}</p>
+            <p v-else class="muted tiny span-2 ssh-hint">
+              For replica sets and Atlas. Options such as replicaSet, authSource, and tls are read from the string.
+            </p>
+          </template>
+          <template v-else>
+            <label class="modal-label">
+              <span class="muted tiny">Host</span>
+              <input v-model="host" type="text" spellcheck="false" placeholder="127.0.0.1" />
+            </label>
+            <label class="modal-label port-field">
+              <span class="muted tiny">Port</span>
+              <input v-model.number="port" type="number" min="1" max="65535" />
+            </label>
+          </template>
           <label class="modal-label">
             <span class="muted tiny">{{ isRedis ? "User (ACL)" : "User" }}</span>
             <input
@@ -691,7 +784,7 @@ async function submit(connectAfter: boolean) {
               type="text"
               spellcheck="false"
               autocomplete="off"
-              :placeholder="isRedis ? 'default' : defaultUser(driver)"
+              :placeholder="isRedis ? 'default' : isMongo ? 'Optional' : defaultUser(driver)"
             />
           </label>
           <label class="modal-label">
@@ -699,7 +792,7 @@ async function submit(connectAfter: boolean) {
             <select v-model="passwordSource">
               <option value="password">Password</option>
               <option value="none">No password</option>
-              <option v-if="driver !== 'mssql' && driver !== 'redis'" value="aws-iam">AWS IAM</option>
+              <option v-if="driver !== 'mssql' && !simpleTls" value="aws-iam">AWS IAM</option>
               <option value="command">Password command</option>
             </select>
           </label>
@@ -750,7 +843,7 @@ async function submit(connectAfter: boolean) {
             <p class="muted tiny span-2 ssh-hint">{{ passwordCommandShell }}</p>
           </template>
           <label class="modal-label">
-            <span class="muted tiny">{{ isRedis ? "Database number" : "Database" }}</span>
+            <span class="muted tiny">{{ isRedis ? "Database number" : isMongo ? "Default database" : "Database" }}</span>
             <input
               v-model="database"
               type="text"
@@ -759,10 +852,14 @@ async function submit(connectAfter: boolean) {
               :placeholder="isRedis ? '0' : 'Optional'"
             />
           </label>
-          <label v-if="isRedis" class="modal-label">
+          <label v-if="isMongo && !usesUri" class="modal-label">
+            <span class="muted tiny">Auth database</span>
+            <input v-model="authDatabase" type="text" spellcheck="false" autocomplete="off" placeholder="admin" />
+          </label>
+          <label v-if="simpleTls" class="modal-label">
             <span class="muted tiny">TLS</span>
             <select v-model="sslMode">
-              <option value="disable">Off</option>
+              <option value="disable">{{ usesUri ? "As the connection string says" : "Off" }}</option>
               <option value="require">On, without verifying the certificate</option>
               <option value="verify-full">On, verify the certificate and host name</option>
             </select>
@@ -781,7 +878,7 @@ async function submit(connectAfter: boolean) {
           <p v-if="iamBlocked" class="settings-error span-2">AWS IAM logins need SSL set to Require or Verify.</p>
           <p v-if="hostCheckBlocked" class="settings-error span-2">
             {{
-              isRedis
+              simpleTls
                 ? "The host name can't be checked through an SSH tunnel. Turn TLS on without verifying instead."
                 : "The host name can't be checked through an SSH tunnel. Set SSL to Verify CA instead."
             }}
@@ -875,13 +972,19 @@ async function submit(connectAfter: boolean) {
             </p>
           </template>
 
-          <label class="checkbox-row span-2 ssh-toggle">
+          <p v-if="usesUri" class="muted tiny span-2 ssh-hint ssh-toggle">
+            A connection string can't go through an SSH tunnel. To use one, switch to Host and port.
+          </p>
+          <label v-else class="checkbox-row span-2 ssh-toggle">
             <input v-model="sshEnabled" type="checkbox" />
             <span>Connect through an SSH tunnel</span>
           </label>
-          <template v-if="sshEnabled">
+          <template v-if="useSsh">
             <p class="muted tiny span-2 ssh-hint">
               Host and port above are resolved from the SSH server, so 127.0.0.1 means the SSH host itself.
+            </p>
+            <p v-if="isMongo" class="muted tiny span-2 ssh-hint">
+              Recon talks to this one server directly. For a replica set, use the primary's host to make changes.
             </p>
             <label class="modal-label">
               <span class="muted tiny">SSH host</span>

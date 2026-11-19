@@ -995,7 +995,7 @@ pub fn create_table_sql(
                 "{} BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY",
                 quote("id")
             ),
-            Driver::Sqlite | Driver::Redis => {
+            Driver::Sqlite | Driver::Redis | Driver::Mongo => {
                 format!("{} INTEGER PRIMARY KEY AUTOINCREMENT", quote("id"))
             }
             Driver::Mssql => format!("{} bigint IDENTITY(1,1) NOT NULL PRIMARY KEY", quote("id")),
@@ -1029,7 +1029,7 @@ pub fn insert_parts(
                 String::new(),
             )
         }
-        Driver::Sqlite | Driver::Redis => {
+        Driver::Sqlite | Driver::Redis | Driver::Mongo => {
             let ignore = if skip_conflicts { "OR IGNORE " } else { "" };
             (
                 format!("INSERT {ignore}INTO {table} ({list}) VALUES "),

@@ -61,6 +61,7 @@ const TYPES: Record<Driver, string[]> = {
   ],
   sqlite: ["INTEGER", "REAL", "NUMERIC", "BOOLEAN", "TEXT", "BLOB"],
   redis: [],
+  mongodb: [],
   mssql: [
     "bigint", "int", "bit", "decimal(20,6)", "float", "date", "datetime2", "datetimeoffset",
     "nvarchar(255)", "nvarchar(max)", "uniqueidentifier", "varbinary(max)",

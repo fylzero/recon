@@ -21,6 +21,8 @@ const SSL_MODES: [&str; 5] = ["disable", "prefer", "require", "verify-ca", "veri
 const CLEARTEXT_NEEDS_ENCRYPTION: &str =
     "Sending the password in clear text needs SSL set to Require or Verify, or an SSH tunnel.";
 const IAM_NEEDS_ENCRYPTION: &str = "AWS IAM logins need SSL set to Require or Verify.";
+const MONGO_URI_THROUGH_TUNNEL: &str =
+    "A connection string can't go through an SSH tunnel, since MongoDB finds the other servers by name. Enter the host and port instead, and Recon talks to that one server directly.";
 const HOST_CHECK_THROUGH_TUNNEL: &str =
     "The host name can't be checked through an SSH tunnel. Set SSL to Verify CA instead.";
 
@@ -227,6 +229,10 @@ pub fn sanitize_connection(mut entry: ConnectionEntry) -> Result<ConnectionEntry
     } else {
         "prefer".into()
     };
+    if entry.driver != Driver::Mongo {
+        entry.uri.clear();
+        entry.auth_database.clear();
+    }
     match entry.driver {
         Driver::Sqlite => {
             if entry.file_path.is_empty() {
@@ -277,6 +283,51 @@ pub fn sanitize_connection(mut entry: ConnectionEntry) -> Result<ConnectionEntry
             sanitize_password_source(&mut entry)?;
             if entry.name.is_empty() {
                 entry.name = entry.host.clone();
+            }
+        }
+        Driver::Mongo => {
+            entry.uri = entry.uri.trim().to_string();
+            entry.auth_database = entry.auth_database.trim().to_string();
+            entry.file_path.clear();
+            entry.cleartext_auth = false;
+            // MongoDB's TLS is on or off, and checks the host name whenever it verifies.
+            entry.ssl_mode = match entry.ssl_mode.as_str() {
+                "prefer" => "disable".into(),
+                "verify-ca" => "verify-full".into(),
+                mode => mode.into(),
+            };
+            if entry.uri.is_empty() {
+                if entry.host.is_empty() {
+                    entry.host = "127.0.0.1".into();
+                }
+                if entry.port == 0 {
+                    entry.port = entry.driver.default_port();
+                }
+            } else {
+                let (host, port) = crate::mongo::check_uri(&entry.uri)?;
+                if entry.ssh.enabled {
+                    return Err(MONGO_URI_THROUGH_TUNNEL.into());
+                }
+                entry.host = host;
+                entry.port = port;
+                entry.auth_database.clear();
+            }
+            crate::mongo::check_database_name(&entry.database)?;
+            if !entry.auth_database.is_empty() {
+                crate::mongo::check_database_name(&entry.auth_database)?;
+            }
+            sanitize_ssh(&mut entry.ssh)?;
+            sanitize_tls(&mut entry)?;
+            if entry.password_source == PasswordSource::AwsIam {
+                return Err("AWS IAM sign-in isn't available for MongoDB yet.".into());
+            }
+            sanitize_password_source(&mut entry)?;
+            if entry.name.is_empty() {
+                entry.name = if entry.database.is_empty() {
+                    entry.host.clone()
+                } else {
+                    format!("{}/{}", entry.host, entry.database)
+                };
             }
         }
         Driver::Mysql | Driver::Postgres | Driver::Mssql => {
@@ -1010,6 +1061,8 @@ mod tests {
             ssl_ca_path: String::new(),
             ssl_cert_path: String::new(),
             ssl_key_path: String::new(),
+            uri: String::new(),
+            auth_database: String::new(),
             ssh: SshTunnel::default(),
         }
     }

@@ -50,7 +50,8 @@ const target = computed(() => {
   if (entry.driver === "sqlite") {
     return entry.filePath.replace(/^\/Users\/[^/]+/, "~");
   }
-  const host = `${entry.host}:${entry.port}`;
+  const srv = entry.driver === "mongodb" && entry.uri?.startsWith("mongodb+srv://");
+  const host = srv ? `${entry.host} (SRV)` : `${entry.host}:${entry.port}`;
   const address = entry.user ? `${entry.user}@${host}` : host;
   const full =
     entry.driver === "redis"

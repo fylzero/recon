@@ -6,6 +6,7 @@ mod db_commands;
 mod machine_stats;
 mod menu;
 mod models;
+mod mongo;
 mod persist;
 mod prompts;
 mod query_log;
@@ -49,6 +50,7 @@ pub fn run() {
             app.manage(ResultStore::default());
             app.manage(TransferStore::default());
             app.manage(redis::RedisStore::default());
+            app.manage(mongo::MongoStore::default());
             app.manage(prompts::PromptStore::default());
             if let (Some(window), Some(bounds)) = (app.get_webview_window("main"), bounds) {
                 window_state::apply(&window, &bounds);
@@ -153,6 +155,17 @@ pub fn run() {
             redis::redis_edit_batch,
             redis::redis_create_key,
             redis::redis_command,
+            mongo::mongo_connect,
+            mongo::mongo_disconnect,
+            mongo::mongo_databases,
+            mongo::mongo_collections,
+            mongo::mongo_find,
+            mongo::mongo_insert,
+            mongo::mongo_replace,
+            mongo::mongo_set_field,
+            mongo::mongo_delete,
+            mongo::mongo_indexes,
+            mongo::mongo_command,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

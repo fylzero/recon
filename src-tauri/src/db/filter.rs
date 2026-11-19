@@ -48,7 +48,7 @@ pub fn classify(driver: Driver, data_type: &str) -> ColumnClass {
     match driver {
         Driver::Mysql => classify_mysql(&lower),
         Driver::Postgres => classify_postgres(&lower),
-        Driver::Sqlite | Driver::Redis => classify_sqlite(&lower),
+        Driver::Sqlite | Driver::Redis | Driver::Mongo => classify_sqlite(&lower),
         Driver::Mssql => classify_mssql(&lower),
     }
 }
@@ -482,7 +482,7 @@ pub fn literal(driver: Driver, value: &EditValue) -> String {
         EditValue::Text(text) => match driver {
             Driver::Postgres => format!("E'{}'", text.replace('\\', "\\\\").replace('\'', "''")),
             Driver::Mysql => quote_literal(&text.replace('\\', "\\\\")),
-            Driver::Sqlite | Driver::Redis => quote_literal(text),
+            Driver::Sqlite | Driver::Redis | Driver::Mongo => quote_literal(text),
             Driver::Mssql => format!("N'{}'", text.replace('\'', "''")),
         },
     }
@@ -1020,7 +1020,9 @@ pub fn suggestion_sql(
         let text = match driver {
             Driver::Postgres => format!("{ident}::text ILIKE "),
             Driver::Mysql => format!("CAST({ident} AS CHAR) LIKE "),
-            Driver::Sqlite | Driver::Redis => format!("CAST({ident} AS TEXT) LIKE "),
+            Driver::Sqlite | Driver::Redis | Driver::Mongo => {
+                format!("CAST({ident} AS TEXT) LIKE ")
+            }
             Driver::Mssql => format!("CAST({ident} AS nvarchar(max)) LIKE "),
         };
         sql.push_sql(format!(" AND {text}"));
