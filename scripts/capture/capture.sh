@@ -20,7 +20,8 @@ DEMO_GIF_PATH="$PROJECT_DIR/docs/demo.gif"
 # Configuration
 TEMP_DIR="${RECON_DEMO_DB_DIR:-/tmp/recon-demo}"
 ISOLATED_HOME="$TEMP_DIR/home"
-APP_PATH="/Applications/Recon.app"
+# Set RECON_APP_PATH to capture a build other than the installed app
+APP_PATH="${RECON_APP_PATH:-/Applications/Recon.app}"
 APP_BINARY="$APP_PATH/Contents/MacOS/Recon"
 WINDOW_WIDTH=1440
 WINDOW_HEIGHT=900
@@ -81,9 +82,9 @@ command -v osascript >/dev/null 2>&1 || die "osascript not found (macOS only)"
 success "Prerequisites OK"
 
 # Check if non-demo Recon is already running
-if pgrep -f "Recon.app" >/dev/null 2>&1; then
+if pgrep -f "Recon.app/Contents/MacOS/Recon" >/dev/null 2>&1; then
   # Check if it's the demo instance by checking HOME env
-  RUNNING_PIDS=$(pgrep -f "Recon.app")
+  RUNNING_PIDS=$(pgrep -f "Recon.app/Contents/MacOS/Recon")
   for pid in $RUNNING_PIDS; do
     # If we can't determine it's a demo instance, warn and exit
     warn "Recon is already running (PID $pid)."
@@ -116,8 +117,16 @@ python3 "$LS_HELPER" purge-demo || warn "Could not clean demo keys from the webv
 # the user's own value, show all edge types for the screenshot, and restore the
 # original on exit (even on failure).
 ORIG_DIAGRAM_LINKS="$(python3 "$LS_HELPER" get recon.diagramLinks || true)"
+# The app also mirrors its theme into that storage, and the demo uses dark, so
+# keep the user's own theme value to put back afterwards.
+ORIG_THEME="$(python3 "$LS_HELPER" get theme || true)"
 restore_prefs() {
   python3 "$LS_HELPER" purge-demo || true
+  if [[ -n "$ORIG_THEME" ]]; then
+    python3 "$LS_HELPER" set theme "$ORIG_THEME" || true
+  else
+    python3 "$LS_HELPER" delete theme || true
+  fi
   if [[ -n "$ORIG_DIAGRAM_LINKS" ]]; then
     python3 "$LS_HELPER" set recon.diagramLinks "$ORIG_DIAGRAM_LINKS" || true
   else
@@ -136,7 +145,7 @@ sleep 4
 # Wait for window to appear
 log "Waiting for Recon window..."
 for i in {1..30}; do
-  if osascript -e 'tell application "System Events" to exists (first window of process "Recon")' 2>/dev/null; then
+  if osascript -e "tell application \"System Events\" to exists (first window of (first process whose unix id is $APP_PID))" 2>/dev/null; then
     break
   fi
   sleep 0.5
@@ -144,7 +153,7 @@ done
 
 # Get window ID helper using inline JXA
 get_window_id() {
-  osascript -l JavaScript -e 'ObjC.import("CoreGraphics"); var l=ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly,0))); l.filter(w=>w.kCGWindowOwnerName=="Recon"&&w.kCGWindowLayer==0).map(w=>w.kCGWindowNumber).join("")'
+  osascript -l JavaScript -e 'ObjC.import("CoreGraphics"); var l=ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly,0))); l.filter(w=>w.kCGWindowOwnerPID=='"$APP_PID"'&&w.kCGWindowLayer==0).map(w=>w.kCGWindowNumber).join("")'
 }
 
 WINDOW_ID=$(get_window_id)
@@ -157,7 +166,7 @@ success "Window ID: $WINDOW_ID"
 log "Setting window size to ${WINDOW_WIDTH}x${WINDOW_HEIGHT}..."
 osascript <<EOF
 tell application "System Events"
-  tell process "Recon"
+  tell (first process whose unix id is $APP_PID)
     set position of window 1 to {$WINDOW_X, $WINDOW_Y}
     set size of window 1 to {$WINDOW_WIDTH, $WINDOW_HEIGHT}
   end tell
@@ -169,6 +178,17 @@ sleep 1
 WINDOW_ID=$(get_window_id)
 success "Window positioned (ID: $WINDOW_ID)"
 
+# Real left click at screen coordinates through Quartz events
+real_click() {
+  osascript -l JavaScript -e "ObjC.import('CoreGraphics');
+    var p = \$.CGPointMake($1, $2);
+    \$.CGEventPost(\$.kCGHIDEventTap, \$.CGEventCreateMouseEvent(null, \$.kCGEventMouseMoved, p, 0));
+    delay(0.05);
+    \$.CGEventPost(\$.kCGHIDEventTap, \$.CGEventCreateMouseEvent(null, \$.kCGEventLeftMouseDown, p, 0));
+    delay(0.05);
+    \$.CGEventPost(\$.kCGHIDEventTap, \$.CGEventCreateMouseEvent(null, \$.kCGEventLeftMouseUp, p, 0));" >/dev/null 2>&1 || true
+}
+
 # Helper to convert reference coordinates to screen coordinates
 # Reference: 1024x640 logical window
 # Actual: 1440x900 at position (100, 100)
@@ -178,18 +198,19 @@ click_ref() {
   local screen_x=$(( WINDOW_X + ref_x * WINDOW_WIDTH / REF_WIDTH ))
   local screen_y=$(( WINDOW_Y + ref_y * WINDOW_HEIGHT / REF_HEIGHT ))
   
-  # Bring Recon to front and wait until it really is frontmost. Without this,
+  # Bring the demo Recon to front and wait until it really is frontmost. Without this,
   # the first click can be swallowed while the window is still activating.
   for _try in 1 2 3 4 5 6 7 8 9 10; do
-    osascript -e 'tell application "System Events" to set frontmost of process "Recon" to true' 2>/dev/null
-    if [[ "$(osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null)" == "Recon" ]]; then
+    osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $APP_PID) to true" 2>/dev/null
+    if [[ "$(osascript -e 'tell application "System Events" to get unix id of first process whose frontmost is true' 2>/dev/null)" == "$APP_PID" ]]; then
       break
     fi
     sleep 0.3
   done
   
-  # Click at coordinates (ignore stderr which contains harmless -25208 and element name)
-  osascript -e "tell application \"System Events\" to click at {$screen_x, $screen_y}" 2>/dev/null || true
+  # Post a real mouse click. System Events' "click at" sends an accessibility
+  # press instead, which leaves WebKit's keyboard focus ring on clicked buttons.
+  real_click "$screen_x" "$screen_y"
   sleep 0.3
 }
 
@@ -250,7 +271,7 @@ open_table() {
   click_ref 45 135
   sleep 1.5
   # clear the filter so the whole table list shows, with the table highlighted
-  click_ref 167 111
+  click_ref 140 111
   # click empty sidebar space so the filter box loses its focus ring
   click_ref 100 520
   sleep 0.5
@@ -266,6 +287,23 @@ sleep 0.5
 
 # Click on customers table in the sidebar
 open_table customers
+
+# Filter to customers who signed up in October: open the filter panel, pick
+# created_at, choose "starts with", type the value, and press Escape, which
+# closes the suggestions and folds the panel into a filter chip
+click_ref 487 134
+sleep 1
+click_ref 268 278
+sleep 0.8
+click_ref 400 162
+sleep 0.8
+click_ref 378 223
+sleep 0.8
+click_ref 600 162
+osascript -e 'tell application "System Events" to keystroke "2026-10"' 2>/dev/null || true
+sleep 1
+osascript -e 'tell application "System Events" to key code 53' 2>/dev/null || true
+sleep 0.8
 
 capture_screenshot "02-table-browser" "Table browser with data grid"
 
@@ -287,7 +325,7 @@ sleep 0.2
 # Type query on one line (will be beautified)
 osascript <<'EOF'
 tell application "System Events"
-  keystroke "SELECT o.order_number, c.full_name AS customer, o.status, ROUND(o.total_cents / 100.0, 2) AS total, COUNT(oi.id) AS items FROM orders o JOIN customers c ON c.id = o.customer_id JOIN order_items oi ON oi.order_id = o.id GROUP BY o.id ORDER BY o.created_at DESC LIMIT 20;"
+  keystroke "SELECT o.order_number, c.full_name AS customer, o.status, printf('%.2f', o.total_cents / 100.0) AS total, COUNT(oi.id) AS items FROM orders o JOIN customers c ON c.id = o.customer_id JOIN order_items oi ON oi.order_id = o.id GROUP BY o.id ORDER BY o.created_at DESC LIMIT 20;"
 end tell
 EOF
 sleep 0.5
@@ -321,6 +359,9 @@ sleep 0.3
 # Click Fit to center the diagram
 click_ref 952 111
 sleep 1
+# click empty canvas so the Fit button loses its focus ring
+click_ref 150 560
+sleep 0.5
 
 capture_screenshot "04-schema-diagram" "Schema diagram with polymorphic edges"
 
@@ -338,6 +379,9 @@ open_table orders
 # Click Structure sub-tab
 click_ref 273 134
 sleep 1
+# click empty grid space so the Structure tab loses its focus ring
+click_ref 700 520
+sleep 0.5
 
 capture_screenshot "05-table-structure" "Table structure with columns and foreign keys"
 
@@ -445,7 +489,8 @@ log ""
 log "Cleaning up..."
 
 # Quit gracefully first
-osascript -e 'quit app "Recon"' 2>/dev/null || true
+# (by PID, so another running Recon, such as a dev build, is left alone)
+kill -TERM "$APP_PID" 2>/dev/null || true
 sleep 1
 
 # Force kill our demo instance if still running

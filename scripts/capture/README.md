@@ -12,7 +12,7 @@ The capture system creates an isolated environment for Recon:
    - Deliberately missing foreign keys (order_items.product_id → products.id has no FK constraint)
    - Believable fake data (no real people or companies)
 
-2. **Connection Setup** (`setup-demo-connection.ts`): Creates an isolated Tauri app data directory with a pre-configured SQLite connection pointing to the demo database.
+2. **Connection Setup** (`setup-demo-connection.ts`): Creates an isolated Tauri app data directory with a SQLite connection pointing to the demo database, plus two groups of fake connections (one per database type, on made-up `.internal`/`.test` hosts) so the dashboard shows groups and every driver icon. Only the SQLite connection is ever opened.
 
 3. **Capture Script** (`capture.sh`): Launches Recon with an isolated `HOME` environment variable, drives the UI using AppleScript/System Events to navigate through the five required screens, captures window screenshots with `screencapture -l`, and records a 10-15 second demo that's converted to an optimized GIF using ffmpeg's palettegen/paletteuse.
 
@@ -59,7 +59,7 @@ On macOS, Tauri's `app_data_dir()` resolves to `~/Library/Application Support/<i
 ### System Requirements
 
 - **macOS** with Apple Silicon (the app is Apple Silicon only)
-- **Recon 1.9.0** installed at `/Applications/Recon.app`
+- **Recon** installed at `/Applications/Recon.app`, or set `RECON_APP_PATH` to another `.app` (for example a build of the current source) to capture that instead
 - **Screen Recording permission** granted to Terminal (or whichever terminal app you use)
 - **Accessibility permission** granted to Terminal (for UI automation via System Events)
 
@@ -104,7 +104,7 @@ This will:
 4. Position and resize the window to 1440×900
 5. Navigate through the five required screens using coordinate-based clicking and capture each:
    - `docs/screenshots/01-connections.png` — Connection dashboard (before opening)
-   - `docs/screenshots/02-table-browser.png` — Table browser (customers, Data tab)
+   - `docs/screenshots/02-table-browser.png` — Table browser (customers, Data tab, filtered to `created_at` starting with `2026-10`)
    - `docs/screenshots/03-query-editor.png` — Query editor (SQL tab with beautified query and results)
    - `docs/screenshots/04-schema-diagram.png` — Schema diagram (with polymorphic edges on and Fit clicked)
    - `docs/screenshots/05-table-structure.png` — Table structure (orders table, Structure tab)
@@ -219,7 +219,7 @@ The GIF recording is optional. If it fails, the script continues and produces th
 1. **Purges demo-only keys** before and after each run (anything containing "demo-connection")
 2. **Saves the user's diagram preference** (`recon.diagramLinks`) before the capture
 3. **Sets all edge types on** (`{"foreign":true,"morph":true,"missing":true}`) for the diagram screenshot
-4. **Restores the original preference** on exit (even if the script fails)
+4. **Restores the original preference** on exit (even if the script fails), along with the `theme` key, which the app mirrors into that storage and the dark demo settings would otherwise overwrite
 
 This ensures:
 - Earlier capture runs don't leak open tabs or editor text into screenshots
@@ -228,21 +228,25 @@ This ensures:
 
 ### Coordinate-Based Clicking
 
-The app's UI is a webview, so accessibility-based clicking doesn't work. Instead, the script uses screen coordinate clicking via `osascript -e 'tell application "System Events" to click at {X,Y}'`.
+The app's UI is a webview, so accessibility-based clicking doesn't work. Instead, the script clicks screen coordinates with real mouse events (see below).
 
 Coordinates are defined relative to a 1024×640 reference window (the 2x retina capture downscaled):
 - Reference coordinates are converted to screen coordinates: `screen_x = 100 + ref_x * 1440 / 1024`
 - **The window must be frontmost before clicking**, and `click_ref` waits until Recon is actually frontmost (up to 10 retries)
 - **Warm-up clicks:** The first click after launch only activates the window and is swallowed, so the script clicks an empty area twice before real navigation
-- AppleScript stderr contains harmless `-25208` errors that name the clicked element; these are ignored
 
-**Verified click targets on Recon 1.9.0:**
+**Verified click targets on Recon 1.18.0:**
 - Connection list row 'Demo Store': (120, 181)
 - Tabs: Tables (62, 85), SQL (120, 85), Diagram (175, 85)
-- Table sidebar filter box: (92, 111), clear button: (167, 111), first table row: (45, 135)
+- Table sidebar filter box: (92, 111), clear button: (140, 111), first table row: (45, 135)
 - Data/Structure/Indexes sub-tabs: Data (219, 134), Structure (273, 134)
-- Diagram pills: '2 foreign keys' (305, 111), '2 polymorphic' (396, 111), '1 missing key' (476, 111), Fit (952, 111)
+- Filter button: (487, 134); in its panel, the `created_at` column in the column list (268, 278), operator menu (400, 162), "starts with" (378, 223), value field (600, 162)
+- Diagram Fit: (952, 111). All edge types are switched on through the stored `recon.diagramLinks` preference, not by clicking the pills
 - SQL editor: editor area (400, 200), Beautify (926, 133), Run (27, 133)
+
+Clicks are real mouse events posted through Quartz (`real_click`), not System Events' `click at`. `click at` sends an accessibility press, which leaves WebKit's keyboard focus ring on every button it touches. After clicking a button that would otherwise stay focused, such as Fit or Structure, the script clicks empty space so the screenshot has no focus ring.
+
+The script targets its own Recon by process ID, so another running Recon, such as a `target/debug` build from `tauri dev`, is left alone.
 
 ### Table Navigation with Sidebar Filter
 
@@ -255,6 +259,20 @@ The `open_table` helper uses the sidebar filter to navigate to tables by name (i
 
 This approach is more robust than clicking fixed sidebar coordinates if table order changes.
 
+### Capturing the current source
+
+The installed app may be older than the code. To capture what's on `main`, build it and wrap the binary in a copy of the installed bundle, so it keeps the `com.recon.app` identity and storage paths:
+
+```bash
+bun run tauri build --no-bundle
+cp -R /Applications/Recon.app /tmp/recon-demo/Recon.app
+cp src-tauri/target/release/Recon /tmp/recon-demo/Recon.app/Contents/MacOS/Recon
+codesign --force --deep -s - /tmp/recon-demo/Recon.app
+RECON_APP_PATH=/tmp/recon-demo/Recon.app ./scripts/capture/capture.sh
+```
+
+Update `CFBundleShortVersionString` in the copy's `Info.plist` too if you want the version to match.
+
 ### Window ID Detection
 
 The script uses inline JXA to find the CGWindowID needed for `screencapture -l`:
@@ -262,7 +280,7 @@ The script uses inline JXA to find the CGWindowID needed for `screencapture -l`:
 ```javascript
 ObjC.import("CoreGraphics"); 
 var l=ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly,0))); 
-l.filter(w=>w.kCGWindowOwnerName=="Recon"&&w.kCGWindowLayer==0).map(w=>w.kCGWindowNumber).join("")
+l.filter(w=>w.kCGWindowOwnerPID==APP_PID&&w.kCGWindowLayer==0).map(w=>w.kCGWindowNumber).join("")
 ```
 
 The window ID is queried twice: once after launch, and again after resizing (the ID can change).

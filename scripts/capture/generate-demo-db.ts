@@ -299,10 +299,16 @@ const streets = ["Main St", "Oak Ave", "Maple Dr", "Pine Ln", "Cedar Rd", "Elm S
 
 // Insert 50 customers
 const customerIds = [];
+const usedNames = new Set<string>();
 for (let i = 0; i < 50; i++) {
-  const firstName = rng.pick(firstNames);
-  const lastName = rng.pick(lastNames);
-  const email = `${firstName.toLowerCase()}.${lastName.toLowerCase()}${i > 0 ? i : ''}@example.test`;
+  // Re-pick until the name is new, so emails need no numeric suffix
+  let firstName: string, lastName: string;
+  do {
+    firstName = rng.pick(firstNames);
+    lastName = rng.pick(lastNames);
+  } while (usedNames.has(`${firstName} ${lastName}`));
+  usedNames.add(`${firstName} ${lastName}`);
+  const email = `${firstName.toLowerCase()}.${lastName.toLowerCase()}@example.test`;
   const phone = `555-${String(rng.nextInt(100, 999)).padStart(3, '0')}-${String(rng.nextInt(1000, 9999)).padStart(4, '0')}`;
   
   const result = db.run(
@@ -373,7 +379,8 @@ const productIds = [];
 for (let i = 0; i < 80; i++) {
   const name = productNames[i] || `Product ${i + 1}`;
   const sku = `SKU-${String(i + 1).padStart(4, '0')}`;
-  const price = rng.nextInt(5, 200) * 100;
+  // Shop-style prices such as 75.99 or 24.49
+  const price = rng.nextInt(5, 200) * 100 - rng.pick([1, 1, 51, 5]);
   const stock = rng.nextInt(0, 250);
   
   const result = db.run(

@@ -150,15 +150,15 @@ SSH tunnels use `/usr/bin/ssh` and HTTPS certificate downloads use `/usr/bin/cur
 ### Connection Dashboard
 
 <p align="center">
-  <img src="docs/screenshots/01-connections.png" alt="Connection dashboard with grouped connections" width="100%">
+  <img src="docs/screenshots/01-connections.png" alt="Connection dashboard with color-coded groups of MySQL, PostgreSQL, Redis, MongoDB, SingleStore, MariaDB, SQL Server, and SQLite connections" width="100%">
 </p>
 
-Organize database connections into groups with custom colors. All credentials are stored securely in the macOS Keychain, Windows Credential Manager, or the Linux system keyring.
+Organize database connections into color-coded groups, each labeled with its database type, and filter, collapse, or sort them. All credentials are stored securely in the macOS Keychain, Windows Credential Manager, or the Linux system keyring.
 
 ### Table Browser
 
 <p align="center">
-  <img src="docs/screenshots/02-table-browser.png" alt="Table browser with data grid and filter panel" width="100%">
+  <img src="docs/screenshots/02-table-browser.png" alt="Table browser showing customers filtered to October sign-ups" width="100%">
 </p>
 
 Browse table data with filtering, sorting, and inline editing. The visual filter builder supports complex conditions without writing SQL.
