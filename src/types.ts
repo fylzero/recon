@@ -5,6 +5,11 @@ export type Driver = "mysql" | "postgres" | "sqlite" | "mssql" | "redis" | "mong
 export type SslMode = "disable" | "prefer" | "require" | "verify-ca" | "verify-full";
 export type PasswordSource = "password" | "none" | "aws-iam" | "command";
 
+/** Servers that speak the MySQL protocol and use the MySQL driver, shown as their own type. */
+export type MysqlFlavor = "mariadb" | "singlestore";
+/** What the connection form offers and the app labels: a driver, or a MySQL flavor. */
+export type ConnectionKind = Driver | MysqlFlavor;
+
 export const DRIVER_OPTIONS: { id: Driver; label: string; defaultPort: number }[] = [
   { id: "mysql", label: "MySQL", defaultPort: 3306 },
   { id: "postgres", label: "PostgreSQL", defaultPort: 5432 },
@@ -21,6 +26,27 @@ export function isSqlDriver(driver: Driver) {
 
 export function driverLabel(driver: Driver) {
   return DRIVER_OPTIONS.find((option) => option.id === driver)?.label ?? driver;
+}
+
+export const KIND_OPTIONS: { id: ConnectionKind; driver: Driver; flavor?: MysqlFlavor; label: string }[] = [
+  { id: "mysql", driver: "mysql", label: "MySQL" },
+  { id: "postgres", driver: "postgres", label: "PostgreSQL" },
+  { id: "sqlite", driver: "sqlite", label: "SQLite" },
+  { id: "mssql", driver: "mssql", label: "SQL Server" },
+  { id: "redis", driver: "redis", label: "Redis" },
+  { id: "mariadb", driver: "mysql", flavor: "mariadb", label: "MariaDB" },
+  { id: "singlestore", driver: "mysql", flavor: "singlestore", label: "SingleStore" },
+  { id: "mongodb", driver: "mongodb", label: "MongoDB" },
+];
+
+export function connectionKind(entry: { driver: Driver; flavor?: MysqlFlavor | null }): ConnectionKind {
+  return entry.driver === "mysql" && entry.flavor ? entry.flavor : entry.driver;
+}
+
+/** "MariaDB" for a MariaDB connection, where driverLabel says "MySQL". */
+export function connectionLabel(entry: { driver: Driver; flavor?: MysqlFlavor | null }) {
+  const kind = connectionKind(entry);
+  return KIND_OPTIONS.find((option) => option.id === kind)?.label ?? entry.driver;
 }
 
 export type SshAuth = "password" | "key" | "agent";
@@ -73,6 +99,8 @@ export interface ConnectionEntry {
   id: string;
   name: string;
   driver: Driver;
+  /** MySQL only: the server is MariaDB or SingleStore. */
+  flavor?: MysqlFlavor;
   host: string;
   port: number;
   user: string;

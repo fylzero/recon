@@ -98,7 +98,9 @@ Recon is an open-source database client for macOS, Windows, and Linux, built wit
 - Row-level import and export options
 
 **Database Support**
-- **MySQL / MariaDB**: Full support with SSL/TLS
+- **MySQL**: Full support with SSL/TLS
+- **MariaDB**: Its own database type, using the MySQL driver. Logins that use the ed25519 or PARSEC authentication plugins aren't supported yet.
+- **SingleStore**: Its own database type, using the MySQL driver. Recon shows SingleStore's own version rather than the MySQL version it reports.
 - **PostgreSQL**: Complete feature set with SSL/TLS
 - **SQLite**: Local database file support with ability to create new databases
 - **SQL Server**: SQL Server 2022 and newer, signing in with a SQL Server login. Windows and Microsoft Entra ID authentication aren't supported yet. Connect to a named instance on its port rather than by `host\INSTANCE`.
@@ -276,7 +278,7 @@ This command:
 
 | Database | Connection details |
 | --- | --- |
-| MySQL / MariaDB | Host, port (3306), user, authentication (password, no password, AWS IAM, or password command), database, SSL mode |
+| MySQL / MariaDB / SingleStore | Host, port (3306), user, authentication (password, no password, AWS IAM, or password command), database, SSL mode |
 | PostgreSQL | Host, port (5432), user, authentication (password, no password, AWS IAM, or password command), database, SSL mode |
 | SQLite | A database file on disk (Recon can create a new one) |
 

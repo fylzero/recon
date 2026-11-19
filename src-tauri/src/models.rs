@@ -197,6 +197,24 @@ impl Driver {
     }
 }
 
+/// Servers that speak the MySQL protocol and connect through the MySQL driver, but show
+/// up as their own database type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MysqlFlavor {
+    Mariadb,
+    Singlestore,
+}
+
+impl MysqlFlavor {
+    pub fn label(self) -> &'static str {
+        match self {
+            MysqlFlavor::Mariadb => "MariaDB",
+            MysqlFlavor::Singlestore => "SingleStore",
+        }
+    }
+}
+
 pub const DEFAULT_SSH_PORT: u16 = 22;
 
 fn default_ssh_port() -> u16 {
@@ -283,6 +301,9 @@ pub struct ConnectionEntry {
     pub id: String,
     pub name: String,
     pub driver: Driver,
+    /// MySQL only: the server is MariaDB or SingleStore rather than MySQL itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flavor: Option<MysqlFlavor>,
     #[serde(default)]
     pub host: String,
     #[serde(default)]
@@ -329,6 +350,17 @@ pub struct ConnectionEntry {
 }
 
 impl ConnectionEntry {
+    /// The flavor that applies, which only a MySQL connection can have.
+    pub fn mysql_flavor(&self) -> Option<MysqlFlavor> {
+        self.flavor.filter(|_| self.driver == Driver::Mysql)
+    }
+
+    /// The database type to name in messages: MariaDB or SingleStore instead of MySQL.
+    pub fn type_label(&self) -> &'static str {
+        self.mysql_flavor()
+            .map_or_else(|| self.driver.label(), MysqlFlavor::label)
+    }
+
     pub fn verifies_certificate(&self) -> bool {
         self.ssl_mode.starts_with("verify-")
     }
@@ -547,6 +579,7 @@ mod tests {
                 id: "c1".into(),
                 name: "Local".into(),
                 driver: Driver::Postgres,
+                flavor: None,
                 host: "127.0.0.1".into(),
                 port: 5432,
                 user: "postgres".into(),
@@ -601,6 +634,22 @@ mod tests {
         assert!(!entry.cleartext_auth);
         assert_eq!(entry.password_source, PasswordSource::Password);
         assert!(entry.ssl_ca_path.is_empty());
+        assert_eq!(entry.flavor, None);
+        assert_eq!(entry.type_label(), "MySQL");
+        assert!(!serde_json::to_string(&entry).unwrap().contains("flavor"));
+
+        let maria: ConnectionEntry =
+            serde_json::from_str(r#"{"name":"m","driver":"mysql","flavor":"mariadb"}"#).unwrap();
+        assert_eq!(maria.mysql_flavor(), Some(MysqlFlavor::Mariadb));
+        assert_eq!(maria.type_label(), "MariaDB");
+        let store: ConnectionEntry =
+            serde_json::from_str(r#"{"name":"s","driver":"mysql","flavor":"singlestore"}"#)
+                .unwrap();
+        assert_eq!(store.type_label(), "SingleStore");
+        let stray: ConnectionEntry =
+            serde_json::from_str(r#"{"name":"p","driver":"postgres","flavor":"mariadb"}"#).unwrap();
+        assert_eq!(stray.mysql_flavor(), None);
+        assert_eq!(stray.type_label(), "PostgreSQL");
 
         let iam: ConnectionEntry =
             serde_json::from_str(r#"{"name":"rds","driver":"mysql","passwordSource":"aws-iam"}"#)

@@ -180,7 +180,7 @@ fn record(
     query_log::record(QueryRecord {
         connection_id: &session.entry.id,
         connection: &session.name,
-        driver: session.driver.label(),
+        driver: session.entry.type_label(),
         database: &namespace,
         sql,
         origin,
@@ -404,8 +404,23 @@ async fn open_session(
     };
     let dialect = dialect(session.driver);
     let setup = async {
-        let version =
+        let mut version =
             first_text(&pool_run(&session, dialect.version_sql(), 1, QueryOrigin::Schema).await?);
+        if session.driver == Driver::Mysql {
+            // Unlogged: it fails on MySQL and MariaDB, which is how SingleStore is told apart.
+            let memsql = if db::mysql::needs_memsql_version(&version) {
+                session
+                    .pool
+                    .run(db::mysql::MEMSQL_VERSION_SQL, 1)
+                    .await
+                    .ok()
+                    .map(|output| first_text(&output))
+            } else {
+                None
+            };
+            version =
+                db::mysql::version_label(session.entry.mysql_flavor(), &version, memsql.as_deref());
+        }
         let reported = first_text(
             &conn_run(
                 &session,
@@ -689,7 +704,7 @@ pub async fn create_database(
     let sql = dialect.create_namespace_sql(namespace).ok_or_else(|| {
         format!(
             "{} can't create a {} here.",
-            session.driver.label(),
+            session.entry.type_label(),
             dialect.namespace_label().to_lowercase()
         )
     })?;
@@ -713,7 +728,7 @@ pub async fn drop_database(
     }
     let sql = dialect
         .drop_namespace_sql(&namespace)
-        .ok_or_else(|| format!("{} can't drop a {label} here.", session.driver.label()))?;
+        .ok_or_else(|| format!("{} can't drop a {label} here.", session.entry.type_label()))?;
     pool_run(&session, &sql, 0, QueryOrigin::Schema).await?;
     session.forget_columns(Some(&namespace), None);
     Ok(())
@@ -831,6 +846,21 @@ async fn rename_mysql_database(session: &Session, from: &str, to: &str) -> Resul
             let _ = pool_run(session, &cleanup, 0, QueryOrigin::Schema).await;
             return Err(err);
         }
+    }
+    // Never drop a database that still holds something the move didn't take.
+    let left = first_text(
+        &pool_run(
+            session,
+            &db::mysql::relation_count_sql(from),
+            1,
+            QueryOrigin::Schema,
+        )
+        .await?,
+    );
+    if left.parse::<u64>().unwrap_or(1) > 0 {
+        return Err(format!(
+            "The tables moved to {to}, but {from} still holds {left} that couldn't be moved, so it was kept."
+        ));
     }
     let drop = format!("DROP DATABASE {}", db::quote_backtick(from));
     pool_run(session, &drop, 0, QueryOrigin::Schema).await?;
@@ -1969,7 +1999,7 @@ async fn save(session: Arc<Session>, requests: &[SaveRequest]) -> Result<usize, 
     query_log::record(QueryRecord {
         connection_id: &session.entry.id,
         connection: &session.name,
-        driver: session.driver.label(),
+        driver: session.entry.type_label(),
         database: &namespace,
         sql: &sql,
         origin: QueryOrigin::Edit,

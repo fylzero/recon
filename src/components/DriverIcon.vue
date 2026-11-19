@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { DRIVER_MARKS } from "../driverIcons";
-import type { Driver } from "../types";
+import type { ConnectionKind } from "../types";
 
-const props = defineProps<{ driver?: Driver }>();
+const props = defineProps<{ driver?: ConnectionKind }>();
 const mark = computed(() => (props.driver ? DRIVER_MARKS[props.driver] : undefined));
 </script>
 

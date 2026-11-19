@@ -2425,6 +2425,14 @@ body.reordering-repos .repo-row,
   color: var(--orange);
 }
 
+.driver-icon.driver-mariadb {
+  color: var(--warn);
+}
+
+.driver-icon.driver-singlestore {
+  color: var(--purple);
+}
+
 .driver-icon.driver-postgres {
   color: var(--blue);
 }
@@ -2507,7 +2515,7 @@ button.link-button:hover:not(:disabled) {
 /* Every database fits without scrolling: separate tiles, three to a row. */
 .driver-picker.segmented {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0.4rem;
   align-self: stretch;
   overflow: visible;

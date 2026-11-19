@@ -11,7 +11,7 @@ use super::{
     quote_backtick, run_raw, text_at, with_timeout, CellValue, ColumnChange, Conn, Dialect, Opened,
     Pool, RawOutput, CONNECT_TIMEOUT,
 };
-use crate::models::ConnectionEntry;
+use crate::models::{ConnectionEntry, MysqlFlavor};
 
 fn ssl_mode(mode: &str) -> MySqlSslMode {
     match mode {
@@ -86,8 +86,58 @@ pub async fn test(
     )))
     .await?;
     let version = run(&mut conn, MysqlDialect.version_sql(), 1, None).await;
+    let version = super::first_text(&version?);
+    let memsql = if needs_memsql_version(&version) {
+        run(&mut conn, MEMSQL_VERSION_SQL, 1, None)
+            .await
+            .ok()
+            .map(|output| super::first_text(&output))
+    } else {
+        None
+    };
     let _ = conn.close().await;
-    Ok(super::first_text(&version?))
+    Ok(version_label(
+        entry.mysql_flavor(),
+        &version,
+        memsql.as_deref(),
+    ))
+}
+
+/// SingleStore reports a MySQL version from VERSION(); its own is in this variable, which
+/// MySQL and MariaDB don't have.
+pub const MEMSQL_VERSION_SQL: &str = "SELECT @@memsql_version";
+
+pub fn needs_memsql_version(version: &str) -> bool {
+    !is_mariadb(version)
+}
+
+fn is_mariadb(version: &str) -> bool {
+    version.to_ascii_lowercase().contains("mariadb")
+}
+
+/// The version to show for a MySQL-protocol server. It names the server only when it isn't
+/// the one the connection was set up as, like a MariaDB server on a MySQL connection.
+pub fn version_label(flavor: Option<MysqlFlavor>, version: &str, memsql: Option<&str>) -> String {
+    let memsql = memsql.map(str::trim).filter(|value| !value.is_empty());
+    let (actual, number) = if let Some(number) = memsql {
+        (Some(MysqlFlavor::Singlestore), number.to_string())
+    } else if is_mariadb(version) {
+        // "11.8.3-MariaDB-ubu2404", or "5.5.5-10.11.6-MariaDB" from older servers.
+        let number = version
+            .split('-')
+            .rev()
+            .skip_while(|part| !part.eq_ignore_ascii_case("mariadb"))
+            .nth(1)
+            .unwrap_or(version);
+        (Some(MysqlFlavor::Mariadb), number.to_string())
+    } else {
+        (None, version.to_string())
+    };
+    if actual == flavor {
+        return number;
+    }
+    let product = actual.map_or("MySQL", MysqlFlavor::label);
+    format!("{product} {number}")
 }
 
 fn affected(result: &MySqlQueryResult) -> u64 {
@@ -204,10 +254,21 @@ pub fn charset_sql(database: &str) -> String {
     )
 }
 
+/// Everything that isn't a view. MariaDB also has SYSTEM VERSIONED tables and SEQUENCEs.
+const NOT_A_VIEW: &str = "TABLE_TYPE NOT IN ('VIEW', 'SYSTEM VIEW')";
+
 pub fn base_tables_sql(database: &str) -> String {
     format!(
         "SELECT TABLE_NAME FROM information_schema.TABLES \
-         WHERE TABLE_SCHEMA = {} AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME",
+         WHERE TABLE_SCHEMA = {} AND {NOT_A_VIEW} ORDER BY TABLE_NAME",
+        literal(database)
+    )
+}
+
+/// How many tables and views a database still holds.
+pub fn relation_count_sql(database: &str) -> String {
+    format!(
+        "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = {}",
         literal(database)
     )
 }
@@ -408,12 +469,18 @@ impl Dialect for MysqlDialect {
     }
 
     fn system_namespaces(&self) -> &'static [&'static str] {
-        &["information_schema", "mysql", "performance_schema", "sys"]
+        &[
+            "information_schema",
+            "mysql",
+            "performance_schema",
+            "sys",
+            "memsql",
+        ]
     }
 
     fn tables_sql(&self, namespace: &str) -> String {
         format!(
-            "SELECT TABLE_NAME, CASE WHEN TABLE_TYPE = 'BASE TABLE' THEN 'table' ELSE 'view' END \
+            "SELECT TABLE_NAME, CASE WHEN {NOT_A_VIEW} THEN 'table' ELSE 'view' END \
              FROM information_schema.TABLES WHERE TABLE_SCHEMA = {} ORDER BY TABLE_NAME",
             literal(namespace)
         )
@@ -513,6 +580,47 @@ impl Dialect for MysqlDialect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn labels_the_server_version() {
+        let maria = Some(MysqlFlavor::Mariadb);
+        let store = Some(MysqlFlavor::Singlestore);
+        assert_eq!(version_label(None, "8.4.13", None), "8.4.13");
+        assert_eq!(
+            version_label(maria, "11.8.3-MariaDB-ubu2404", None),
+            "11.8.3"
+        );
+        assert_eq!(
+            version_label(maria, "5.5.5-10.11.6-MariaDB", None),
+            "10.11.6"
+        );
+        assert_eq!(version_label(maria, "10.6.12-MariaDB-log", None), "10.6.12");
+        assert_eq!(
+            version_label(None, "11.8.3-MariaDB-ubu2404", None),
+            "MariaDB 11.8.3"
+        );
+        assert_eq!(version_label(store, "8.0.32", Some("8.9.3")), "8.9.3");
+        assert_eq!(
+            version_label(None, "8.0.32", Some("8.9.3")),
+            "SingleStore 8.9.3"
+        );
+        assert_eq!(version_label(maria, "8.4.13", None), "MySQL 8.4.13");
+        assert_eq!(version_label(store, "8.4.13", Some(" ")), "MySQL 8.4.13");
+        assert!(needs_memsql_version("8.0.32"));
+        assert!(!needs_memsql_version("11.8.3-MariaDB"));
+    }
+
+    #[test]
+    fn mariadb_versioned_tables_and_sequences_are_tables() {
+        // MariaDB reports them as SYSTEM VERSIONED and SEQUENCE, not BASE TABLE.
+        for sql in [base_tables_sql("app"), MysqlDialect.tables_sql("app")] {
+            assert!(
+                sql.contains("TABLE_TYPE NOT IN ('VIEW', 'SYSTEM VIEW')"),
+                "{sql}"
+            );
+            assert!(!sql.contains("= 'BASE TABLE'"), "{sql}");
+        }
+    }
 
     #[test]
     fn escapes_backslashes_in_literals() {

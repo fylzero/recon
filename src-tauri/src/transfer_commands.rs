@@ -296,7 +296,7 @@ async fn write_dump(
                     .run(dialect(session.driver).version_sql(), 1, None)
                     .await?,
             );
-            let server = format!("{} {version}", session.driver.label());
+            let server = format!("{} {version}", session.entry.type_label());
             let mut progress = export_progress(app, transfer_id);
             let mut dump = Dump::new(&mut sink, &transfer.cancel, &mut progress);
             dump::run(&mut conn, &server, namespace, tables, options, &mut dump).await?;
@@ -2045,7 +2045,7 @@ fn finish_file_run(
     query_log::record(QueryRecord {
         connection_id: &session.entry.id,
         connection: &session.name,
-        driver: session.driver.label(),
+        driver: session.entry.type_label(),
         database: namespace,
         sql,
         origin: QueryOrigin::Edit,

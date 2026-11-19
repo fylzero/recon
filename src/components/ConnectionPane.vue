@@ -23,6 +23,8 @@ import {
 import { baseName, shortcut } from "../platform";
 import { isTabularFile } from "../transfer";
 import {
+  connectionKind,
+  connectionLabel,
   driverLabel,
   type BackupInfo,
   type S3Location,
@@ -2788,10 +2790,10 @@ onUnmounted(() => {
     <div v-if="status !== 'connected'" class="connect-state">
       <div class="connect-card">
         <div class="connect-title">
-          <DriverIcon v-if="entry" :driver="entry.driver" />
+          <DriverIcon v-if="entry" :driver="connectionKind(entry)" />
           <strong>{{ entry?.name ?? "Connection" }}</strong>
         </div>
-        <p class="muted tiny">{{ entry ? `${driverLabel(entry.driver)} · ${subtitle}` : "" }}</p>
+        <p class="muted tiny">{{ entry ? `${connectionLabel(entry)} · ${subtitle}` : "" }}</p>
         <template v-if="status === 'connecting'">
           <p class="action-progress"><span class="spinner" aria-hidden="true" /> Connecting…</p>
         </template>
@@ -2833,7 +2835,7 @@ onUnmounted(() => {
     <template v-else>
       <header class="pane-header db-toolbar">
         <div class="db-toolbar-meta">
-          <DriverIcon v-if="entry" :driver="entry.driver" />
+          <DriverIcon v-if="entry" :driver="connectionKind(entry)" />
           <strong v-if="driver !== 'mysql'" class="db-toolbar-name" :title="entry?.name">
             {{ databaseTitle }}
           </strong>
@@ -2859,7 +2861,7 @@ onUnmounted(() => {
           <span class="muted tiny db-toolbar-version" :title="session?.serverVersion">
             {{ session?.serverVersion }}
           </span>
-          <span class="muted tiny db-toolbar-driver">{{ driverLabel(driver) }}</span>
+          <span class="muted tiny db-toolbar-driver">{{ entry ? connectionLabel(entry) : driverLabel(driver) }}</span>
           <div v-if="dirtyTabs.size" class="db-toolbar-actions">
             <span v-if="saving" class="spinner" aria-label="Saving" />
             <span class="tiny edit-status">{{ unsavedLabel }}</span>

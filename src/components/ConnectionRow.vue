@@ -9,7 +9,7 @@ import { useConnectionForm } from "../composables/useConnectionForm";
 import { useOverflowMenu } from "../composables/useOverflowMenu";
 import { useTabs } from "../composables/useTabs";
 import { fileManagerName, secretStoreName } from "../platform";
-import { driverLabel, type ConnectionEntry } from "../types";
+import { connectionKind, connectionLabel, type ConnectionEntry } from "../types";
 import DriverIcon from "./DriverIcon.vue";
 
 const lastConnectionClick = ref<string | null>(null);
@@ -154,9 +154,9 @@ async function onRemove() {
       </svg>
     </span>
     <span class="repo-identity">
-      <DriverIcon :driver="connection.driver" />
+      <DriverIcon :driver="connectionKind(connection)" />
       <span class="repo-name">{{ connection.name }}</span>
-      <span class="repo-label driver-badge">{{ driverLabel(connection.driver) }}</span>
+      <span class="repo-label driver-badge">{{ connectionLabel(connection) }}</span>
     </span>
     <span class="connection-target" :title="target">{{ target }}</span>
     <div class="overflow-menu repo-menu" @click.stop>

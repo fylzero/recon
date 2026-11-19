@@ -229,6 +229,7 @@ pub fn sanitize_connection(mut entry: ConnectionEntry) -> Result<ConnectionEntry
     } else {
         "prefer".into()
     };
+    entry.flavor = entry.mysql_flavor();
     if entry.driver != Driver::Mongo {
         entry.uri.clear();
         entry.auth_database.clear();
@@ -1039,12 +1040,14 @@ pub fn clear_query_history(state: State<AppState>, connection_id: String) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::MysqlFlavor;
 
     fn entry(driver: Driver) -> ConnectionEntry {
         ConnectionEntry {
             id: String::new(),
             name: String::new(),
             driver,
+            flavor: None,
             host: String::new(),
             port: 0,
             user: "root".into(),
@@ -1249,6 +1252,19 @@ mod tests {
         let mut postgres = entry(Driver::Postgres);
         postgres.cleartext_auth = true;
         assert!(!sanitize_connection(postgres).unwrap().cleartext_auth);
+    }
+
+    #[test]
+    fn only_mysql_keeps_a_flavor() {
+        let mut maria = entry(Driver::Mysql);
+        maria.flavor = Some(MysqlFlavor::Mariadb);
+        let maria = sanitize_connection(maria).unwrap();
+        assert_eq!(maria.flavor, Some(MysqlFlavor::Mariadb));
+        assert_eq!(maria.port, 3306);
+
+        let mut pg = entry(Driver::Postgres);
+        pg.flavor = Some(MysqlFlavor::Singlestore);
+        assert_eq!(sanitize_connection(pg).unwrap().flavor, None);
     }
 
     #[test]

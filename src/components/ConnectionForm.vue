@@ -11,9 +11,12 @@ import { baseName, passwordCommandShell, secretStoreFullName, secretStoreName } 
 import {
   DEFAULT_SSH_PORT,
   DRIVER_OPTIONS,
+  KIND_OPTIONS,
+  connectionKind,
   defaultSshTunnel,
   type ConnectionEntry,
   type Driver,
+  type MysqlFlavor,
   type PasswordSource,
   type ResolvedSshHost,
   type SshAuth,
@@ -51,6 +54,13 @@ function defaultUser(id: Driver) {
 }
 
 const driver = ref<Driver>(initial?.driver ?? "mysql");
+const flavor = ref<MysqlFlavor | undefined>(initial?.driver === "mysql" ? initial.flavor : undefined);
+const kind = computed(() => connectionKind({ driver: driver.value, flavor: flavor.value }));
+
+function pickKind(option: (typeof KIND_OPTIONS)[number]) {
+  driver.value = option.driver;
+  flavor.value = option.flavor;
+}
 const name = ref(initial?.name ?? "");
 const host = ref(initial?.host ?? "127.0.0.1");
 const port = ref<number>(initial?.port || 3306);
@@ -253,6 +263,10 @@ const passwordPlaceholder = computed(() => {
     return "Asked for each time you connect";
   }
   return hasSavedPassword.value ? `Saved in ${secretStoreName}` : "Password";
+});
+
+watch(flavor, () => {
+  testResult.value = null;
 });
 
 watch(driver, (next, previous) => {
@@ -502,6 +516,7 @@ function buildEntry(): ConnectionEntry {
     id: initial?.id ?? "",
     name: name.value.trim(),
     driver: driver.value,
+    flavor: driver.value === "mysql" ? flavor.value : undefined,
     host: isSqlite.value || usesUri.value ? "" : host.value.trim(),
     port: isSqlite.value ? 0 : Number(port.value) || 0,
     user: isSqlite.value ? "" : user.value.trim(),
@@ -671,13 +686,13 @@ async function submit(connectAfter: boolean) {
     <form class="connection-form" @submit.prevent="submit(false)">
       <div class="driver-picker segmented" role="radiogroup" aria-label="Database type">
         <button
-          v-for="option in DRIVER_OPTIONS"
+          v-for="option in KIND_OPTIONS"
           :key="option.id"
           type="button"
           role="radio"
-          :aria-checked="driver === option.id"
-          :class="{ active: driver === option.id }"
-          @click="driver = option.id"
+          :aria-checked="kind === option.id"
+          :class="{ active: kind === option.id }"
+          @click="pickKind(option)"
         >
           <DriverIcon :driver="option.id" />
           {{ option.label }}
