@@ -20,6 +20,7 @@ import {
   type SslMode,
 } from "../types";
 import AwsProfileField from "./AwsProfileField.vue";
+import DriverIcon from "./DriverIcon.vue";
 import Modal from "./Modal.vue";
 
 const SQLITE_FILTERS = [
@@ -35,7 +36,7 @@ const CERT_FILTERS = [
 const RDS_BUNDLE_URL = "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem";
 const RDS_HOST_REGION = /\.([a-z]{2}(?:-[a-z]+)+-\d+)\.rds\.amazonaws\.com$/i;
 
-const { groups, saveConnection, showToast } = useApp();
+const { saveConnection, showToast } = useApp();
 const { openConnection } = useTabs();
 const { formState, closeConnectionForm } = useConnectionForm();
 
@@ -68,7 +69,9 @@ const sslCaPath = ref(initial?.sslCaPath ?? "");
 const sslCertPath = ref(initial?.sslCertPath ?? "");
 const sslKeyPath = ref(initial?.sslKeyPath ?? "");
 const useClientCert = ref(Boolean(initial?.sslCertPath));
-const groupId = ref<string>(formState.value?.groupId ?? "");
+// Set when the form opened from a group, or editing a grouped connection. Connections move
+// between groups by dragging on the connections page, so the form only keeps this.
+const groupId = formState.value?.groupId ?? "";
 const colorPicked = ref(Boolean(initial?.headerColor));
 const headerColor = ref(initial?.headerColor || DEFAULT_HEADER_COLOR);
 const hasSavedPassword = ref(false);
@@ -456,7 +459,7 @@ function buildEntry(): ConnectionEntry {
     database: isSqlite.value ? "" : database.value.trim(),
     filePath: isSqlite.value ? filePath.value.trim() : "",
     sslMode: sslMode.value,
-    headerColor: !groupId.value && colorPicked.value ? headerColor.value : "",
+    headerColor: !groupId && colorPicked.value ? headerColor.value : "",
     savePassword: typesPassword.value && savePassword.value,
     cleartextAuth: usesCleartext.value,
     passwordSource: isSqlite.value ? "password" : passwordSource.value,
@@ -594,7 +597,7 @@ async function submit(connectAfter: boolean) {
   formError.value = "";
   try {
     const saved = await saveConnection(
-      groupId.value || null,
+      groupId || null,
       buildEntry(),
       passwordArg(),
       sshSecretArg(),
@@ -625,21 +628,36 @@ async function submit(connectAfter: boolean) {
           :class="{ active: driver === option.id }"
           @click="driver = option.id"
         >
+          <DriverIcon :driver="option.id" />
           {{ option.label }}
         </button>
       </div>
 
       <div class="form-grid">
-        <label class="modal-label span-2">
-          <span class="muted tiny">Name</span>
-          <input
-            ref="nameInput"
-            v-model="name"
-            type="text"
-            spellcheck="false"
-            :placeholder="isSqlite ? 'Defaults to the file name' : 'Defaults to user@host'"
-          />
-        </label>
+        <div class="modal-label span-2">
+          <label class="muted tiny" for="connection-name">Name</label>
+          <div class="name-row">
+            <input
+              id="connection-name"
+              ref="nameInput"
+              v-model="name"
+              type="text"
+              spellcheck="false"
+              :placeholder="isSqlite ? 'Defaults to the file name' : 'Defaults to user@host'"
+            />
+            <!-- A grouped connection takes its group's color. -->
+            <label v-if="!groupId" class="color-picker" title="Color">
+              <span class="color-picker-swatch" aria-hidden="true">
+                <input
+                  v-model="headerColor"
+                  type="color"
+                  aria-label="Color"
+                  @input="colorPicked = true"
+                />
+              </span>
+            </label>
+          </div>
+        </div>
 
         <template v-if="isSqlite">
           <label class="modal-label span-2">
@@ -942,26 +960,6 @@ async function submit(connectAfter: boolean) {
             </template>
           </template>
         </template>
-
-        <label class="modal-label">
-          <span class="muted tiny">Group</span>
-          <select v-model="groupId">
-            <option value="">No group</option>
-            <option v-for="group in groups" :key="group.id" :value="group.id">
-              {{ group.name }}
-            </option>
-          </select>
-        </label>
-        <div v-if="!groupId" class="modal-label">
-          <span class="muted tiny">Color</span>
-          <div class="color-choice">
-            <label class="color-picker">
-              <span class="color-picker-swatch" aria-hidden="true">
-                <input v-model="headerColor" type="color" @input="colorPicked = true" />
-              </span>
-            </label>
-          </div>
-        </div>
       </div>
 
       <p

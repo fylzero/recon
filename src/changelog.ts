@@ -6,6 +6,16 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.18.0",
+    date: "November 18, 2026",
+    notes: [
+      "Redis connections also work with Valkey, KeyDB, and Dragonfly. Choose Redis as the database type, and Recon shows which server it's connected to and its version, like Valkey 8.1.12.",
+      "Dragonfly keys no longer show 0 B in memory for small values; the size is left out when the server doesn't report it.",
+      "The database type picker in the connection form shows each database's icon, and the same icons appear in the connection list and tabs.",
+      "The connection form no longer has a Group menu. Drag a connection into a group on the connections page instead. The color choice moved next to Name.",
+    ],
+  },
+  {
     version: "1.17.0",
     date: "November 18, 2026",
     notes: [

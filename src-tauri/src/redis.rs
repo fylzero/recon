@@ -166,19 +166,75 @@ fn parse_info(text: &str) -> HashMap<String, String> {
         .collect()
 }
 
-async fn server_version(conn: &mut MultiplexedConnection) -> Result<String, String> {
+/// The server behind a Redis-protocol connection. Valkey, KeyDB, and Dragonfly
+/// all report a Redis compatibility version in `redis_version`, so the product
+/// and its own version come from the fields each one adds to `INFO server`.
+#[derive(Debug, PartialEq)]
+struct ServerVersion {
+    product: &'static str,
+    version: String,
+    mode: Option<String>,
+}
+
+impl ServerVersion {
+    fn from_info(info: &HashMap<String, String>) -> Self {
+        let field = |name: &str| info.get(name).map(String::as_str).unwrap_or("");
+        let valkey = field("valkey_version");
+        // Reported as "df-v1.25.1".
+        let dragonfly = field("dragonfly_version");
+        // KeyDB has no name or version field of its own; its redis_version is its version.
+        let keydb = field("executable").contains("keydb")
+            || field("features")
+                .split(',')
+                .any(|feature| feature == "cluster_mget");
+        let (product, version) = if !valkey.is_empty() {
+            ("Valkey", valkey)
+        } else if field("server_name") == "valkey" {
+            ("Valkey", field("redis_version"))
+        } else if !dragonfly.is_empty() {
+            (
+                "Dragonfly",
+                dragonfly.trim_start_matches("df-").trim_start_matches('v'),
+            )
+        } else if keydb {
+            ("KeyDB", field("redis_version"))
+        } else {
+            ("Redis", field("redis_version"))
+        };
+        let version = version.to_string();
+        // Valkey 8 renamed redis_mode to server_mode.
+        let mode = [field("server_mode"), field("redis_mode")]
+            .into_iter()
+            .find(|mode| !mode.is_empty() && *mode != "standalone")
+            .map(str::to_string);
+        Self {
+            product,
+            version,
+            mode,
+        }
+    }
+
+    /// For the toolbar: Redis shows its bare version, like the SQL drivers do,
+    /// and the compatible servers lead with their name.
+    fn label(&self) -> String {
+        let version = match self.product {
+            "Redis" => self.version.clone(),
+            product => format!("{product} {}", self.version),
+        };
+        match &self.mode {
+            Some(mode) => format!("{version} ({mode})"),
+            None => version,
+        }
+    }
+}
+
+async fn server_version(conn: &mut MultiplexedConnection) -> Result<ServerVersion, String> {
     let info: String = redis::cmd("INFO")
         .arg("server")
         .query_async(conn)
         .await
         .map_err(message)?;
-    let info = parse_info(&info);
-    let version = info.get("redis_version").cloned().unwrap_or_default();
-    let mode = info.get("redis_mode").map(String::as_str).unwrap_or("");
-    Ok(match mode {
-        "" | "standalone" => version,
-        mode => format!("{version} ({mode})"),
-    })
+    Ok(ServerVersion::from_info(&parse_info(&info)))
 }
 
 /// Called by `test_connection` once the password, TLS, and tunnel are ready.
@@ -190,8 +246,15 @@ pub async fn test(
     let db = target.database.parse().unwrap_or(0);
     let client = client_for(target, password, material, db)?;
     let mut conn = open_connection(&client, RESPONSE_TIMEOUT).await?;
-    let version = server_version(&mut conn).await?;
-    Ok(format!("Connected to Redis {version}"))
+    let server = server_version(&mut conn).await?;
+    let mode = server
+        .mode
+        .map(|mode| format!(" ({mode})"))
+        .unwrap_or_default();
+    Ok(format!(
+        "Connected to {} {}{mode}",
+        server.product, server.version
+    ))
 }
 
 impl RedisSession {
@@ -526,7 +589,7 @@ pub async fn redis_connect(
     let opened = async {
         let client = client_for(&target, password.as_deref(), &material, db)?;
         let mut conn = open_connection(&client, RESPONSE_TIMEOUT).await?;
-        let version = server_version(&mut conn).await?;
+        let version = server_version(&mut conn).await?.label();
         Ok::<_, String>((conn, version))
     }
     .await;
@@ -737,12 +800,14 @@ async fn key_info(session: &RedisSession, key: Bytes) -> Result<KeyInfo, String>
         Some(command) => session.read(redis::cmd(command).arg(&key)).await.ok(),
         None => None,
     };
-    // Either can be disabled by ACLs or on managed services.
+    // Either can be disabled by ACLs or on managed services, and Dragonfly has no OBJECT.
+    // Dragonfly reports 0 bytes for values it stores inline, so 0 means unknown.
     let memory = session
         .read::<Option<u64>>(redis::cmd("MEMORY").arg("USAGE").arg(&key))
         .await
         .ok()
-        .flatten();
+        .flatten()
+        .filter(|bytes| *bytes > 0);
     let encoding = session
         .read::<Option<String>>(redis::cmd("OBJECT").arg("ENCODING").arg(&key))
         .await
@@ -1572,6 +1637,36 @@ mod tests {
         let binary = Bytes::from_vec(vec![0xff, 0x00, 0x41]);
         assert_eq!(binary.hex.as_deref(), Some("ff0041"));
         assert_eq!(binary.to_vec().unwrap(), vec![0xff, 0x00, 0x41]);
+    }
+
+    #[test]
+    fn identifies_compatible_servers() {
+        let label = |info: &str| ServerVersion::from_info(&parse_info(info)).label();
+        // Trimmed from real INFO server replies.
+        assert_eq!(
+            label("# Server\r\nredis_version:7.4.12\r\nredis_mode:standalone\r\nexecutable:/data/redis-server\r\n"),
+            "7.4.12"
+        );
+        assert_eq!(
+            label("redis_version:7.2.4\r\nserver_name:valkey\r\nvalkey_version:8.1.12\r\nserver_mode:standalone\r\n"),
+            "Valkey 8.1.12"
+        );
+        assert_eq!(
+            label("redis_version:7.2.4\r\nserver_name:valkey\r\nvalkey_version:8.1.12\r\nserver_mode:cluster\r\n"),
+            "Valkey 8.1.12 (cluster)"
+        );
+        assert_eq!(
+            label("redis_version:6.3.4\r\nredis_mode:standalone\r\nexecutable:/data/keydb-server\r\nfeatures:cluster_mget\r\n"),
+            "KeyDB 6.3.4"
+        );
+        assert_eq!(
+            label("redis_version:7.4.0\r\ndragonfly_version:df-v2.1\r\nredis_mode:standalone\r\n"),
+            "Dragonfly 2.1"
+        );
+        assert_eq!(
+            label("redis_version:7.0.0\r\nredis_mode:sentinel\r\n"),
+            "7.0.0 (sentinel)"
+        );
     }
 
     #[test]

@@ -79,6 +79,7 @@ Recon is an open-source database client for macOS, Windows, and Linux, built wit
 - Create, rename, expire, and delete keys, including several at once
 - A command console with history, for anything the browser doesn't cover
 - Works over SSH tunnels and TLS, and with ACL users
+- Also works with Valkey, KeyDB, and Dragonfly
 
 **Data Import & Export**
 - Export tables to SQL, CSV, or JSON formats
@@ -93,6 +94,7 @@ Recon is an open-source database client for macOS, Windows, and Linux, built wit
 - **PostgreSQL**: Complete feature set with SSL/TLS
 - **SQLite**: Local database file support with ability to create new databases
 - **SQL Server**: SQL Server 2022 and newer, signing in with a SQL Server login. Windows and Microsoft Entra ID authentication aren't supported yet. Connect to a named instance on its port rather than by `host\INSTANCE`.
+- **Redis / Valkey / KeyDB / Dragonfly**: Redis 6 and newer, and the servers compatible with it. Choose Redis as the driver; Recon detects which server it's connected to. Dragonfly doesn't report a key's encoding, or the memory used by small values.
 
 ## Download & Installation
 
