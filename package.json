@@ -1,14 +1,15 @@
 {
   "name": "recon",
   "private": true,
-  "version": "1.19.2",
+  "version": "1.19.3",
   "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
-    "tauri": "PATH=\"$HOME/.cargo/bin:$PATH\" tauri"
+    "tauri": "PATH=\"$HOME/.cargo/bin:$PATH\" tauri",
+    "update:all": "bun update && cd src-tauri && PATH=\"$HOME/.cargo/bin:$PATH\" cargo update"
   },
   "dependencies": {
     "@codemirror/lang-json": "^6.0.2",
