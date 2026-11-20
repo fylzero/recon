@@ -6,6 +6,13 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.19.1",
+    date: "November 19, 2026",
+    notes: [
+      "On macOS 26 and later, the app icon fills its rounded square on a dark olive background instead of sitting on a plain grey tile in the Dock, Finder, and Launchpad.",
+    ],
+  },
+  {
     version: "1.19.0",
     date: "November 19, 2026",
     notes: [
