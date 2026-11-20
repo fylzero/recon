@@ -1630,10 +1630,9 @@ button.tab-transfer.attention:hover:not(:disabled) {
 }
 
 .brand-icon {
-  width: 4.5rem;
-  height: 4.5rem;
-  border-radius: 0.75rem;
-  object-fit: cover;
+  width: 9rem;
+  height: 9rem;
+  object-fit: contain;
   flex-shrink: 0;
 }
 
@@ -1653,7 +1652,7 @@ button.tab-transfer.attention:hover:not(:disabled) {
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  margin-bottom: 3rem;
+  margin-bottom: 1.5rem;
 }
 
 .groups-display {

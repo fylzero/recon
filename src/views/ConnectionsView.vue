@@ -205,8 +205,7 @@ async function sortAlphabetically() {
     <div class="groups-inner">
       <div class="groups-header">
         <div class="brand">
-          <img class="brand-icon" src="/app-icon.png" alt="" width="72" height="72" />
-          Recon
+          <img class="brand-icon" src="/app-icon.png" alt="Recon" width="144" height="144" />
         </div>
       </div>
 
