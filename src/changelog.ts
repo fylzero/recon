@@ -6,6 +6,13 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.19.2",
+    date: "November 20, 2026",
+    notes: [
+      "Recon has a refreshed app icon and logo, with the database next to the Recon name now in yellow.",
+    ],
+  },
+  {
     version: "1.19.1",
     date: "November 19, 2026",
     notes: [
