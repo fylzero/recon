@@ -1,8 +1,6 @@
 <p align="center">
-  <img src="app-icon.png" alt="Recon" width="160" height="160">
+  <img src="app-icon.png" alt="Recon" width="240" height="240">
 </p>
-
-<h1 align="center">Recon</h1>
 
 <p align="center">
   A database client for macOS, Windows, and Linux. Connect to MySQL, PostgreSQL, SQLite, SQL Server, Redis, and MongoDB with built-in drivers—no additional software required. No account, no cloud: your connections stay on your machine, and your credentials stay in the macOS Keychain, Windows Credential Manager, or the Linux system keyring.
