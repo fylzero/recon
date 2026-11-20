@@ -1757,6 +1757,20 @@ function filterOnColumn() {
   });
 }
 
+async function copyColumnName() {
+  const name = headerMenu.value ? columns.value[headerMenu.value.col]?.name : undefined;
+  closeGridMenus();
+  if (!name) {
+    return;
+  }
+  try {
+    await writeClipboard(name);
+    showToast(`Copied “${name}”`);
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+}
+
 function sortFromMenu(dir: SortDirection | null) {
   const name = headerMenu.value ? columns.value[headerMenu.value.col]?.name : undefined;
   closeGridMenus();
@@ -2318,6 +2332,10 @@ defineExpose({ refresh, pendingChanges, markSaved, discard, showStructure });
           </button>
         </template>
         <template v-else-if="headerMenu">
+          <button class="overflow-menu-item" type="button" role="menuitem" @click="copyColumnName">
+            Copy column name
+          </button>
+          <div class="overflow-menu-divider" role="separator" />
           <button class="overflow-menu-item" type="button" role="menuitem" :disabled="!menuColumn" @click="filterOnColumn">
             Filter on {{ menuColumn?.name ?? "column" }}…
           </button>

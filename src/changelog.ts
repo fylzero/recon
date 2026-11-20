@@ -6,6 +6,13 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.19.0",
+    date: "November 19, 2026",
+    notes: [
+      "Right-click a column name in a table and choose Copy column name to copy it.",
+    ],
+  },
+  {
     version: "1.18.1",
     date: "November 19, 2026",
     notes: [
