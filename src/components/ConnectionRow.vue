@@ -156,8 +156,8 @@ async function onRemove() {
     <span class="repo-identity">
       <DriverIcon :driver="connectionKind(connection)" />
       <span class="repo-name">{{ connection.name }}</span>
-      <span class="repo-label driver-badge">{{ connectionLabel(connection) }}</span>
     </span>
+    <span class="connection-driver">{{ connectionLabel(connection) }}</span>
     <span class="connection-target" :title="target">{{ target }}</span>
     <div class="overflow-menu repo-menu" @click.stop>
       <button

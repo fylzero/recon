@@ -24,7 +24,8 @@ type UtilityPanel = "settings" | "changelog";
 export interface AppTab {
   id: string;
   title: string;
-  badge?: string;
+  group?: string;
+  detail?: string;
   closable: boolean;
   accentColor?: string;
 }
@@ -85,12 +86,13 @@ export function useTabs() {
     { id: CONNECTIONS_TAB_ID, title: "Connections", closable: false },
     ...connectionTabs.value.map((tab) => {
       const match = findConnection(tab.connectionId);
-      const title = liveTitles.value[tab.id] || tab.title;
-      const name = match?.connection.name.trim();
+      const title = match?.connection.name.trim() || tab.title;
+      const database = liveTitles.value[tab.id];
       return {
         id: tab.id,
         title,
-        badge: match?.group && name && name !== title ? name : undefined,
+        group: match?.group?.name.trim() || undefined,
+        detail: database && database !== title ? database : undefined,
         closable: true,
         accentColor: match?.group
           ? match.group.headerColor || DEFAULT_HEADER_COLOR

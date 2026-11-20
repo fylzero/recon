@@ -11,6 +11,9 @@ export const CHANGELOG: ChangelogRelease[] = [
     notes: [
       "Right-click a column name in a table and choose Copy column name to copy it.",
       "Right-clicking somewhere without its own menu no longer shows the Reload and Inspect Element menu. Text fields still have their usual cut, copy, and paste menu.",
+      "The connections page shows each connection's database type, like MySQL or SQLite, as plain text in a column of its own instead of a badge next to the name, so the types line up down the list.",
+      "Tabs are titled with the connection's name, like the connections page, with the open database's name after it in grey. A connection in a group shows the group name first, like Deskninja / local, so two connections with the same name are easy to tell apart.",
+      "Tab titles are no longer cut short. Tabs grow to fit their names, and the tab bar scrolls sideways when they don't all fit.",
     ],
   },
   {

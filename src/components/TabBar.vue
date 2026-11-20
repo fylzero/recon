@@ -129,8 +129,10 @@ onBeforeUnmount(endReorder);
           />
         </svg>
         <DriverIcon v-else class="tab-icon" :driver="findConnection(tab.id)?.connection.driver" />
+        <span v-if="tab.group" class="tab-group">{{ tab.group }}</span>
+        <span v-if="tab.group" class="tab-group-separator" aria-hidden="true">/</span>
         <span class="tab-title">{{ tab.title }}</span>
-        <span v-if="tab.badge" class="repo-label tab-badge" :title="tab.badge">{{ tab.badge }}</span>
+        <span v-if="tab.detail" class="tab-detail" :title="tab.detail">{{ tab.detail }}</span>
         <button
           v-for="job in jobsFor(tab.id)"
           :key="job.id"
@@ -148,7 +150,7 @@ onBeforeUnmount(endReorder);
           v-if="tab.closable"
           class="tab-close"
           type="button"
-          :aria-label="`Close ${tab.title}`"
+          :aria-label="`Close ${tab.group ? `${tab.group} ${tab.title}` : tab.title}`"
           @click.stop="closeTab(tab.id)"
         >
           ×

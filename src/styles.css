@@ -1502,8 +1502,8 @@ button.tab-tool.update:hover:not(:disabled) {
 .tab {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 0.4rem;
-  max-width: 200px;
   padding: 0.4rem 0.75rem;
   border-right: 1px solid var(--border);
   color: var(--muted);
@@ -1559,16 +1559,30 @@ button.tab-tool.update:hover:not(:disabled) {
 }
 
 .tab-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
+  flex-shrink: 0;
   white-space: nowrap;
   font-weight: 600;
 }
 
-.tab-badge {
-  flex-shrink: 1;
-  min-width: 2.5rem;
-  max-width: 8rem;
+.tab-group {
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.tab-group-separator {
+  flex-shrink: 0;
+  margin: 0 -0.15rem;
+  color: var(--muted);
+  opacity: 0.6;
+}
+
+.tab-detail {
+  flex-shrink: 0;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .tab-close {
@@ -2457,7 +2471,7 @@ body.reordering-repos .repo-row,
 }
 
 .repo-row.connection-row {
-  grid-template-columns: 1.35rem minmax(160px, 1fr) minmax(8rem, 1.1fr) 1.75rem;
+  grid-template-columns: 1.35rem minmax(160px, 1fr) 6.5rem minmax(8rem, 1.1fr) 1.75rem;
 }
 
 .connection-target {
@@ -2470,6 +2484,17 @@ body.reordering-repos .repo-row,
   font-size: 11.5px;
 }
 
+.connection-driver {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.repo-row.colored .connection-driver,
 .repo-row.colored .connection-target {
   color: inherit;
   opacity: 0.78;
