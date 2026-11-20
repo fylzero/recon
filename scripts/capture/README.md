@@ -235,8 +235,8 @@ Coordinates are defined relative to a 1024×640 reference window (the 2x retina 
 - **The window must be frontmost before clicking**, and `click_ref` waits until Recon is actually frontmost (up to 10 retries)
 - **Warm-up clicks:** The first click after launch only activates the window and is swallowed, so the script clicks an empty area twice before real navigation
 
-**Verified click targets on Recon 1.18.0:**
-- Connection list row 'Demo Store': (120, 181)
+**Verified click targets on Recon 1.18.1:**
+- Connection list row 'Demo Store': (120, 211)
 - Tabs: Tables (62, 85), SQL (120, 85), Diagram (175, 85)
 - Table sidebar filter box: (92, 111), clear button: (140, 111), first table row: (45, 135)
 - Data/Structure/Indexes sub-tabs: Data (219, 134), Structure (273, 134)

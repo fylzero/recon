@@ -258,7 +258,7 @@ capture_screenshot "01-connections" "Connection dashboard"
 
 # Open the demo connection
 log "Opening Demo Store connection..."
-click_ref 120 181
+click_ref 120 211
 sleep 2.5
 
 # Open a table by typing its name in the sidebar filter and clicking the first
@@ -412,7 +412,7 @@ if [[ -z "$ONLY_SHOT" ]]; then
       sleep 1
       
       # Open connection again
-      click_ref 120 181
+      click_ref 120 211
       sleep 2
       
       # Show customers table
