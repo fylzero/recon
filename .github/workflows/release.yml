@@ -6,13 +6,9 @@ on:
     tags:
       - "v*"
 
-env:
-  RELEASE_BODY: >-
-    macOS: download Recon-macos-arm64.dmg for Apple Silicon Macs.
-    Linux: download Recon-linux-x64.AppImage, .deb, or .rpm for Intel and AMD PCs,
-    or the Recon-linux-arm64 files for ARM.
-    Windows: download Recon-windows-x64.exe for Intel and AMD PCs, or Recon-windows-arm64.exe for ARM.
-    The Windows installer isn't code-signed yet, so SmartScreen may warn: click More info, then Run anyway.
+# The release body comes from src/changelog.ts (the in-app Changelog) through
+# scripts/release-notes.ts, which also adds the download instructions. A version
+# without a changelog entry fails at the Release notes step, before building.
 
 jobs:
   macos:
@@ -62,6 +58,15 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 
+      - name: Release notes
+        shell: bash
+        run: |
+          {
+            echo "RELEASE_NOTES<<__RELEASE_NOTES__"
+            bun scripts/release-notes.ts
+            echo "__RELEASE_NOTES__"
+          } >> "$GITHUB_ENV"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -85,7 +90,7 @@ jobs:
           tauriScript: bash scripts/build-macos-release.sh
           tagName: v__VERSION__
           releaseName: Recon v__VERSION__
-          releaseBody: ${{ env.RELEASE_BODY }}
+          releaseBody: ${{ env.RELEASE_NOTES }}
           releaseDraft: false
           prerelease: false
           uploadUpdaterJson: true
@@ -138,6 +143,15 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 
+      - name: Release notes
+        shell: bash
+        run: |
+          {
+            echo "RELEASE_NOTES<<__RELEASE_NOTES__"
+            bun scripts/release-notes.ts
+            echo "__RELEASE_NOTES__"
+          } >> "$GITHUB_ENV"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -158,7 +172,7 @@ jobs:
           tauriScript: bun run tauri
           tagName: v__VERSION__
           releaseName: Recon v__VERSION__
-          releaseBody: ${{ env.RELEASE_BODY }}
+          releaseBody: ${{ env.RELEASE_NOTES }}
           releaseDraft: false
           prerelease: false
           uploadUpdaterJson: true
@@ -185,6 +199,15 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 
+      - name: Release notes
+        shell: bash
+        run: |
+          {
+            echo "RELEASE_NOTES<<__RELEASE_NOTES__"
+            bun scripts/release-notes.ts
+            echo "__RELEASE_NOTES__"
+          } >> "$GITHUB_ENV"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -209,7 +232,7 @@ jobs:
           tauriScript: bunx tauri
           tagName: v__VERSION__
           releaseName: Recon v__VERSION__
-          releaseBody: ${{ env.RELEASE_BODY }}
+          releaseBody: ${{ env.RELEASE_NOTES }}
           releaseDraft: false
           prerelease: false
           uploadUpdaterJson: true

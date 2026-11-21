@@ -27,6 +27,9 @@ jobs:
       - name: Type check
         run: bunx vue-tsc --noEmit
 
+      - name: Changelog has notes for this version
+        run: bun scripts/release-notes.ts > /dev/null
+
   backend:
     name: Backend Check
     runs-on: ubuntu-latest
