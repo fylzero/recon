@@ -1624,6 +1624,15 @@ button.tab-transfer.attention:hover:not(:disabled) {
   flex-shrink: 0;
 }
 
+.brand-icon.brand-light,
+:root[data-theme="light"] .brand-icon.brand-dark {
+  display: none;
+}
+
+:root[data-theme="light"] .brand-icon.brand-light {
+  display: block;
+}
+
 .groups-page {
   height: 100%;
   overflow: auto;

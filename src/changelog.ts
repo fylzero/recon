@@ -6,6 +6,13 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.19.4",
+    date: "November 22, 2026",
+    notes: [
+      "In the light theme, the logo on the connections page sits on its dark rounded tile, so it no longer shows rough dark edges and pale lettering on the light background.",
+    ],
+  },
+  {
     version: "1.19.3",
     date: "November 20, 2026",
     notes: [
