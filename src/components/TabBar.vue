@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref } from "vue";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { onBeforeUnmount, onMounted, ref } from "vue";
 import { useApp } from "../composables/useApp";
 import { CHANGELOG_TAB_ID, CONNECTIONS_TAB_ID, SETTINGS_TAB_ID, useTabs } from "../composables/useTabs";
 import { useTransfers } from "../composables/useTransfers";
 import { useUpdater } from "../composables/useUpdater";
+import { isMac } from "../platform";
 import DriverIcon from "./DriverIcon.vue";
 
 const { tabs, activeId, activate, closeTab, openSettings, isReorderable, moveTab } = useTabs();
@@ -74,12 +76,37 @@ function endReorder() {
   window.removeEventListener("pointercancel", endReorder);
 }
 
-onBeforeUnmount(endReorder);
+/** macOS hides the window buttons in full screen, so the room left for them goes too. */
+const fullscreen = ref(false);
+let stopWatchingResize: (() => void) | undefined;
+
+onMounted(async () => {
+  if (!isMac) {
+    return;
+  }
+  const appWindow = getCurrentWindow();
+  const update = async () => {
+    fullscreen.value = await appWindow.isFullscreen();
+  };
+  await update();
+  stopWatchingResize = await appWindow.onResized(update);
+});
+
+onBeforeUnmount(() => {
+  endReorder();
+  stopWatchingResize?.();
+});
 </script>
 
 <template>
-  <div class="tab-bar" role="tablist" aria-label="Open views">
-    <div ref="tabList" class="tab-list" :class="{ reordering: draggingId }">
+  <div
+    class="tab-bar"
+    :class="{ 'window-controls': isMac && !fullscreen }"
+    role="tablist"
+    aria-label="Open views"
+    data-tauri-drag-region
+  >
+    <div ref="tabList" class="tab-list" :class="{ reordering: draggingId }" data-tauri-drag-region>
       <div
         v-for="tab in tabs"
         :key="tab.id"

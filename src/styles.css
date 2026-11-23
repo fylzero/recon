@@ -1420,6 +1420,13 @@ input[type="search"].diagram-search {
   user-select: none;
 }
 
+/* Room for the macOS close, minimize, and zoom buttons, which sit in the tab bar. */
+.tab-bar.window-controls::before {
+  content: "";
+  flex: 0 0 84px;
+  border-right: 1px solid var(--border);
+}
+
 .tab-list {
   display: flex;
   flex: 1;

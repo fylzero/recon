@@ -6,6 +6,13 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.19.4",
+    date: "November 23, 2026",
+    notes: [
+      "On macOS, the close, minimize, and zoom buttons sit at the left of the tab bar instead of in a separate title bar above it, like Lockshot and Shipyard. Drag the window by an empty part of the tab bar, or double-click it to zoom. In full screen the tabs start at the left edge.",
+    ],
+  },
+  {
     version: "1.19.3",
     date: "November 22, 2026",
     notes: [
