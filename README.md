@@ -113,6 +113,14 @@ Download the latest release:
 
 **[⬇️ Download Recon for macOS (Apple Silicon)](https://github.com/fylzero/recon/releases/latest/download/Recon-macos-arm64.dmg)**
 
+Or install it with [Homebrew](https://brew.sh):
+
+```sh
+brew install fylzero/tap/recon
+```
+
+Recon updates itself, so Homebrew leaves upgrades to it. If Recon is already in Applications, add `--force` so Homebrew takes it over.
+
 Current macOS builds are **Apple Silicon only**. Releases are signed with a Developer ID certificate and notarized by Apple.
 
 ### Windows (x64 and ARM64)
