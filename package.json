@@ -1,7 +1,7 @@
 {
   "name": "recon",
   "private": true,
-  "version": "1.19.6",
+  "version": "1.19.7",
   "license": "MIT",
   "type": "module",
   "scripts": {

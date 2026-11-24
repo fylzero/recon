@@ -6,6 +6,13 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.19.7",
+    date: "November 23, 2026",
+    notes: [
+      "On macOS, the Recon icon in the Dock and the Command-Tab switcher now follows the system's rounded-square shape exactly, so the thin lines along its top and bottom edges are gone.",
+    ],
+  },
+  {
     version: "1.19.6",
     date: "November 23, 2026",
     notes: [
