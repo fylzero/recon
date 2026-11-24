@@ -210,9 +210,6 @@ async function sortAlphabetically() {
           <img class="brand-icon brand-dark" src="/app-icon.png" alt="Recon" width="144" height="144" />
           <img class="brand-icon brand-light" src="/app-icon-light.png" alt="Recon" width="144" height="144" />
         </div>
-      </div>
-
-      <div class="groups-display">
         <div class="groups-toolbar">
           <div class="toolbar-start">
             <button class="primary" type="button" @click="openNewConnection(null)">
@@ -285,7 +282,9 @@ async function sortAlphabetically() {
             </button>
           </div>
         </div>
+      </div>
 
+      <div class="groups-display">
         <p v-if="isEmpty && !creating" class="muted">
           Add a MySQL, PostgreSQL, SQLite, or SQL Server connection. Groups keep related connections together.
         </p>

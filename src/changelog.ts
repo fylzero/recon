@@ -10,6 +10,7 @@ export const CHANGELOG: ChangelogRelease[] = [
     date: "November 23, 2026",
     notes: [
       "On macOS, Recon has a new icon in the Dock and the Command-Tab switcher, so it's easier to tell apart from Dispatch, Lockshot, and Shipyard at a glance. The logo inside the app and everywhere else is unchanged.",
+      "On the Connections page, New connection, New group, the filter, Expand, Collapse, and Sort A–Z moved up beside the logo, lined up with its wordmark, so the list starts right under the logo instead of below an empty band.",
     ],
   },
   {
