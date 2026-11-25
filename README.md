@@ -129,7 +129,7 @@ Current macOS builds are **Apple Silicon only**. Releases are signed with a Deve
 
 Run the installer. It installs Recon for your user account without asking for administrator rights, and **Help → Check for Updates…** keeps it current. On ARM PCs, like Snapdragon laptops, use [Recon-windows-arm64.exe](https://github.com/fylzero/recon/releases/latest/download/Recon-windows-arm64.exe) instead.
 
-The installer isn't code-signed yet, so Windows SmartScreen may say **Windows protected your PC**. Click **More info**, then **Run anyway**.
+The installer is signed by RazorKode LLC. Right after a new release, Windows SmartScreen may still say **Windows protected your PC** until the release builds up downloads. If it does, click **More info**, then **Run anyway**.
 
 Saved passwords go to Windows Credential Manager. SSH tunnels through a ProxyJump or ProxyCommand host use Windows' built-in OpenSSH client, which Windows 10 and 11 install by default, and password commands run in `cmd`.
 
