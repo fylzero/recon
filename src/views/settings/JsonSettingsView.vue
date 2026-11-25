@@ -34,6 +34,7 @@ const {
   machineStats,
   temperatureUnit,
   notifications,
+  autoCheckUpdates,
   windowState,
   replaceSettings,
   showToast,
@@ -223,6 +224,7 @@ watch(
     machineStats,
     temperatureUnit,
     notifications,
+    autoCheckUpdates,
     windowState,
   ],
   () => {

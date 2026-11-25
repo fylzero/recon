@@ -174,6 +174,8 @@ export interface AppData {
   autoApplyFilters?: boolean;
   multithreadedImport?: boolean;
   notifications?: NotificationMode;
+  /** Look for a new release at launch and every few hours, and say when one is ready. */
+  autoCheckUpdates?: boolean;
   machineStats?: boolean;
   temperatureUnit?: TemperatureUnit;
   window?: WindowState;
@@ -248,6 +250,8 @@ export interface PreferencesPatch {
   autoApplyFilters?: boolean;
   multithreadedImport?: boolean;
   notifications?: NotificationMode;
+  /** Look for a new release at launch and every few hours, and say when one is ready. */
+  autoCheckUpdates?: boolean;
   machineStats?: boolean;
   temperatureUnit?: TemperatureUnit;
 }

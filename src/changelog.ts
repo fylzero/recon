@@ -6,6 +6,17 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.20.0",
+    date: "November 25, 2026",
+    notes: [
+      "Recon checks for updates on its own: when it starts and every few hours after. When a new version is ready, the update icon appears in the tab bar and Recon asks whether to install it. Nothing installs without your OK.",
+      "If an update turns up while Recon is in the background, you get a system notification, and the install prompt opens when you come back to it.",
+      "An update found while you're working doesn't interrupt you. The tab bar icon appears right away, and the prompt waits until you next come back to the window.",
+      "Turn this off with Check for updates automatically in General settings. Check for Updates… in the menu still works either way.",
+      "Later is remembered across restarts. Automatic checks wait a day before asking about that version again, while Check for Updates… always asks.",
+    ],
+  },
+  {
     version: "1.19.8",
     date: "November 23, 2026",
     notes: [

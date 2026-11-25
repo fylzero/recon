@@ -19,6 +19,7 @@ const {
   maxAutoColumnWidth,
   autoApplyFilters,
   notifications,
+  autoCheckUpdates,
   savePreferences,
   showToast,
 } = useApp();
@@ -125,6 +126,23 @@ function selectValue(event: Event) {
               @change="save({ autoApplyFilters: ($event.target as HTMLInputElement).checked })"
             />
             <span>{{ autoApplyFilters ? "On" : "Off" }}</span>
+          </label>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <h3>Check for updates automatically</h3>
+            <p class="muted tiny">
+              Looks for a new version when Recon starts and every few hours. You get a notification
+              when one is ready, and Recon asks before installing it.
+            </p>
+          </div>
+          <label class="settings-control checkbox-row">
+            <input
+              type="checkbox"
+              :checked="autoCheckUpdates"
+              @change="save({ autoCheckUpdates: ($event.target as HTMLInputElement).checked })"
+            />
+            <span>{{ autoCheckUpdates ? "On" : "Off" }}</span>
           </label>
         </div>
         <div class="settings-row">

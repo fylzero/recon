@@ -34,6 +34,8 @@ const route = useRoute();
 const { formState } = useConnectionForm();
 const {
   load,
+  loaded,
+  autoCheckUpdates,
   error,
   groups,
   standaloneConnections,
@@ -70,6 +72,7 @@ const {
   checkForUpdates,
   installUpdate,
   dismissPrompt,
+  startAutoChecks,
 } = useUpdater();
 
 const {
@@ -86,6 +89,7 @@ const {
 let stopCloseShortcut: (() => void) | undefined;
 let stopOpenSettings: (() => void) | undefined;
 let stopCheckForUpdates: (() => void) | undefined;
+let stopAutoChecks: (() => void) | undefined;
 
 async function closeActiveTabOrWindow() {
   if (closeActiveTab()) {
@@ -144,16 +148,25 @@ onMounted(() => {
   }).then((unlisten) => {
     stopCheckForUpdates = unlisten;
   });
-  if (import.meta.env.PROD) {
-    void checkForUpdates({ prompt: true, silent: true });
-  }
 });
+
+/* Once settings are in, look for a newer release now and every few hours. */
+watch(
+  loaded,
+  (ready) => {
+    if (ready && !stopAutoChecks) {
+      stopAutoChecks = startAutoChecks(() => autoCheckUpdates.value);
+    }
+  },
+  { immediate: true },
+);
 
 onUnmounted(() => {
   window.removeEventListener("keydown", onWindowKeydown, true);
   stopCloseShortcut?.();
   stopOpenSettings?.();
   stopCheckForUpdates?.();
+  stopAutoChecks?.();
 });
 
 watch(() => [route.name, route.params.id, route.params.section], syncRoute);

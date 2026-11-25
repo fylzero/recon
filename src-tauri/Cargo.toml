@@ -1,6 +1,6 @@
 [package]
 name = "Recon"
-version = "1.19.8"
+version = "1.20.0"
 description = "A database client for MySQL, PostgreSQL, SQLite, SQL Server, and Redis"
 authors = ["RazorKode LLC"]
 license = "MIT"

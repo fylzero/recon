@@ -464,6 +464,10 @@ pub struct AppData {
     /// When to use system notifications: "background", "always", or "off".
     #[serde(default = "default_notifications")]
     pub notifications: String,
+    /// Look for a new release at launch and every few hours, and say when one
+    /// is ready to install.
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
     /// Import and restore may show this machine's load and temperature.
     #[serde(default)]
     pub machine_stats: bool,
@@ -496,6 +500,7 @@ impl Default for AppData {
             auto_apply_filters: default_auto_apply_filters(),
             multithreaded_import: true,
             notifications: default_notifications(),
+            auto_check_updates: true,
             machine_stats: false,
             temperature_unit: default_temperature_unit(),
             window: None,
@@ -559,6 +564,7 @@ pub struct PreferencesPatch {
     pub auto_apply_filters: Option<bool>,
     pub multithreaded_import: Option<bool>,
     pub notifications: Option<String>,
+    pub auto_check_updates: Option<bool>,
     pub machine_stats: Option<bool>,
     pub temperature_unit: Option<String>,
 }
@@ -621,6 +627,7 @@ mod tests {
         assert_eq!(parsed.list_font_family, "ui");
         assert_eq!(parsed.list_font_size, 12.5);
         assert_eq!(parsed.notifications, "background");
+        assert!(parsed.auto_check_updates);
         assert_eq!(parsed.theme, "system");
         assert_eq!(sanitize_theme(" light "), "light");
         assert_eq!(sanitize_theme("sepia"), "system");
