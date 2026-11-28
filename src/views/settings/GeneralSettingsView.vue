@@ -119,14 +119,19 @@ function selectValue(event: Event) {
               filters only when you press Apply or {{ shortcut("⌘↵") }}.
             </p>
           </div>
-          <label class="settings-control checkbox-row">
-            <input
-              type="checkbox"
-              :checked="autoApplyFilters"
-              @change="save({ autoApplyFilters: ($event.target as HTMLInputElement).checked })"
-            />
-            <span>{{ autoApplyFilters ? "On" : "Off" }}</span>
-          </label>
+          <button
+            class="history-switch"
+            :class="{ on: autoApplyFilters }"
+            type="button"
+            role="switch"
+            :aria-checked="autoApplyFilters"
+            @click="save({ autoApplyFilters: !autoApplyFilters })"
+          >
+            <span class="history-switch-track" aria-hidden="true">
+              <span class="history-switch-knob" />
+            </span>
+            {{ autoApplyFilters ? "On" : "Off" }}
+          </button>
         </div>
         <div class="settings-row">
           <div class="settings-row-copy">
@@ -136,14 +141,19 @@ function selectValue(event: Event) {
               when one is ready, and Recon asks before installing it.
             </p>
           </div>
-          <label class="settings-control checkbox-row">
-            <input
-              type="checkbox"
-              :checked="autoCheckUpdates"
-              @change="save({ autoCheckUpdates: ($event.target as HTMLInputElement).checked })"
-            />
-            <span>{{ autoCheckUpdates ? "On" : "Off" }}</span>
-          </label>
+          <button
+            class="history-switch"
+            :class="{ on: autoCheckUpdates }"
+            type="button"
+            role="switch"
+            :aria-checked="autoCheckUpdates"
+            @click="save({ autoCheckUpdates: !autoCheckUpdates })"
+          >
+            <span class="history-switch-track" aria-hidden="true">
+              <span class="history-switch-knob" />
+            </span>
+            {{ autoCheckUpdates ? "On" : "Off" }}
+          </button>
         </div>
         <div class="settings-row">
           <div class="settings-row-copy">

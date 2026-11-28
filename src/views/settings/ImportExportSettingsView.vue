@@ -34,14 +34,19 @@ async function save(patch: PreferencesPatch) {
               a dropped connection resumes where it left off.
             </p>
           </div>
-          <label class="settings-control checkbox-row">
-            <input
-              type="checkbox"
-              :checked="multithreadedImport"
-              @change="save({ multithreadedImport: ($event.target as HTMLInputElement).checked })"
-            />
-            <span>{{ multithreadedImport ? "On" : "Off" }}</span>
-          </label>
+          <button
+            class="history-switch"
+            :class="{ on: multithreadedImport }"
+            type="button"
+            role="switch"
+            :aria-checked="multithreadedImport"
+            @click="save({ multithreadedImport: !multithreadedImport })"
+          >
+            <span class="history-switch-track" aria-hidden="true">
+              <span class="history-switch-knob" />
+            </span>
+            {{ multithreadedImport ? "On" : "Off" }}
+          </button>
         </div>
         <div v-if="hasMachineStats" class="settings-row">
           <div class="settings-row-copy">
@@ -51,14 +56,19 @@ async function save(patch: PreferencesPatch) {
               restore runs.
             </p>
           </div>
-          <label class="settings-control checkbox-row">
-            <input
-              type="checkbox"
-              :checked="machineStats"
-              @change="save({ machineStats: ($event.target as HTMLInputElement).checked })"
-            />
-            <span>{{ machineStats ? "On" : "Off" }}</span>
-          </label>
+          <button
+            class="history-switch"
+            :class="{ on: machineStats }"
+            type="button"
+            role="switch"
+            :aria-checked="machineStats"
+            @click="save({ machineStats: !machineStats })"
+          >
+            <span class="history-switch-track" aria-hidden="true">
+              <span class="history-switch-knob" />
+            </span>
+            {{ machineStats ? "On" : "Off" }}
+          </button>
         </div>
         <div v-if="hasMachineStats" class="settings-row">
           <div class="settings-row-copy">
