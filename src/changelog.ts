@@ -6,6 +6,13 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.20.2",
+    date: "November 28, 2026",
+    notes: [
+      "The on/off settings in General and Import & Export are now switches, matching the ones in Window settings.",
+    ],
+  },
+  {
     version: "1.20.1",
     date: "November 25, 2026",
     notes: [
